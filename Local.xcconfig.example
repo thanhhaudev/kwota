@@ -1,0 +1,9 @@
+// Local.xcconfig.example
+//
+// Copy this file to Local.xcconfig (which is gitignored) and fill in
+// your own Apple Developer team ID to enable Developer-ID code signing.
+// Required only if you want the privileged-helper system-cache feature.
+// Leave DEVELOPMENT_TEAM empty for ad-hoc local signing (the rest of
+// the app — token tracking, caffeinate, cache preview — runs fine).
+
+DEVELOPMENT_TEAM =

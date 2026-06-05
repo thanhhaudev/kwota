@@ -1,0 +1,423 @@
+//
+//  UsageMonitor.swift
+//  Kwota
+//
+
+import Foundation
+import Combine
+
+@MainActor
+final class UsageMonitor: ObservableObject {
+    struct Ownership: Equatable {
+        let profileId: UUID
+        let boundary: Date
+    }
+
+    struct DailyCounterState: Codable, Equatable {
+        let profileId: UUID
+        let dayKey: String          // "yyyy-MM-dd" in UTC, matches UsageLedger.dayKey
+        let count: Int
+        /// Generation marker tying this counter to a specific ledger state.
+        /// On restore the counter is discarded unless `ledger.lastUpdate`
+        /// equals the value persisted here. Without this coupling, a
+        /// corrupted/missing ledger would let a stale counter be combined
+        /// with a JSONL replay and double-count today's usage.
+        ///
+        /// Known partial-persist limitation: a crash or counter-write
+        /// failure AFTER `persistLedger` succeeds but BEFORE
+        /// `persistDailyCounterState` lands leaves the on-disk pair with
+        /// a newer ledger and a stale counter. On next launch the restore
+        /// predicate rejects the counter (correct), but the ledger has
+        /// already deduped today's UUIDs so JSONL replay produces no new
+        /// events and the counter sits at 0 until UTC midnight. Accepted:
+        /// `dailyTokens` has no production view consumer today (only the
+        /// debug-tier `dailyTokensDisplay`), the trigger window is the
+        /// microsecond gap between two sequential synchronous writes on
+        /// the same MainActor tick, and the failure self-heals at the
+        /// next day rollover. If a future view starts displaying daily
+        /// totals derived from this counter, switch to atomic single-file
+        /// persistence (combine into UsageLedger with schema bump).
+        let ledgerLastUpdate: Date
+
+        private enum CodingKeys: String, CodingKey {
+            case profileId, dayKey, count, ledgerLastUpdate
+        }
+
+        init(profileId: UUID, dayKey: String, count: Int, ledgerLastUpdate: Date) {
+            self.profileId = profileId
+            self.dayKey = dayKey
+            self.count = count
+            self.ledgerLastUpdate = ledgerLastUpdate
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.profileId = try c.decode(UUID.self, forKey: .profileId)
+            self.dayKey = try c.decode(String.self, forKey: .dayKey)
+            self.count = try c.decode(Int.self, forKey: .count)
+            // Default to distantPast when missing so old-format files are
+            // treated as stale and discarded by the restore predicate. That
+            // forfeits one day's worth of daily-counter accuracy on upgrade,
+            // which is acceptable for a debug-tier value.
+            self.ledgerLastUpdate = try c.decodeIfPresent(Date.self, forKey: .ledgerLastUpdate) ?? .distantPast
+        }
+    }
+
+    var ownership: Ownership? {
+        didSet {
+            guard oldValue?.profileId != ownership?.profileId else { return }
+            sessionSinceLaunch = .zero
+            restoreOrResetDailyCounter()
+            publishFromLedger()
+        }
+    }
+
+    @Published private(set) var sessionTokens: Int = 0
+    @Published private(set) var dailyTokens: Int = 0
+    @Published private(set) var remainingPercent: Int = 100
+    @Published private(set) var lastEvents: [UsageEvent] = []   // latest 20 for debug panel
+    @Published private(set) var lastTickAt: Date?
+
+    /// Optional sink for newly-ingested events. `UsageMonitor` owns deduping
+    /// via `UsageLedger`, so callbacks only see events the ledger considered
+    /// genuinely new on this tick — safe to feed into a downstream historian
+    /// without re-dedup logic. Set after `init`; cleared on `stop()` is the
+    /// caller's responsibility.
+    var onNewEvents: (([UsageEvent]) -> Void)?
+
+    let reader: JSONLogReader   // intentionally non-private: DebugPanelView reads `lastSeenLine()`
+    private let ledgerURL: URL
+    private let dailyCounterURL: URL
+    private let appLaunchInstant: Date
+    private let clock: () -> Date
+    /// v1 jsonl-derived shim only. Hardcoded estimate; does not reflect real plan tier limits (Pro/Max/Team). MenuBarView V2 path computes percent from server-side anthropic-ratelimit-* headers instead.
+    private let legacyDailyQuotaEstimate: Int
+
+    private var ledger: UsageLedger
+    private var sessionSinceLaunch: TokenBreakdown = .zero
+    /// Per-ownership daily counter. Resets when the ownership profile id
+    /// changes or when the UTC day rolls over. Source-of-truth for the
+    /// debug-tier `dailyTokens` publish — the ledger aggregate cannot
+    /// answer "tokens since boundary" precisely once the boundary is
+    /// intra-day, so we maintain this counter alongside.
+    private var dailyBillableSinceOwnership: Int = 0
+    private var dailyCounterDayKey: String?
+    private var timer: Timer?
+    private var listenTask: Task<Void, Never>?
+    /// Serializes `tickAsync` reads (see `tickAsync`). `@MainActor` state, only
+    /// touched on the main actor at the suspension-free head of `tickAsync`.
+    private var isReading = false
+    private var readAgain = false
+
+    /// Yields once per batch of writes under `~/.claude/projects`. Production
+    /// gets a real FSEvents stream via `UsageMonitor.live()`; the default is
+    /// inert so unit tests (which inject a fake reader and drive `tick()`
+    /// directly) never spin up a real watcher on the host's `~/.claude`.
+    private let fileEvents: AsyncStream<Void>
+    /// Backstop poll. FSEvents drives ingestion the instant Claude writes, but
+    /// a slow timer still runs to (a) catch any coalesced/missed event and
+    /// (b) roll the daily counter over at UTC midnight on a quiet day with no
+    /// file writes. 60s, not the old 5s, because the event stream — not the
+    /// timer — is now the primary trigger.
+    private let safetyPollInterval: TimeInterval
+
+    init(
+        reader: JSONLogReader = FilesystemJSONLogReader(),
+        ledgerURL: URL = UsageMonitor.defaultLedgerURL(),
+        dailyCounterURL: URL = UsageMonitor.defaultDailyCounterURL(),
+        appLaunchInstant: Date = Date(),
+        clock: @escaping () -> Date = { Date() },
+        fileEvents: AsyncStream<Void> = AsyncStream { _ in },
+        safetyPollInterval: TimeInterval = 60,
+        legacyDailyQuotaEstimate: Int = 1_000_000
+    ) {
+        self.reader = reader
+        self.ledgerURL = ledgerURL
+        self.dailyCounterURL = dailyCounterURL
+        self.appLaunchInstant = appLaunchInstant
+        self.clock = clock
+        self.fileEvents = fileEvents
+        self.safetyPollInterval = safetyPollInterval
+        self.legacyDailyQuotaEstimate = legacyDailyQuotaEstimate
+        self.ledger = Self.loadLedger(at: ledgerURL)
+        publishFromLedger()
+    }
+
+    /// Production wiring: a real filesystem reader plus an FSEvents stream over
+    /// `~/.claude/projects`, so ingestion is event-driven instead of polled.
+    static func live() -> UsageMonitor {
+        UsageMonitor(fileEvents: UsageMonitor.defaultFileEvents())
+    }
+
+    func start() {
+        stop()
+        // Primary trigger: tick whenever the projects tree changes. FSEvents
+        // can fire many times per second while Claude is actively writing, so
+        // this path uses `tickAsync` to keep the directory walk off the main
+        // thread (a synchronous `read()` here re-enumerated the whole
+        // `~/.claude/projects` tree on main and stalled the UI).
+        listenTask = Task { @MainActor [weak self, fileEvents] in
+            for await _ in fileEvents { await self?.tickAsync() }
+        }
+        // Backstop + daily-counter rollover, see `safetyPollInterval`.
+        let t = Timer(timeInterval: safetyPollInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.tickAsync() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+        // Immediate first read — also off the main thread. This is the
+        // heaviest read of the session (every file is walked from offset 0,
+        // the whole `~/.claude/projects` history), so doing it synchronously
+        // here blocked `MenuBarViewModel.init` and stalled app launch.
+        Task { @MainActor [weak self] in await self?.tickAsync() }
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+        listenTask?.cancel()
+        listenTask = nil
+    }
+
+    deinit {
+        // Timer.invalidate is documented thread-safe; safe from nonisolated deinit.
+        timer?.invalidate()
+        listenTask?.cancel()
+    }
+
+    /// Synchronous read + ingest. Used for the one-time startup read and by
+    /// tests; production change-driven ticks go through `tickAsync`.
+    func tick() {
+        ingest(reader.read())
+    }
+
+    /// Serial background queue for the (synchronous, blocking) `reader.read()`
+    /// walk. A `Task.detached` whose closure has no suspension point runs
+    /// inline on the calling thread — i.e. the main actor — so it does NOT
+    /// move the walk off main; bridging through a real `DispatchQueue`
+    /// guarantees it. The queue's seriality also backstops the `isReading`
+    /// guard against overlapping reads racing on the reader's offsets.
+    /// Per-instance (not static): one monitor's long real-filesystem read must
+    /// never serialize behind/ahead of another's — that coupled unrelated
+    /// instances and starved parallel tests sharing the process.
+    private let readQueue = DispatchQueue(label: "com.thanhhaudev.kwota.usage-read", qos: .utility)
+
+    /// Production tick path: runs the (heavy, frequent) filesystem walk off the
+    /// main thread, then ingests on the main actor. Reads are serialized via
+    /// `isReading` — `read()` mutates the reader's per-file offsets, so two
+    /// concurrent walks would race; a tick that arrives mid-read sets
+    /// `readAgain` so the in-flight read re-runs once to catch the new data.
+    func tickAsync() async {
+        if isReading { readAgain = true; return }
+        isReading = true
+        defer { isReading = false }
+        repeat {
+            readAgain = false
+            let events = await withCheckedContinuation { (cont: CheckedContinuation<[UsageEvent], Never>) in
+                readQueue.async { [reader] in
+                    cont.resume(returning: reader.read())
+                }
+            }
+            ingest(events)
+        } while readAgain
+    }
+
+    private func ingest(_ events: [UsageEvent]) {
+        let now = clock()
+        lastTickAt = now
+
+        let currentDayKey = ledger.dayKey(for: now)
+        if currentDayKey != dailyCounterDayKey {
+            dailyBillableSinceOwnership = 0
+            dailyCounterDayKey = currentDayKey
+        }
+
+        let scoped: [UsageEvent]
+        if let ownership {
+            scoped = events.filter { $0.timestamp >= ownership.boundary }
+        } else {
+            scoped = []
+        }
+        let newEvents = ledger.ingest(events: scoped, now: now)
+        for ev in newEvents where ev.timestamp >= appLaunchInstant {
+            sessionSinceLaunch = sessionSinceLaunch + ev.tokens
+        }
+        for ev in newEvents where ledger.dayKey(for: ev.timestamp) == currentDayKey {
+            dailyBillableSinceOwnership += ev.tokens.billable
+        }
+        ledger.prune(olderThan: 7, now: now)
+        persistLedger()
+        persistDailyCounterState()
+        if !newEvents.isEmpty {
+            lastEvents = (lastEvents + newEvents).suffix(20)
+            onNewEvents?(newEvents)
+        }
+        publishFromLedger()
+    }
+
+    nonisolated static func defaultLedgerURL() -> URL {
+        // Routes through `AppPaths` so the ledger lives next to the rest of
+        // the app's on-disk state under `~/Library/Application Support/
+        // com.thanhhaudev.Kwota/`. Pre-fix builds wrote to `…/Kwota/
+        // ledger.json` (a sibling, bundle-id-mismatched directory); that
+        // file is left orphaned — MVP, single-user dev, ledger rebuilds on
+        // first launch from the JSONL log, no migration code shipped.
+        AppPaths.applicationSupportDirectory.appendingPathComponent("ledger.json")
+    }
+
+    nonisolated static func defaultDailyCounterURL() -> URL {
+        AppPaths.applicationSupportDirectory.appendingPathComponent("usage-monitor-daily.json")
+    }
+
+    /// FSEvents stream over `~/.claude/projects`, file-level. Yields once per
+    /// batch of writes under the tree (0.5s coalescing). Same idiom as
+    /// `CodexActivitySource.defaultFileEvents`. Tests inject a synthetic
+    /// stream instead, so this only runs in the live app.
+    nonisolated static func defaultFileEvents() -> AsyncStream<Void> {
+        AsyncStream { continuation in
+            let dir = FilesystemJSONLogReader.defaultRoot().path
+            guard FileManager.default.fileExists(atPath: dir) else {
+                continuation.finish(); return    // no projects yet → never emits
+            }
+            final class Box { let cont: AsyncStream<Void>.Continuation
+                init(_ c: AsyncStream<Void>.Continuation) { cont = c } }
+            let box = Box(continuation)
+            var ctx = FSEventStreamContext(
+                version: 0,
+                info: Unmanaged.passRetained(box).toOpaque(),
+                retain: nil, release: nil, copyDescription: nil
+            )
+            let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
+                guard let info else { return }
+                Unmanaged<Box>.fromOpaque(info).takeUnretainedValue().cont.yield(())
+            }
+            guard let stream = FSEventStreamCreate(
+                kCFAllocatorDefault, callback, &ctx,
+                [dir] as CFArray,
+                FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+                0.5,   // coalescing latency (s)
+                FSEventStreamCreateFlags(
+                    kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)
+            ) else {
+                Unmanaged<Box>.fromOpaque(ctx.info!).release()
+                continuation.finish(); return
+            }
+            // Wrap the non-Sendable FSEventStreamRef so the @Sendable
+            // onTermination closure is Swift-6 clean.
+            final class StreamHolder: @unchecked Sendable {
+                let stream: FSEventStreamRef
+                let info: UnsafeMutableRawPointer
+                init(_ s: FSEventStreamRef, _ i: UnsafeMutableRawPointer) { stream = s; info = i }
+            }
+            let holder = StreamHolder(stream, ctx.info!)
+            let queue = DispatchQueue(label: "usage-monitor-fsevents")
+            FSEventStreamSetDispatchQueue(stream, queue)
+            FSEventStreamStart(stream)
+            continuation.onTermination = { _ in
+                FSEventStreamStop(holder.stream)
+                FSEventStreamInvalidate(holder.stream)
+                FSEventStreamRelease(holder.stream)
+                Unmanaged<Box>.fromOpaque(holder.info).release()
+            }
+        }
+    }
+
+    private func restoreOrResetDailyCounter() {
+        guard let ownership else {
+            dailyBillableSinceOwnership = 0
+            dailyCounterDayKey = nil
+            return
+        }
+        let currentDayKey = ledger.dayKey(for: clock())
+        if let persisted = loadDailyCounterState(),
+           persisted.profileId == ownership.profileId,
+           persisted.dayKey == currentDayKey,
+           persisted.ledgerLastUpdate == ledger.lastUpdate {
+            dailyBillableSinceOwnership = persisted.count
+            dailyCounterDayKey = persisted.dayKey
+        } else {
+            dailyBillableSinceOwnership = 0
+            dailyCounterDayKey = currentDayKey
+        }
+    }
+
+    private func loadDailyCounterState() -> DailyCounterState? {
+        guard FileManager.default.fileExists(atPath: dailyCounterURL.path) else { return nil }
+        do {
+            let data = try Data(contentsOf: dailyCounterURL)
+            return try JSONDecoder().decode(DailyCounterState.self, from: data)
+        } catch {
+            AppLog.shared.log("UsageMonitor daily-counter load failed: \(error)", level: .warn)
+            return nil
+        }
+    }
+
+    private func persistDailyCounterState() {
+        guard let ownership, let dayKey = dailyCounterDayKey else { return }
+        let state = DailyCounterState(
+            profileId: ownership.profileId,
+            dayKey: dayKey,
+            count: dailyBillableSinceOwnership,
+            ledgerLastUpdate: ledger.lastUpdate
+        )
+        do {
+            try FileManager.default.createDirectory(
+                at: dailyCounterURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try JSONEncoder().encode(state)
+            try data.write(to: dailyCounterURL, options: .atomic)
+        } catch {
+            AppLog.shared.log("UsageMonitor daily-counter persist failed: \(error)", level: .error)
+        }
+    }
+
+    private func publishFromLedger() {
+        sessionTokens = sessionSinceLaunch.billable
+        dailyTokens = dailyBillableSinceOwnership
+        remainingPercent = Self.percent(used: dailyBillableSinceOwnership, quota: legacyDailyQuotaEstimate)
+    }
+
+    private static func percent(used: Int, quota: Int) -> Int {
+        guard quota > 0 else { return 0 }
+        let remaining = max(0.0, 1.0 - Double(used) / Double(quota))
+        return Int((remaining * 100.0).rounded())
+    }
+
+    private static func loadLedger(at url: URL) -> UsageLedger {
+        guard FileManager.default.fileExists(atPath: url.path) else { return UsageLedger() }
+        do {
+            let data = try Data(contentsOf: url)
+            let decoded = try JSONDecoder().decode(UsageLedger.self, from: data)
+            // schemaVersion 1 (or missing) → keys were formatted in the user's
+            // local timezone. Drop the cache so the next ingest from JSONL
+            // rebuilds with UTC keys. seenUUIDs are also dropped, but the
+            // JSONL log is the source of truth and re-ingest will re-derive
+            // the same uuid set within the retention window.
+            if decoded.schemaVersion < 2 {
+                AppLog.shared.log(
+                    "UsageMonitor: ledger schema v\(decoded.schemaVersion) < 2, dropping (will rebuild from JSONL with UTC dayKeys)",
+                    level: .info
+                )
+                return UsageLedger()
+            }
+            return decoded
+        } catch {
+            AppLog.shared.log("UsageMonitor ledger load failed: \(error)", level: .warn)
+            return UsageLedger()
+        }
+    }
+
+    private func persistLedger() {
+        do {
+            try FileManager.default.createDirectory(
+                at: ledgerURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try JSONEncoder().encode(ledger)
+            try data.write(to: ledgerURL, options: .atomic)
+        } catch {
+            AppLog.shared.log("UsageMonitor persist failed: \(error)", level: .error)
+        }
+    }
+}
