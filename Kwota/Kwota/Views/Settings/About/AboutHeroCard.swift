@@ -26,6 +26,8 @@ struct AboutHeroCard: View {
 
     @State private var didCopy = false
 
+    private let githubURL = URL(string: "https://github.com/thanhhaudev/kwota")!
+
     private var shortVersion: String? {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
     }
@@ -48,21 +50,37 @@ struct AboutHeroCard: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
-                Button(action: copyVersion) {
-                    HStack(spacing: 6) {
-                        Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 11, weight: .medium))
-                        Text(didCopy ? "Copied" : versionLabel)
-                            .font(.system(size: 12, weight: .medium))
-                            .monospacedDigit()
+                HStack(spacing: 8) {
+                    Button(action: copyVersion) {
+                        HStack(spacing: 6) {
+                            Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                                .font(.system(size: 11, weight: .medium))
+                            Text(didCopy ? "Copied" : versionLabel)
+                                .font(.system(size: 12, weight: .medium))
+                                .monospacedDigit()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.primary.opacity(0.06)))
+                        .foregroundStyle(.primary)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Capsule().fill(Color.primary.opacity(0.06)))
-                    .foregroundStyle(.primary)
+                    .buttonStyle(.plain)
+                    .help("Copy version + system info")
+
+                    Button(action: openGitHub) {
+                        Image("github-mark")
+                            .resizable()
+                            .renderingMode(.template)
+                            .interpolation(.high)
+                            .scaledToFit()
+                            .frame(width: 14, height: 14)
+                            .padding(7)
+                            .background(Circle().fill(Color.primary.opacity(0.06)))
+                            .foregroundStyle(.primary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open Kwota on GitHub")
                 }
-                .buttonStyle(.plain)
-                .help("Copy version + system info")
             }
 
             Spacer(minLength: 0)
@@ -79,6 +97,12 @@ struct AboutHeroCard: View {
         } else {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .fill(Color.accentColor.opacity(0.2))
+        }
+    }
+
+    private func openGitHub() {
+        if !NSWorkspace.shared.open(githubURL) {
+            AppLog.shared.log("AboutHeroCard: NSWorkspace.open failed for \(githubURL)", level: .warn)
         }
     }
 

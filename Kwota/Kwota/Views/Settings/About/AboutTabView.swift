@@ -19,11 +19,6 @@ struct AboutTabView: View {
                     SectionHeader(title: "System")
                     AboutSystemCard(snapshot: snapshot)
                 }
-
-                VStack(alignment: .leading, spacing: 0) {
-                    SectionHeader(title: "Links")
-                    AboutLinksCard()
-                }
             }
             .padding(.horizontal, 24)
             .padding(.top, 8)
