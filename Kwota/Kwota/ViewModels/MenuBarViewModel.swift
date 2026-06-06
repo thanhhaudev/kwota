@@ -57,6 +57,7 @@ final class MenuBarViewModel {
     private(set) var lastSummaryByProfile: [UUID: ProviderUsageSummary] = [:]
     /// Per-profile notification evaluator. Holds in-memory dedup state.
     let notificationDispatcher = NotificationDispatcher()
+    let notificationSettingsStore = NotificationSettingsStore()
     private(set) var history: [UsageHistoryEntry] = []
     private(set) var lastFetchedAt: Date?
     private(set) var lastError: String?
@@ -1459,6 +1460,7 @@ final class MenuBarViewModel {
                     let latestProfile = profileStore.profiles.first(where: { $0.id == profile.id }) ?? profile
                     let intents = notificationDispatcher.evaluate(
                         profile: latestProfile,
+                        settings: notificationSettingsStore.value,
                         current: summary,
                         previous: previousSummary,
                         now: Date()
@@ -1545,6 +1547,7 @@ final class MenuBarViewModel {
                     let latestProfile = profileStore.profiles.first(where: { $0.id == profile.id }) ?? profile
                     let intents = notificationDispatcher.evaluate(
                         profile: latestProfile,
+                        settings: notificationSettingsStore.value,
                         current: summary,
                         previous: previousSummary,
                         now: Date()
