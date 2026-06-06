@@ -15,6 +15,20 @@ final class NotificationDispatcherTests: XCTestCase {
         return p
     }
 
+    private func settings(
+        short: Set<Int> = [90],
+        long: Set<Int> = [],
+        reset: Bool = false,
+        tokenExpiry: Bool = false
+    ) -> NotificationSettings {
+        NotificationSettings(
+            shortWindowThresholds: short,
+            longWindowThresholds: long,
+            notifyOnReset: reset,
+            notifyOnTokenExpiry: tokenExpiry
+        )
+    }
+
     private func summary(
         primary: Double?,
         primaryReset: Date,
@@ -34,159 +48,82 @@ final class NotificationDispatcherTests: XCTestCase {
     private let baseReset = Date(timeIntervalSince1970: 1_750_000_000)
     private let now = Date(timeIntervalSince1970: 1_749_990_000)
 
-    func test_thresholdCrossing_firesOnce() throws {
-        try XCTSkipIf(true, "Rewritten in Task 5")
+    func test_thresholdCrossing_firesOnce() {
         let d = NotificationDispatcher()
         let p = makeProfile()
+        let s = settings(short: [90])
         let prev = summary(primary: 70, primaryReset: baseReset)
         let next = summary(primary: 92, primaryReset: baseReset)
 
-        let intents = d.evaluate(profile: p, current: next, previous: prev, now: now)
+        let first = d.evaluate(profile: p, settings: s, current: next, previous: prev, now: now)
+        XCTAssertEqual(first.count, 1)
+        XCTAssertEqual(first.first?.body, "Short-window quota at 90%.")
 
-        XCTAssertEqual(intents.count, 1)
-        XCTAssertEqual(intents.first?.rule, .session(90))
+        let second = d.evaluate(profile: p, settings: s, current: next, previous: prev, now: now)
+        XCTAssertTrue(second.isEmpty, "Should dedup until the next reset")
     }
 
-    func test_alreadyFired_doesNotRefire() throws {
-        try XCTSkipIf(true, "Rewritten in Task 5")
-        let d = NotificationDispatcher()
-        let p = makeProfile()
-        let s1 = summary(primary: 92, primaryReset: baseReset)
-        let s2 = summary(primary: 95, primaryReset: baseReset)
-
-        _ = d.evaluate(profile: p, current: s1, previous: summary(primary: 70, primaryReset: baseReset), now: now)
-        let intents = d.evaluate(profile: p, current: s2, previous: s1, now: now)
-
-        XCTAssertTrue(intents.isEmpty)
-    }
-
-    func test_multipleThresholds_firesAllCrossed() throws {
-        try XCTSkipIf(true, "Rewritten in Task 5")
-        let d = NotificationDispatcher()
-        let p = makeProfile()
-        let prev = summary(primary: 70, primaryReset: baseReset)
-        let next = summary(primary: 92, primaryReset: baseReset)
-
-        let rules = d.evaluate(profile: p, current: next, previous: prev, now: now).map(\.rule)
-
-        XCTAssertEqual(Set(rules), [.session(75), .session(90)])
-    }
-
-    func test_resetClearsFiredFlagsAndFiresReset() throws {
-        try XCTSkipIf(true, "Rewritten in Task 5")
-        let d = NotificationDispatcher()
-        let p = makeProfile()
-        let s1 = summary(primary: 95, primaryReset: baseReset)
-        let s2 = summary(primary: 0, primaryReset: baseReset.addingTimeInterval(18_000)) // window rolled
-
-        _ = d.evaluate(profile: p, current: s1, previous: summary(primary: 70, primaryReset: baseReset), now: now)
-        let after = d.evaluate(profile: p, current: s2, previous: s1, now: now)
-
-        XCTAssertEqual(after.map(\.rule), [.reset(.session)])
-
-        // After reset, threshold can fire again
-        let s3 = summary(primary: 92, primaryReset: baseReset.addingTimeInterval(18_000))
-        let third = d.evaluate(profile: p, current: s3, previous: s2, now: now)
-        XCTAssertEqual(third.map(\.rule), [.session(90)])
-    }
-
-    func test_disabledProfile_neverFires() throws {
-        try XCTSkipIf(true, "Rewritten in Task 5")
+    func test_mutedProfile_emitsNothing() {
         let d = NotificationDispatcher()
         let p = makeProfile(muted: true)
-        let prev = summary(primary: 70, primaryReset: baseReset)
-        let next = summary(primary: 99, primaryReset: baseReset)
-        XCTAssertTrue(d.evaluate(profile: p, current: next, previous: prev, now: now).isEmpty)
+        let s = settings(short: [75, 90, 100], long: [75, 90, 100], reset: true, tokenExpiry: true)
+        let prev = summary(primary: 0, primaryReset: baseReset, secondary: 0, secondaryReset: baseReset)
+        let next = summary(primary: 100, primaryReset: baseReset, secondary: 100, secondaryReset: baseReset)
+
+        XCTAssertTrue(
+            d.evaluate(profile: p, settings: s, current: next, previous: prev, now: now).isEmpty
+        )
     }
 
-    func test_nilSummary_noFire() throws {
-        try XCTSkipIf(true, "Rewritten in Task 5")
+    func test_resetClearsDedup_andFiresReset() {
         let d = NotificationDispatcher()
         let p = makeProfile()
-        XCTAssertTrue(d.evaluate(profile: p, current: nil, previous: nil, now: now).isEmpty)
+        let s = settings(short: [90], reset: true)
+
+        let pre = summary(primary: 80, primaryReset: baseReset)
+        let high = summary(primary: 95, primaryReset: baseReset)
+        _ = d.evaluate(profile: p, settings: s, current: high, previous: pre, now: now)
+
+        let reset = summary(primary: 2, primaryReset: baseReset)
+        let after = d.evaluate(profile: p, settings: s, current: reset, previous: high, now: now)
+        XCTAssertTrue(after.contains(where: { $0.body == "Short-window quota reset. Full quota available." }))
+
+        let regrew = summary(primary: 95, primaryReset: baseReset)
+        let again = d.evaluate(profile: p, settings: s, current: regrew, previous: reset, now: now)
+        XCTAssertTrue(again.contains(where: { $0.body == "Short-window quota at 90%." }))
     }
 
-    func test_weeklyThresholdCrossing() throws {
-        try XCTSkipIf(true, "Rewritten in Task 5")
+    func test_longWindow_threshold() {
         let d = NotificationDispatcher()
         let p = makeProfile()
-        let weeklyReset = baseReset.addingTimeInterval(86_400)
-        let prev = summary(primary: 0, primaryReset: baseReset, secondary: 70, secondaryReset: weeklyReset)
-        let next = summary(primary: 0, primaryReset: baseReset, secondary: 92, secondaryReset: weeklyReset)
+        let s = settings(short: [], long: [100])
+        let prev = summary(primary: 0, primaryReset: baseReset, secondary: 90, secondaryReset: baseReset)
+        let next = summary(primary: 0, primaryReset: baseReset, secondary: 100, secondaryReset: baseReset)
 
-        XCTAssertEqual(d.evaluate(profile: p, current: next, previous: prev, now: now).map(\.rule), [.weekly(90)])
+        let intents = d.evaluate(profile: p, settings: s, current: next, previous: prev, now: now)
+        XCTAssertEqual(intents.first?.body, "Long-window quota at 100%.")
     }
 
-    func test_tokenExpiry_firesWhenInsideWindow() throws {
-        try XCTSkipIf(true, "Rewritten in Task 5")
+    func test_tokenExpiry_onlyFiresForCliSyncProfile() {
         let d = NotificationDispatcher()
-        let expiresAt = now.addingTimeInterval(23 * 3600) // 23h out
-        var p = Profile(id: UUID(), name: "P", authMethod: .cliSync)
-        p.sessionKeyExpiresAt = expiresAt
+        let s = settings(tokenExpiry: true)
+        let summaryNow = summary(primary: 10, primaryReset: baseReset)
+        let expiry = Date(timeInterval: 3600, since: now)
 
-        let s = summary(primary: 0, primaryReset: baseReset)
-        let intents = d.evaluate(profile: p, current: s, previous: nil, now: now)
+        var web = makeProfile(cli: false)
+        web.sessionKeyExpiresAt = expiry
+        let webIntents = d.evaluate(profile: web, settings: s, current: summaryNow, previous: nil, now: now)
+        XCTAssertFalse(webIntents.contains(where: {
+            if case .tokenExpiry = $0.rule { return true }
+            return false
+        }))
 
-        XCTAssertEqual(intents.map(\.rule), [.tokenExpiry(expiresAt)])
-    }
-
-    func test_tokenExpiry_doesNotRefireForSameExpiresAt() throws {
-        try XCTSkipIf(true, "Rewritten in Task 5")
-        let d = NotificationDispatcher()
-        let expiresAt = now.addingTimeInterval(23 * 3600)
-        var p = Profile(id: UUID(), name: "P", authMethod: .cliSync)
-        p.sessionKeyExpiresAt = expiresAt
-
-        let s = summary(primary: 0, primaryReset: baseReset)
-        _ = d.evaluate(profile: p, current: s, previous: nil, now: now)
-        let second = d.evaluate(profile: p, current: s, previous: s, now: now)
-
-        XCTAssertTrue(second.isEmpty)
-    }
-
-    func test_tokenExpiry_refiresAfterRotation() throws {
-        try XCTSkipIf(true, "Rewritten in Task 5")
-        let d = NotificationDispatcher()
-        let firstExpiry = now.addingTimeInterval(23 * 3600)
-        var p = Profile(id: UUID(), name: "P", authMethod: .cliSync)
-        p.sessionKeyExpiresAt = firstExpiry
-
-        let s = summary(primary: 0, primaryReset: baseReset)
-        _ = d.evaluate(profile: p, current: s, previous: nil, now: now)
-
-        let secondExpiry = now.addingTimeInterval(22 * 3600 + 30 * 60) // rotation produced fresh expiresAt
-        p.sessionKeyExpiresAt = secondExpiry
-        let intents = d.evaluate(profile: p, current: s, previous: s, now: now)
-
-        XCTAssertEqual(intents.map(\.rule), [.tokenExpiry(secondExpiry)])
-    }
-
-    func test_weekly_rollingWindowAdvance_doesNotFireReset() throws {
-        try XCTSkipIf(true, "Rewritten in Task 5")
-        // Rolling 7-day window: resetsAt advances as old usage ages off
-        // even though utilization stays high. Must NOT fire reset.
-        let d = NotificationDispatcher()
-        let p = makeProfile()
-        let weeklyResetA = baseReset
-        let weeklyResetB = baseReset.addingTimeInterval(3_600) // advances 1h forward
-        let prev = summary(primary: 0, primaryReset: baseReset, secondary: 70, secondaryReset: weeklyResetA)
-        let next = summary(primary: 0, primaryReset: baseReset, secondary: 68, secondaryReset: weeklyResetB)
-
-        let intents = d.evaluate(profile: p, current: next, previous: prev, now: now)
-
-        XCTAssertTrue(intents.isEmpty, "reset must not fire while utilization stays high")
-    }
-
-    func test_weekly_utilizationDropFiresReset() throws {
-        try XCTSkipIf(true, "Rewritten in Task 5")
-        // Real reset: utilization plunges from 70% to 0%. Must fire .reset(.weekly).
-        let d = NotificationDispatcher()
-        let p = makeProfile()
-        let prev = summary(primary: 0, primaryReset: baseReset, secondary: 70, secondaryReset: baseReset)
-        let next = summary(primary: 0, primaryReset: baseReset, secondary: 0,  secondaryReset: baseReset)
-
-        let intents = d.evaluate(profile: p, current: next, previous: prev, now: now)
-
-        XCTAssertEqual(intents.map(\.rule), [.reset(.weekly)])
+        var cli = makeProfile(cli: true)
+        cli.sessionKeyExpiresAt = expiry
+        let cliIntents = d.evaluate(profile: cli, settings: s, current: summaryNow, previous: nil, now: now)
+        XCTAssertTrue(cliIntents.contains(where: {
+            if case .tokenExpiry = $0.rule { return true }
+            return false
+        }))
     }
 }

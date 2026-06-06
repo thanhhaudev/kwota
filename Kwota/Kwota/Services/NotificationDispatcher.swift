@@ -36,31 +36,30 @@ final class NotificationDispatcher {
 
     func evaluate(
         profile: Profile,
+        settings: NotificationSettings,
         current: ProviderUsageSummary?,
         previous: ProviderUsageSummary?,
         now: Date
     ) -> [Intent] {
         guard !profile.notificationsMuted, let current else { return [] }
-        let cfg = (sessionThresholds: Set<Int>(), weeklyThresholds: Set<Int>(), notifyOnReset: false, notifyOnTokenExpiry: false)
 
         var intents: [Intent] = []
         var fired = firedRules[profile.id] ?? []
 
-        // Reset detection (session)
+        // Reset detection (short window)
         if didReset(prevUtil: previous?.primary?.utilization,
                     nextUtil: current.primary?.utilization) {
-            // Clear all session.* fired flags
             fired = fired.filter { rule in
                 if case .session = rule { return false }
                 if case .reset(.session) = rule { return false }
                 return true
             }
-            if cfg.notifyOnReset {
+            if settings.notifyOnReset {
                 intents.append(makeIntent(profile: profile, rule: .reset(.session)))
             }
         }
 
-        // Reset detection (weekly)
+        // Reset detection (long window)
         if didReset(prevUtil: previous?.secondary?.utilization,
                     nextUtil: current.secondary?.utilization) {
             fired = fired.filter { rule in
@@ -68,38 +67,41 @@ final class NotificationDispatcher {
                 if case .reset(.weekly) = rule { return false }
                 return true
             }
-            if cfg.notifyOnReset {
+            if settings.notifyOnReset {
                 intents.append(makeIntent(profile: profile, rule: .reset(.weekly)))
             }
         }
 
-        // Threshold crossings
-        for threshold in cfg.sessionThresholds.sorted() {
+        // Threshold crossings — short window
+        for threshold in settings.shortWindowThresholds.sorted() {
             let rule: RuleID = .session(threshold)
             if !fired.contains(rule),
-               crossed(prev: previous?.primary?.utilization, next: current.primary?.utilization, threshold: threshold) {
+               crossed(prev: previous?.primary?.utilization,
+                       next: current.primary?.utilization,
+                       threshold: threshold) {
                 fired.insert(rule)
                 intents.append(makeIntent(profile: profile, rule: rule))
             }
         }
-        for threshold in cfg.weeklyThresholds.sorted() {
+        // Threshold crossings — long window
+        for threshold in settings.longWindowThresholds.sorted() {
             let rule: RuleID = .weekly(threshold)
             if !fired.contains(rule),
-               crossed(prev: previous?.secondary?.utilization, next: current.secondary?.utilization, threshold: threshold) {
+               crossed(prev: previous?.secondary?.utilization,
+                       next: current.secondary?.utilization,
+                       threshold: threshold) {
                 fired.insert(rule)
                 intents.append(makeIntent(profile: profile, rule: rule))
             }
         }
 
         // Token expiry (CLI only)
-        if cfg.notifyOnTokenExpiry,
+        if settings.notifyOnTokenExpiry,
            profile.authMethod == .cliSync,
            let expiresAt = profile.sessionKeyExpiresAt,
            expiresAt.timeIntervalSince(now) <= 24 * 3600,
            expiresAt > now,
            !fired.contains(.tokenExpiry(expiresAt)) {
-            // Drop any previously-fired tokenExpiry rules with stale dates so the
-            // dedup set doesn't grow unbounded as the token rotates.
             fired = fired.filter {
                 if case .tokenExpiry = $0 { return false }
                 return true
@@ -137,10 +139,10 @@ final class NotificationDispatcher {
 
     private func bodyText(for rule: RuleID, profile: Profile) -> String {
         switch rule {
-        case .session(let pct): return "Session quota at \(pct)%."
-        case .weekly(let pct):  return "Weekly quota at \(pct)%."
-        case .reset(.session):  return "Session quota reset. Full quota available."
-        case .reset(.weekly):   return "Weekly quota reset. Full quota available."
+        case .session(let pct): return "Short-window quota at \(pct)%."
+        case .weekly(let pct):  return "Long-window quota at \(pct)%."
+        case .reset(.session):  return "Short-window quota reset. Full quota available."
+        case .reset(.weekly):   return "Long-window quota reset. Full quota available."
         case .tokenExpiry(let at):
             let hours = max(1, Int(at.timeIntervalSinceNow / 3600))
             return "CLI token expires in \(hours)h. Re-authenticate from Profiles."
