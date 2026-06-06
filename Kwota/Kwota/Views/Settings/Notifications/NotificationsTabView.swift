@@ -8,31 +8,23 @@ import UserNotifications
 
 struct NotificationsTabView: View {
     let vm: MenuBarViewModel
-    @State private var authStatus: UNAuthorizationStatus = .notDetermined
+
+    /// `nil` while the first `.task` is in flight. The banner stays hidden
+    /// during that gap so we don't flash it for an already-authorized user.
+    @State private var authStatus: UNAuthorizationStatus? = nil
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                if authStatus == .denied || authStatus == .notDetermined {
-                    NotificationsPermissionBanner(status: authStatus, vm: vm) {
+                if let status = authStatus,
+                   status == .denied || status == .notDetermined {
+                    NotificationsPermissionBanner(status: status, vm: vm) {
                         await refreshAuthStatus()
                     }
                 }
 
-                if vm.profileStore.profiles.isEmpty {
-                    emptyState
-                } else {
-                    ForEach(vm.profileStore.profiles, id: \.id) { profile in
-                        NotificationsProfileCard(
-                            profile: profile,
-                            isActive: profile.id == vm.profileStore.activeProfileId,
-                            vm: vm,
-                            onAuthChange: {
-                                await refreshAuthStatus()
-                            }
-                        )
-                    }
-                }
+                NotificationsQuotaCard(store: vm.notificationSettingsStore)
+                NotificationsMuteListCard(vm: vm)
             }
             .padding(.horizontal, 20)
             .padding(.top, 8)
@@ -40,22 +32,6 @@ struct NotificationsTabView: View {
             .frame(maxWidth: .infinity, alignment: .top)
         }
         .task { await refreshAuthStatus() }
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "bell.slash")
-                .font(.system(size: 32, weight: .light))
-                .foregroundStyle(.secondary)
-            Text("No profiles yet")
-                .font(.system(size: 14, weight: .medium))
-            Text("Add a profile from the Profiles tab to configure notifications.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 60)
-        .background(Color(.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private func refreshAuthStatus() async {
