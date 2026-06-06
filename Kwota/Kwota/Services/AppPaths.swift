@@ -39,6 +39,10 @@ enum AppPaths {
         applicationSupportDirectory.appendingPathComponent("profiles.json")
     }
 
+    static var notificationSettingsFile: URL {
+        applicationSupportDirectory.appendingPathComponent("notification-settings.json")
+    }
+
     static func profileDirectory(id: UUID) -> URL {
         applicationSupportDirectory
             .appendingPathComponent("profiles", isDirectory: true)
