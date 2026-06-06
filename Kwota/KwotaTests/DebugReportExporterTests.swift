@@ -12,12 +12,8 @@ final class DebugReportExporterTests: XCTestCase {
     private func sampleSnapshot() -> SystemSnapshot {
         SystemSnapshot(
             macOSVersion: "14.5.1",
-            providerCLIs: [
-                SystemSnapshot.ProviderCLI(
-                    providerIDRaw: "claude",
-                    displayName: "Claude",
-                    version: "2.1.133"
-                )
+            installedComponents: [
+                InstalledComponent(id: "claude-cli", label: "Claude Code", version: "2.1.133")
             ]
         )
     }
@@ -57,7 +53,7 @@ final class DebugReportExporterTests: XCTestCase {
         XCTAssertTrue(s.contains("Kwota: 1.0"))
         XCTAssertFalse(s.contains("Kwota: 1.0 ("))
         XCTAssertTrue(s.contains("macOS: 14.5.1"))
-        XCTAssertTrue(s.contains("Claude CLI: 2.1.133"))
+        XCTAssertTrue(s.contains("Claude Code: 2.1.133"))
     }
 
     func test_buildPayload_emptySources_renderNoneSentinels() {

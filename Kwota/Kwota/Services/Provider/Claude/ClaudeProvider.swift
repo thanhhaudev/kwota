@@ -165,14 +165,17 @@ final class ClaudeProvider: AccountProvider {
         AnyView(PlanTextBadge(plan: profile.subscriptionPlan))
     }
 
-    func cliVersion() async -> String? {
-        let probe = ClaudeProbe()
+    func installedComponents() async -> [InstalledComponent] {
+        // Only the `claude` CLI ("Claude Code") shares persistence with
+        // Kwota. `Claude.app` from Anthropic is a separate chat product
+        // and never writes to `~/.claude/projects/*.jsonl`, so it would be
+        // misleading to surface its version on the About card.
         do {
-            let result = try await probe.run()
-            return result.version
+            guard let version = try await ClaudeProbe().run().version else { return [] }
+            return [InstalledComponent(id: "claude-cli", label: "Claude Code", version: version)]
         } catch {
-            AppLog.shared.log("ClaudeProvider.cliVersion probe failed: \(error)", level: .warn)
-            return nil
+            AppLog.shared.log("ClaudeProvider.installedComponents probe failed: \(error)", level: .warn)
+            return []
         }
     }
 

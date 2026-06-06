@@ -202,16 +202,27 @@ final class AntigravityProvider: AccountProvider {
         AnyView(AntigravityPlanBadgeView(profile: profile))
     }
 
-    func cliVersion() async -> String? {
-        // Antigravity ships as a desktop app, not a CLI. Surface the bundled
-        // app's CFBundleShortVersionString so the About row reads the same
-        // way as a CLI tool. NSWorkspace lookup finds it regardless of where
-        // the user installed Antigravity.app.
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.antigravity"),
-              let bundle = Bundle(url: url) else {
-            return nil
+    func installedComponents() async -> [InstalledComponent] {
+        // Antigravity ships both `agy` (CLI) and `Antigravity.app` (IDE).
+        // Both write to `~/.gemini/**/brain/**/transcript.jsonl`, so both
+        // are valid chart signals — list whichever the user has installed.
+        var out: [InstalledComponent] = []
+
+        do {
+            if let v = try await AgyProbe().run().version {
+                out.append(InstalledComponent(id: "agy", label: "Antigravity CLI (agy)", version: v))
+            }
+        } catch {
+            AppLog.shared.log("AntigravityProvider agy probe failed: \(error)", level: .warn)
         }
-        return bundle.infoDictionary?["CFBundleShortVersionString"] as? String
+
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.antigravity"),
+           let bundle = Bundle(url: url),
+           let v = bundle.infoDictionary?["CFBundleShortVersionString"] as? String {
+            out.append(InstalledComponent(id: "antigravity-app", label: "Antigravity.app", version: v))
+        }
+
+        return out
     }
 
     // MARK: - Switcher tooltip + dimming

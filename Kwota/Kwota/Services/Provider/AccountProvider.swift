@@ -106,9 +106,11 @@ protocol AccountProvider: AnyObject {
     /// (e.g. Claude's "Pro" / "Team" pill). Empty view = no badge.
     func planBadgeView(profile: Profile) -> AnyView
 
-    /// Best-effort CLI version probe for the About tab. Default implementation
-    /// returns nil for providers without a CLI.
-    func cliVersion() async -> String?
+    /// Surfaces every installable piece of this provider Kwota can detect on
+    /// disk (CLI binary, desktop app bundle, …) so the About card lists one
+    /// row per component. Return `[]` when nothing relevant is installed; the
+    /// shell skips empty providers entirely.
+    func installedComponents() async -> [InstalledComponent]
 
     /// Plain-text tooltips for the two switcher bars rendered on this
     /// provider's rows. Default impl returns `(nil, nil)` — the switcher
@@ -173,7 +175,7 @@ extension AccountProvider {
         "\(displayName) CLI session expired"
     }
 
-    func cliVersion() async -> String? { nil }
+    func installedComponents() async -> [InstalledComponent] { [] }
 
     func switcherBarTooltips(
         summary: ProviderUsageSummary

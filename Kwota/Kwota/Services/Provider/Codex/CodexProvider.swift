@@ -4,6 +4,7 @@
 //
 
 import SwiftUI
+import AppKit
 
 @MainActor
 final class CodexProvider: AccountProvider {
@@ -226,13 +227,33 @@ final class CodexProvider: AccountProvider {
         AnyView(PlanTextBadge(plan: profile.subscriptionPlan))
     }
 
-    func cliVersion() async -> String? {
+    func installedComponents() async -> [InstalledComponent] {
+        // Codex.app and the `codex` CLI share `~/.codex/sessions/` + auth,
+        // so both are valid signals — surface whichever (or both) the user
+        // has installed.
+        var out: [InstalledComponent] = []
+
         do {
-            return try await CodexProbe().run().version
+            if let v = try await CodexProbe().run().version {
+                out.append(InstalledComponent(id: "codex-cli", label: "Codex CLI", version: v))
+            }
         } catch {
-            AppLog.shared.log("CodexProvider.cliVersion probe failed: \(error)", level: .warn)
+            AppLog.shared.log("CodexProvider codex CLI probe failed: \(error)", level: .warn)
+        }
+
+        if let v = Self.bundleVersion(bundleIdentifier: "com.openai.codex") {
+            out.append(InstalledComponent(id: "codex-app", label: "Codex.app", version: v))
+        }
+
+        return out
+    }
+
+    private static func bundleVersion(bundleIdentifier: String) -> String? {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier),
+              let bundle = Bundle(url: url) else {
             return nil
         }
+        return bundle.infoDictionary?["CFBundleShortVersionString"] as? String
     }
 
     func switcherBarTooltips(

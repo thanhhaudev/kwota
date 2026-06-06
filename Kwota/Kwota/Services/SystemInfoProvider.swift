@@ -5,16 +5,28 @@
 
 import Foundation
 
-struct SystemSnapshot: Equatable {
-    struct ProviderCLI: Equatable, Identifiable {
-        let providerIDRaw: String
-        let displayName: String
-        let version: String?
-        var id: String { providerIDRaw }
-    }
+/// One installed piece of a provider's surface — either a CLI binary or a
+/// desktop app bundle. Providers expose zero or more of these (Codex /
+/// Antigravity ship both a CLI and an app; Claude Code ships only a CLI;
+/// `Claude.app` is a separate Anthropic product Kwota does not track). The
+/// About card renders one row per component so the user can see exactly what
+/// Kwota is reading from.
+struct InstalledComponent: Equatable, Identifiable {
+    /// Stable slug used as `Identifiable.id` — e.g. `"claude-cli"`,
+    /// `"codex-app"`, `"agy"`. Survives a label rename.
+    let id: String
+    /// Human-readable row label — e.g. `"Claude Code"`, `"Codex.app"`,
+    /// `"Antigravity CLI (agy)"`. Shown verbatim on the About card.
+    let label: String
+    /// Version string from the component itself (probe stdout or
+    /// `CFBundleShortVersionString`). The row never substitutes a placeholder
+    /// — a missing component is omitted entirely instead.
+    let version: String
+}
 
+struct SystemSnapshot: Equatable {
     let macOSVersion: String
-    let providerCLIs: [ProviderCLI]
+    let installedComponents: [InstalledComponent]
 }
 
 enum SystemInfoProvider {
@@ -26,35 +38,31 @@ enum SystemInfoProvider {
     static func snapshot(registry: ProviderRegistry) async -> SystemSnapshot {
         let macOS = macOSVersionString(from: ProcessInfo.processInfo.operatingSystemVersion)
 
-        let providers = registry.all.map {
-            (idRaw: $0.id.rawValue, displayName: $0.displayName, ref: $0)
-        }
+        // Preserve registry order so the card always lists providers in the
+        // same sequence (Claude, Codex, Antigravity), with each provider's
+        // components rendered in the order the provider returns them
+        // (CLI first, app second).
+        let providers = registry.all.enumerated().map { ($0.offset, $0.element) }
 
-        let versions: [(String, String, String?)] = await withTaskGroup(
-            of: (Int, String, String, String?).self
+        let collected: [(Int, [InstalledComponent])] = await withTaskGroup(
+            of: (Int, [InstalledComponent]).self
         ) { group in
-            for (index, entry) in providers.enumerated() {
-                let provider = entry.ref
-                let idRaw = entry.idRaw
-                let displayName = entry.displayName
+            for (index, provider) in providers {
                 group.addTask { @MainActor in
-                    let v = await provider.cliVersion()
-                    return (index, idRaw, displayName, v)
+                    (index, await provider.installedComponents())
                 }
             }
-            var collected: [(Int, String, String, String?)] = []
-            for await result in group { collected.append(result) }
-            collected.sort { $0.0 < $1.0 }
-            return collected.map { ($0.1, $0.2, $0.3) }
+            var rows: [(Int, [InstalledComponent])] = []
+            for await result in group { rows.append(result) }
+            rows.sort { $0.0 < $1.0 }
+            return rows
         }
 
-        let clis = versions.map {
-            SystemSnapshot.ProviderCLI(providerIDRaw: $0.0, displayName: $0.1, version: $0.2)
-        }
+        let components = collected.flatMap { $0.1 }
 
         return SystemSnapshot(
             macOSVersion: macOS,
-            providerCLIs: clis
+            installedComponents: components
         )
     }
 }

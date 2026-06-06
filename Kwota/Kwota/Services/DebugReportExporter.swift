@@ -86,8 +86,8 @@ final class DebugReportExporter {
         }
         if let snap = snapshot {
             systemLines.append("macOS: \(snap.macOSVersion)")
-            for cli in snap.providerCLIs {
-                systemLines.append("\(cli.displayName) CLI: \(cli.version ?? "Not installed")")
+            for component in snap.installedComponents {
+                systemLines.append("\(component.label): \(component.version)")
             }
         }
         if systemLines.isEmpty {
