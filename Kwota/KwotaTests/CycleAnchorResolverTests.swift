@@ -208,6 +208,55 @@ final class CycleAnchorResolverTests: XCTestCase {
         XCTAssertFalse(anchor.isHeuristic)
     }
 
+    func testStrictDropInsideGraceWindow_doesNotOverride() {
+        // Real-world bug: Mac asleep / app closed during the cycle's
+        // normal reset. First post-wake poll lands a few hours after
+        // `resets_at - 7d` and records the drop there, so the strict
+        // override would falsely fire and stamp the footer with
+        // "calibrating" even though the API anchor is correct. The 24h
+        // grace window absorbs this: a drop landing 3.5h after the API
+        // anchor describes the same reset event.
+        let now = date(1_000_000)
+        let resetsAt = now.addingTimeInterval(7 * 86_400 - 3 * 3600)
+        let apiAnchor = resetsAt.addingTimeInterval(-7 * 86_400)
+        let dropAt = apiAnchor.addingTimeInterval(3.5 * 3600)
+        let history: [UsageHistoryEntry] = [
+            UsageHistoryEntry(id: UUID(), at: apiAnchor.addingTimeInterval(-2 * 86_400), fiveHour: nil, sevenDay: 86),
+            UsageHistoryEntry(id: UUID(), at: dropAt, fiveHour: nil, sevenDay: 2),
+        ]
+        let anchor = UsageTrendChart.resolveCycleStart(
+            snapshot: snapshot(resetsAt: resetsAt),
+            history: history,
+            now: now
+        )
+        XCTAssertEqual(anchor.cycleStart, apiAnchor,
+                       "drop inside the 24h grace describes the same reset as the API anchor — trust the API value")
+        XCTAssertFalse(anchor.isHeuristic, "API-anchored cycle must not surface 'calibrating'")
+        XCTAssertTrue(anchor.useAvgLine)
+    }
+
+    func testStrictDropJustOutsideGraceWindow_overrides() {
+        // Drop landing 25h after the API anchor is too far from the
+        // reset moment to be polling lag — treat it as a real mid-cycle
+        // recalibration and let the override fire.
+        let now = date(1_000_000)
+        let resetsAt = now.addingTimeInterval(7 * 86_400 - 26 * 3600)
+        let apiAnchor = resetsAt.addingTimeInterval(-7 * 86_400)
+        let dropAt = apiAnchor.addingTimeInterval(25 * 3600)
+        let history: [UsageHistoryEntry] = [
+            UsageHistoryEntry(id: UUID(), at: apiAnchor.addingTimeInterval(-2 * 86_400), fiveHour: nil, sevenDay: 80),
+            UsageHistoryEntry(id: UUID(), at: dropAt, fiveHour: nil, sevenDay: 4),
+        ]
+        let anchor = UsageTrendChart.resolveCycleStart(
+            snapshot: snapshot(resetsAt: resetsAt),
+            history: history,
+            now: now
+        )
+        XCTAssertEqual(anchor.cycleStart, dropAt)
+        XCTAssertTrue(anchor.isHeuristic)
+        XCTAssertTrue(anchor.useAvgLine)
+    }
+
     func testStrictDropWithoutResetsAt_fallsThroughToLooseHeuristic() {
         // When resets_at is nil entirely, the new strict branch can't
         // fire (it requires the API anchor to compare against). The

@@ -233,13 +233,23 @@ struct UsageTrendChart {
         // then claims a cycle that started 7 days before resets_at, but
         // Kwota's own history shows utilization clearly fell off a cliff
         // somewhere in between. When that drop is unambiguous AND lands
-        // later than the API anchor, anchor the chart on the drop —
-        // matching what the user actually sees in the bars. Strict
-        // threshold (prev > 40%, current < 10%) keeps false positives
-        // low; smaller wobbles still fall through to the API anchor.
+        // meaningfully later than the API anchor, anchor the chart on
+        // the drop — matching what the user actually sees in the bars.
+        // Strict threshold (prev > 40%, current < 10%) keeps false
+        // positives low; smaller wobbles still fall through to the API
+        // anchor.
+        //
+        // The 24h grace window absorbs polling lag: if Kwota was idle
+        // (Mac asleep, app closed) when the cycle's normal reset fired,
+        // the next post-wake sample lands hours after `resets_at - 7d`
+        // but describes the same event — without the grace, the override
+        // fires on every normal reset and the footer reads "calibrating"
+        // until the drop sample ages out. Real mid-cycle recalibrations
+        // land days into the cycle, well past the grace window.
+        let strictDropGrace: TimeInterval = 24 * 3600
         if let resetsAt,
            let strictDrop = Self.latestStrictResetStart(in: history),
-           strictDrop > resetsAt.addingTimeInterval(-sevenDays) {
+           strictDrop > resetsAt.addingTimeInterval(-sevenDays + strictDropGrace) {
             return CycleAnchor(cycleStart: strictDrop, isHeuristic: true, useAvgLine: true)
         }
         if let resetsAt, resetsAt <= now.addingTimeInterval(sevenDays) {
