@@ -305,6 +305,52 @@ final class CodexProviderTests: XCTestCase {
         }
     }
 
+    // MARK: - switcherBarDimming
+
+    private func summary(planType: String?) -> ProviderUsageSummary {
+        ProviderUsageSummary(
+            providerID: .codex,
+            fetchedAt: Date(),
+            primary: UsageBucket(utilization: 30, resetsAt: nil),
+            secondary: UsageBucket(utilization: 50, resetsAt: nil),
+            payload: CodexUsageSnapshot(planType: planType, fetchedAt: Date()),
+            retryAfter: nil
+        )
+    }
+
+    func test_switcherBarDimming_freePlan_dimsSecondaryOnly() {
+        let provider = makeProvider(
+            apiClient: CodexAPIClient(transport: { _ in throw URLError(.unknown) }),
+            readerStub: StubCodexAuthReader(token: "acc")
+        )
+        let dim = provider.switcherBarDimming(summary: summary(planType: "free"))
+        XCTAssertFalse(dim.primary, "5-hour primary stays live on free")
+        XCTAssertTrue(dim.secondary, "weekly secondary not meaningful on free → dim")
+    }
+
+    func test_switcherBarDimming_paidPlan_dimsNothing() {
+        let provider = makeProvider(
+            apiClient: CodexAPIClient(transport: { _ in throw URLError(.unknown) }),
+            readerStub: StubCodexAuthReader(token: "acc")
+        )
+        let dim = provider.switcherBarDimming(summary: summary(planType: "plus"))
+        XCTAssertFalse(dim.primary)
+        XCTAssertFalse(dim.secondary)
+    }
+
+    func test_switcherBarDimming_unknownPlan_treatedAsPaid() {
+        // planType nil (older snapshots, schema drift) must not regress
+        // paid users to a dimmed weekly bar — only an explicit "free"
+        // string opts into the dim.
+        let provider = makeProvider(
+            apiClient: CodexAPIClient(transport: { _ in throw URLError(.unknown) }),
+            readerStub: StubCodexAuthReader(token: "acc")
+        )
+        let dim = provider.switcherBarDimming(summary: summary(planType: nil))
+        XCTAssertFalse(dim.primary)
+        XCTAssertFalse(dim.secondary)
+    }
+
     func test_refreshProfileMetadata_fetchUsage401_throwsUnauthorized() async throws {
         let profile = makeProfile()
         try profileStore.add(profile)

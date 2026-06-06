@@ -239,4 +239,19 @@ final class CodexProvider: AccountProvider {
             ClaudeProvider.bucketTooltip(label: "Weekly limit", bucket: summary.secondary)
         )
     }
+
+    func switcherBarDimming(
+        summary: ProviderUsageSummary
+    ) -> (primary: Bool, secondary: Bool) {
+        // Free-plan rows still get a live 5-hour primary, so leave that bar
+        // colored. The weekly secondary isn't meaningful on free — surface
+        // it as "data present but inactive" (grey gradient) to match the
+        // popover which hides the Weekly section entirely. Same dimming
+        // semantic Antigravity uses for AI Credits with overages off.
+        guard let snap = summary.payload as? CodexUsageSnapshot,
+              (snap.planType ?? "").lowercased() == "free" else {
+            return (false, false)
+        }
+        return (primary: false, secondary: true)
+    }
 }

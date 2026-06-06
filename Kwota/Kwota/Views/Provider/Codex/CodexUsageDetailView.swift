@@ -7,6 +7,12 @@
 //  profile header card, status banner, refresh button — those live in the
 //  shell.
 //
+//  Free-plan handling: Codex's free tier still consumes the 5-hour primary
+//  window but does not expose a meaningful weekly secondary, so the Session
+//  card stays usable while the Weekly section is omitted entirely (header
+//  included). Diverges from Claude, which locks both cards behind a
+//  "Not available on Free plan" overlay.
+//
 
 import SwiftUI
 
@@ -30,17 +36,17 @@ struct CodexUsageDetailView: View {
             VStack(alignment: .leading, spacing: 0) {
                 SectionHeader(title: "Current Session")
                 charts.card(for: .session)
-                    .overlay { if isFreePlan { freeOverlay } }
             }
 
-            VStack(alignment: .leading, spacing: 0) {
-                SectionHeader(title: "Weekly Limit")
-                charts.weeklyCard {
-                    if hasPerCategoryData {
-                        CodexPerCategoryCard(codeReviewWeekly: snapshot.codeReviewRateLimit)
+            if !isFreePlan {
+                VStack(alignment: .leading, spacing: 0) {
+                    SectionHeader(title: "Weekly Limit")
+                    charts.weeklyCard {
+                        if hasPerCategoryData {
+                            CodexPerCategoryCard(codeReviewWeekly: snapshot.codeReviewRateLimit)
+                        }
                     }
                 }
-                .overlay { if isFreePlan { freeOverlay } }
             }
 
             if let credits = snapshot.credits, credits.hasCredits == true {
@@ -81,29 +87,6 @@ struct CodexUsageDetailView: View {
             } else {
                 Text("—").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
-        }
-    }
-
-    private var freeOverlay: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(.regularMaterial)
-            VStack(spacing: 4) {
-                HStack(spacing: 6) {
-                    Image(systemName: "lock.fill")
-                        .font(.caption)
-                        .accessibilityHidden(true)
-                    Text("Not available on Free plan")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                }
-                .foregroundStyle(.primary)
-                if let url = URL(string: "https://chatgpt.com/codex/settings/usage") {
-                    Link("Upgrade", destination: url).font(.caption2)
-                }
-            }
-            .multilineTextAlignment(.center)
-            .padding(8)
         }
     }
 }
