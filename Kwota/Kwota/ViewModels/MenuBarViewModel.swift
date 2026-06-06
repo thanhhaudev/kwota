@@ -1321,6 +1321,20 @@ final class MenuBarViewModel {
         return UsageHistoryStore(historyFile: AppPaths.usageHistoryFile(id: profile.id))
     }
 
+    /// Liveness gate for notifications. A profile is "live" when its
+    /// provider's signal — CLI session email match for Claude/Codex,
+    /// running app for Antigravity — agrees with this profile. Matches
+    /// the popover switcher's badge so Settings ▸ Notifications shows
+    /// the same set of accounts that can actually trigger an alert.
+    private func profileIsLive(_ profile: Profile) -> Bool {
+        ProfileSwitcherCard.isLive(
+            profile: profile,
+            claudeCLIEmail: cliAccountWatcher.current?.email,
+            codexCLIEmail: codexAccountWatcher.current?.email,
+            antigravityProcessAlive: antigravityProcessWatcher.current != nil
+        )
+    }
+
     private func refresh(profile: Profile) async {
         let historyStore = historyStoreForRefresh(profile: profile)
         let generation = refreshGeneration
@@ -1458,15 +1472,17 @@ final class MenuBarViewModel {
                     // Re-read profile in case a concurrent edit (notifications toggle,
                     // org-id backfill) updated it during the await above.
                     let latestProfile = profileStore.profiles.first(where: { $0.id == profile.id }) ?? profile
-                    let intents = notificationDispatcher.evaluate(
-                        profile: latestProfile,
-                        settings: notificationSettingsStore.value,
-                        current: summary,
-                        previous: previousSummary,
-                        now: Date()
-                    )
-                    if !intents.isEmpty {
-                        Task { await notificationDispatcher.dispatch(intents) }
+                    if profileIsLive(latestProfile) {
+                        let intents = notificationDispatcher.evaluate(
+                            profile: latestProfile,
+                            settings: notificationSettingsStore.value,
+                            current: summary,
+                            previous: previousSummary,
+                            now: Date()
+                        )
+                        if !intents.isEmpty {
+                            Task { await notificationDispatcher.dispatch(intents) }
+                        }
                     }
                 } else if canCommitToUI() {
                     authState = .authenticated
@@ -1545,15 +1561,17 @@ final class MenuBarViewModel {
                     }
 
                     let latestProfile = profileStore.profiles.first(where: { $0.id == profile.id }) ?? profile
-                    let intents = notificationDispatcher.evaluate(
-                        profile: latestProfile,
-                        settings: notificationSettingsStore.value,
-                        current: summary,
-                        previous: previousSummary,
-                        now: Date()
-                    )
-                    if !intents.isEmpty {
-                        Task { await notificationDispatcher.dispatch(intents) }
+                    if profileIsLive(latestProfile) {
+                        let intents = notificationDispatcher.evaluate(
+                            profile: latestProfile,
+                            settings: notificationSettingsStore.value,
+                            current: summary,
+                            previous: previousSummary,
+                            now: Date()
+                        )
+                        if !intents.isEmpty {
+                            Task { await notificationDispatcher.dispatch(intents) }
+                        }
                     }
                 }
             }

@@ -9,25 +9,27 @@ struct NotificationsMuteListCard: View {
     let vm: MenuBarViewModel
 
     var body: some View {
+        let liveProfiles = vm.profileStore.profiles.filter(isLive(_:))
+
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Per-account muting")
                     .font(.system(size: 13, weight: .semibold))
-                Text("Only the active account triggers notifications. Muting an account keeps it silent even when it becomes active.")
+                Text("Only live accounts (signed-in CLI or running app) fire notifications. Mute settings for offline accounts are preserved and apply when they come back online.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
 
-            if vm.profileStore.profiles.isEmpty {
-                Text("Add a profile from the Profiles tab to manage muting.")
+            if liveProfiles.isEmpty {
+                Text("No live accounts right now. Sign in to a provider's CLI or launch its app to manage notifications.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 12)
             } else {
-                ForEach(vm.profileStore.profiles, id: \.id) { profile in
+                ForEach(liveProfiles, id: \.id) { profile in
                     row(for: profile)
-                    if profile.id != vm.profileStore.profiles.last?.id {
+                    if profile.id != liveProfiles.last?.id {
                         Divider()
                     }
                 }
@@ -36,16 +38,19 @@ struct NotificationsMuteListCard: View {
         .settingsCard()
     }
 
-    @ViewBuilder
-    private func row(for profile: Profile) -> some View {
-        let muted = profile.notificationsMuted
-        let isDefault = profile.id == vm.profileStore.activeProfileId
-        let isLive = ProfileSwitcherCard.isLive(
+    private func isLive(_ profile: Profile) -> Bool {
+        ProfileSwitcherCard.isLive(
             profile: profile,
             claudeCLIEmail: vm.cliAccountWatcher.current?.email,
             codexCLIEmail: vm.codexAccountWatcher.current?.email,
             antigravityProcessAlive: vm.antigravityProcessWatcher.current != nil
         )
+    }
+
+    @ViewBuilder
+    private func row(for profile: Profile) -> some View {
+        let muted = profile.notificationsMuted
+        let isDefault = profile.id == vm.profileStore.activeProfileId
 
         HStack(alignment: .center, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
@@ -53,9 +58,6 @@ struct NotificationsMuteListCard: View {
                     Text(profile.resolvedDisplayName)
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(muted ? .secondary : .primary)
-                    if isLive {
-                        chip(label: "Live", color: .green)
-                    }
                     if isDefault {
                         chip(label: "Default", color: .accentColor)
                     }
