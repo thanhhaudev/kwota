@@ -35,7 +35,7 @@ struct Profile: Codable, Identifiable, Equatable {
     var subscriptionRenewsAt: Date?
     var email: String?
     var sessionKeyExpiresAt: Date?
-    var notifications: NotificationConfig?
+    var notificationsMuted: Bool = false
     var kind: ProfileKind = .auto
     var ownershipBoundary: Date?
 
@@ -104,7 +104,7 @@ struct Profile: Codable, Identifiable, Equatable {
         subscriptionRenewsAt: Date? = nil,
         email: String? = nil,
         sessionKeyExpiresAt: Date? = nil,
-        notifications: NotificationConfig? = nil,
+        notificationsMuted: Bool = false,
         kind: ProfileKind = .auto,
         ownershipBoundary: Date? = nil,
         accountUuid: String? = nil,
@@ -132,7 +132,7 @@ struct Profile: Codable, Identifiable, Equatable {
         self.subscriptionRenewsAt = subscriptionRenewsAt.map(Profile.normalize)
         self.email = email
         self.sessionKeyExpiresAt = sessionKeyExpiresAt.map(Profile.normalize)
-        self.notifications = notifications
+        self.notificationsMuted = notificationsMuted
         self.kind = kind
         self.ownershipBoundary = ownershipBoundary.map(Profile.normalize)
         self.accountUuid = accountUuid
@@ -151,7 +151,9 @@ struct Profile: Codable, Identifiable, Equatable {
         case id, name, providerID, authMethod, organizationId, createdAt,
              lastFetchedAt, lastSnapshot, lastSessionPercentage,
              subscriptionPlan, subscriptionCreatedAt, subscriptionRenewsAt,
-             email, sessionKeyExpiresAt, notifications,
+             email, sessionKeyExpiresAt,
+             notificationsMuted,
+             notifications,   // legacy decode only — never re-encoded
              kind, ownershipBoundary,
              accountUuid, displayName, accountCreatedAt,
              organizationName, subscriptionStatus, billingType,
@@ -159,8 +161,22 @@ struct Profile: Codable, Identifiable, Equatable {
              lastCreditWallet, lastCreditCeiling
     }
 
+    /// Decoded only to migrate `notifications.enabled == false` → mute.
+    /// Not re-encoded; the legacy `notifications` key disappears on the
+    /// next `profileStore.save()`.
+    private struct LegacyNotificationConfig: Decodable {
+        let enabled: Bool?
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+
+        let legacy = try c.decodeIfPresent(
+            LegacyNotificationConfig.self, forKey: .notifications)
+        let mutedFromLegacy = (legacy?.enabled == false)
+        let muted = try c.decodeIfPresent(Bool.self, forKey: .notificationsMuted)
+            ?? mutedFromLegacy
+
         self.init(
             id: try c.decode(UUID.self, forKey: .id),
             name: try c.decode(String.self, forKey: .name),
@@ -176,7 +192,7 @@ struct Profile: Codable, Identifiable, Equatable {
             subscriptionRenewsAt: try c.decodeIfPresent(Date.self, forKey: .subscriptionRenewsAt),
             email: try c.decodeIfPresent(String.self, forKey: .email),
             sessionKeyExpiresAt: try c.decodeIfPresent(Date.self, forKey: .sessionKeyExpiresAt),
-            notifications: try c.decodeIfPresent(NotificationConfig.self, forKey: .notifications),
+            notificationsMuted: muted,
             kind: try c.decodeIfPresent(ProfileKind.self, forKey: .kind) ?? .auto,
             ownershipBoundary: try c.decodeIfPresent(Date.self, forKey: .ownershipBoundary)
                 .map(Profile.normalize),
@@ -191,6 +207,37 @@ struct Profile: Codable, Identifiable, Equatable {
             lastCreditWallet: try c.decodeIfPresent(Int64.self, forKey: .lastCreditWallet),
             lastCreditCeiling: try c.decodeIfPresent(Int64.self, forKey: .lastCreditCeiling)
         )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(providerID, forKey: .providerID)
+        try c.encode(authMethod, forKey: .authMethod)
+        try c.encodeIfPresent(organizationId, forKey: .organizationId)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encodeIfPresent(lastFetchedAt, forKey: .lastFetchedAt)
+        try c.encodeIfPresent(lastSnapshot, forKey: .lastSnapshot)
+        try c.encodeIfPresent(lastSessionPercentage, forKey: .lastSessionPercentage)
+        try c.encodeIfPresent(subscriptionPlan, forKey: .subscriptionPlan)
+        try c.encodeIfPresent(subscriptionCreatedAt, forKey: .subscriptionCreatedAt)
+        try c.encodeIfPresent(subscriptionRenewsAt, forKey: .subscriptionRenewsAt)
+        try c.encodeIfPresent(email, forKey: .email)
+        try c.encodeIfPresent(sessionKeyExpiresAt, forKey: .sessionKeyExpiresAt)
+        try c.encode(notificationsMuted, forKey: .notificationsMuted)
+        try c.encode(kind, forKey: .kind)
+        try c.encodeIfPresent(ownershipBoundary, forKey: .ownershipBoundary)
+        try c.encodeIfPresent(accountUuid, forKey: .accountUuid)
+        try c.encodeIfPresent(displayName, forKey: .displayName)
+        try c.encodeIfPresent(accountCreatedAt, forKey: .accountCreatedAt)
+        try c.encodeIfPresent(organizationName, forKey: .organizationName)
+        try c.encodeIfPresent(subscriptionStatus, forKey: .subscriptionStatus)
+        try c.encodeIfPresent(billingType, forKey: .billingType)
+        try c.encodeIfPresent(hasExtraUsageEnabled, forKey: .hasExtraUsageEnabled)
+        try c.encodeIfPresent(observedCreditResetAt, forKey: .observedCreditResetAt)
+        try c.encodeIfPresent(lastCreditWallet, forKey: .lastCreditWallet)
+        try c.encodeIfPresent(lastCreditCeiling, forKey: .lastCreditCeiling)
     }
 
     /// Normalize dates to whole-second precision so JSON round-trip via

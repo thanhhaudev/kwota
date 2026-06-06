@@ -19,7 +19,7 @@ final class ProfileNotificationDecodingTests: XCTestCase {
         return e
     }
 
-    func test_legacyProfileWithoutNotifications_decodesAsNil() throws {
+    func test_legacyProfileWithoutNotifications_decodesAsNotMuted() throws {
         let legacy = """
         {
           "id": "11111111-2222-3333-4444-555555555555",
@@ -29,20 +29,54 @@ final class ProfileNotificationDecodingTests: XCTestCase {
         }
         """
         let p = try decoder().decode(Profile.self, from: Data(legacy.utf8))
-        XCTAssertNil(p.notifications)
+        XCTAssertFalse(p.notificationsMuted)
     }
 
-    func test_profileWithNotifications_roundTrips() throws {
+    func test_legacyDisabledNotifications_migratesToMuted() throws {
+        let legacy = """
+        {
+          "id": "11111111-2222-3333-4444-555555555555",
+          "name": "Sandbox",
+          "authMethod": "cliSync",
+          "createdAt": 1700000000,
+          "notifications": {
+            "enabled": false,
+            "sessionThresholds": [100],
+            "weeklyThresholds": [100],
+            "notifyOnReset": false,
+            "notifyOnTokenExpiry": true
+          }
+        }
+        """
+        let p = try decoder().decode(Profile.self, from: Data(legacy.utf8))
+        XCTAssertTrue(p.notificationsMuted)
+    }
+
+    func test_legacyEnabledNotifications_doesNotMute() throws {
+        let legacy = """
+        {
+          "id": "11111111-2222-3333-4444-555555555555",
+          "name": "Live",
+          "authMethod": "cliSync",
+          "createdAt": 1700000000,
+          "notifications": {
+            "enabled": true,
+            "sessionThresholds": [100],
+            "weeklyThresholds": [100],
+            "notifyOnReset": false,
+            "notifyOnTokenExpiry": true
+          }
+        }
+        """
+        let p = try decoder().decode(Profile.self, from: Data(legacy.utf8))
+        XCTAssertFalse(p.notificationsMuted)
+    }
+
+    func test_mutedRoundTrip() throws {
         var p = Profile(id: UUID(), name: "T", authMethod: .cliSync)
-        p.notifications = NotificationConfig(
-            enabled: true,
-            sessionThresholds: [90, 100],
-            weeklyThresholds: [100],
-            notifyOnReset: true,
-            notifyOnTokenExpiry: true
-        )
+        p.notificationsMuted = true
         let data = try encoder().encode(p)
         let decoded = try decoder().decode(Profile.self, from: data)
-        XCTAssertEqual(decoded.notifications, p.notifications)
+        XCTAssertEqual(decoded.notificationsMuted, true)
     }
 }

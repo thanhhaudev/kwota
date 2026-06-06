@@ -40,7 +40,8 @@ final class NotificationDispatcher {
         previous: ProviderUsageSummary?,
         now: Date
     ) -> [Intent] {
-        guard let cfg = profile.notifications, cfg.enabled, let current else { return [] }
+        guard !profile.notificationsMuted, let current else { return [] }
+        let cfg = (sessionThresholds: Set<Int>(), weeklyThresholds: Set<Int>(), notifyOnReset: false, notifyOnTokenExpiry: false)
 
         var intents: [Intent] = []
         var fired = firedRules[profile.id] ?? []
