@@ -39,24 +39,28 @@ struct NotificationsMuteListCard: View {
     @ViewBuilder
     private func row(for profile: Profile) -> some View {
         let muted = profile.notificationsMuted
-        let isActive = profile.id == vm.profileStore.activeProfileId
+        let isDefault = profile.id == vm.profileStore.activeProfileId
+        let isLive = ProfileSwitcherCard.isLive(
+            profile: profile,
+            claudeCLIEmail: vm.cliAccountWatcher.current?.email,
+            codexCLIEmail: vm.codexAccountWatcher.current?.email,
+            antigravityProcessAlive: vm.antigravityProcessWatcher.current != nil
+        )
 
         HStack(alignment: .center, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     Text(profile.resolvedDisplayName)
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(muted ? .secondary : .primary)
-                    if isActive {
-                        Text("Default")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.accentColor, in: Capsule())
+                    if isLive {
+                        chip(label: "Live", color: .green)
+                    }
+                    if isDefault {
+                        chip(label: "Default", color: .accentColor)
                     }
                 }
-                Text(authCaption(for: profile))
+                Text(metadataCaption(for: profile))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -76,7 +80,23 @@ struct NotificationsMuteListCard: View {
         .padding(.vertical, 4)
     }
 
-    private func authCaption(for profile: Profile) -> String {
+    @ViewBuilder
+    private func chip(label: String, color: Color) -> some View {
+        Text(label)
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(color, in: Capsule())
+    }
+
+    private func metadataCaption(for profile: Profile) -> String {
+        let provider = vm.registry.provider(for: profile.providerID)?.displayName
+            ?? profile.providerID.rawValue.capitalized
+        return "\(provider) · \(authLabel(for: profile))"
+    }
+
+    private func authLabel(for profile: Profile) -> String {
         switch profile.authMethod {
         case .cliSync:    return "CLI session"
         case .sessionKey: return "Browser session"
