@@ -11,6 +11,7 @@
 //
 
 import SwiftUI
+import AppKit
 
 @MainActor
 final class AntigravityProvider: AccountProvider {
@@ -201,7 +202,17 @@ final class AntigravityProvider: AccountProvider {
         AnyView(AntigravityPlanBadgeView(profile: profile))
     }
 
-    func cliVersion() async -> String? { nil }
+    func cliVersion() async -> String? {
+        // Antigravity ships as a desktop app, not a CLI. Surface the bundled
+        // app's CFBundleShortVersionString so the About row reads the same
+        // way as a CLI tool. NSWorkspace lookup finds it regardless of where
+        // the user installed Antigravity.app.
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.antigravity"),
+              let bundle = Bundle(url: url) else {
+            return nil
+        }
+        return bundle.infoDictionary?["CFBundleShortVersionString"] as? String
+    }
 
     // MARK: - Switcher tooltip + dimming
 

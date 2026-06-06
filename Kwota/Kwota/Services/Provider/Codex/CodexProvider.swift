@@ -227,8 +227,12 @@ final class CodexProvider: AccountProvider {
     }
 
     func cliVersion() async -> String? {
-        // Optional — wire to `codex --version` shell-out later.
-        nil
+        do {
+            return try await CodexProbe().run().version
+        } catch {
+            AppLog.shared.log("CodexProvider.cliVersion probe failed: \(error)", level: .warn)
+            return nil
+        }
     }
 
     func switcherBarTooltips(
