@@ -104,6 +104,35 @@ final class NotificationDispatcherTests: XCTestCase {
         XCTAssertEqual(intents.first?.body, "Long-window quota at 100%.")
     }
 
+    func test_antigravityProfile_usesProviderSpecificBodyText() {
+        let d = NotificationDispatcher()
+        var p = makeProfile()
+        p.providerID = .antigravity
+        let s = settings(short: [90], long: [100], reset: true)
+
+        // Threshold cross — short window
+        let preShort = summary(primary: 70, primaryReset: baseReset, secondary: 0, secondaryReset: baseReset)
+        let crossShort = summary(primary: 95, primaryReset: baseReset, secondary: 0, secondaryReset: baseReset)
+        let shortIntents = d.evaluate(profile: p, settings: s, current: crossShort, previous: preShort, now: now)
+        XCTAssertEqual(shortIntents.first?.body, "Top model rate limit at 90%.")
+
+        // Threshold cross — long window (AI Credits)
+        let preLong = summary(primary: 95, primaryReset: baseReset, secondary: 50, secondaryReset: baseReset)
+        let crossLong = summary(primary: 95, primaryReset: baseReset, secondary: 100, secondaryReset: baseReset)
+        let longIntents = d.evaluate(profile: p, settings: s, current: crossLong, previous: preLong, now: now)
+        XCTAssertEqual(longIntents.first?.body, "AI Credits at 100%.")
+
+        // Reset detection — short window (rate-limit clears)
+        let resetShort = summary(primary: 0, primaryReset: baseReset, secondary: 100, secondaryReset: baseReset)
+        let resetShortIntents = d.evaluate(profile: p, settings: s, current: resetShort, previous: crossLong, now: now)
+        XCTAssertTrue(resetShortIntents.contains(where: { $0.body == "Model rate limits cleared. All models full." }))
+
+        // Reset detection — long window (AI Credits refilled)
+        let resetLong = summary(primary: 0, primaryReset: baseReset, secondary: 0, secondaryReset: baseReset)
+        let resetLongIntents = d.evaluate(profile: p, settings: s, current: resetLong, previous: resetShort, now: now)
+        XCTAssertTrue(resetLongIntents.contains(where: { $0.body == "AI Credits refilled." }))
+    }
+
     func test_tokenExpiry_onlyFiresForCliSyncProfile() {
         let d = NotificationDispatcher()
         let s = settings(tokenExpiry: true)

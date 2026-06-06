@@ -138,11 +138,24 @@ final class NotificationDispatcher {
     }
 
     private func bodyText(for rule: RuleID, profile: Profile) -> String {
+        let antigravity = profile.providerID == .antigravity
         switch rule {
-        case .session(let pct): return "Short-window quota at \(pct)%."
-        case .weekly(let pct):  return "Long-window quota at \(pct)%."
-        case .reset(.session):  return "Short-window quota reset. Full quota available."
-        case .reset(.weekly):   return "Long-window quota reset. Full quota available."
+        case .session(let pct):
+            return antigravity
+                ? "Top model rate limit at \(pct)%."
+                : "Short-window quota at \(pct)%."
+        case .weekly(let pct):
+            return antigravity
+                ? "AI Credits at \(pct)%."
+                : "Long-window quota at \(pct)%."
+        case .reset(.session):
+            return antigravity
+                ? "Model rate limits cleared. All models full."
+                : "Short-window quota reset. Full quota available."
+        case .reset(.weekly):
+            return antigravity
+                ? "AI Credits refilled."
+                : "Long-window quota reset. Full quota available."
         case .tokenExpiry(let at):
             let hours = max(1, Int(at.timeIntervalSinceNow / 3600))
             return "CLI token expires in \(hours)h. Re-authenticate from Profiles."
