@@ -30,6 +30,14 @@ final class CodexActivitySource: ActivitySource {
     private var consumeTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
     private var wakeObserver: NSObjectProtocol?
+    /// Pending debounce flush for `~/.codex/logs_*.sqlite-wal` bumps — `codex
+    /// app-server` (the runtime the Claude Code plugin uses) persists every
+    /// turn there instead of rollout JSONL, so the sessions/ tree alone never
+    /// reflects plugin-driven activity. One turn fires many WAL appends in
+    /// rapid succession; the rolling 0.5s timer collapses them into a single
+    /// `.agentResponse`. Zero IO — no file read, no stat, no SQLite open.
+    private var walFlushTask: Task<Void, Never>?
+    private let walDebounce: TimeInterval = 0.5
 
     var activityPublisher: AnyPublisher<ActivityEvent, Never> {
         subject.eraseToAnyPublisher()
@@ -98,9 +106,19 @@ final class CodexActivitySource: ActivitySource {
                 // its own, so holding `self` across the await would keep the
                 // source alive and defeat `deinit`. Matches CodexAccountWatcher.
                 guard let self else { return }
-                // The FSEvents watch may be rooted at `~/.codex` (so a watcher
-                // started before the first session still sees one appear), so
-                // keep only writes under a `sessions/` tree.
+                // App-server WAL bumps: `~/.codex/logs_*.sqlite-wal` grows on
+                // every turn of `codex app-server` (the Claude Code plugin's
+                // runtime). The WAL filename is the signal; we never open it.
+                // Debounce coalesces a turn's worth of appends into one event.
+                if Self.isLogsWAL(path) {
+                    guard self.isLive() else { continue }
+                    self.scheduleWALFlush()
+                    continue
+                }
+                // Rollout JSONL appends (interactive `codex` / `codex exec`).
+                // The FSEvents watch is rooted at `~/.codex` (so other relevant
+                // files in that tree are seen too), so keep only writes under a
+                // `sessions/` tree for this branch.
                 guard path.contains("/sessions/") else { continue }
                 guard self.isLive() else { continue }
                 // Any append keeps the Mac awake (content-blind, sensitive).
@@ -184,8 +202,39 @@ final class CodexActivitySource: ActivitySource {
     func stop() {
         consumeTask?.cancel(); consumeTask = nil
         pollTask?.cancel(); pollTask = nil
+        walFlushTask?.cancel(); walFlushTask = nil
         if let wakeObserver { notificationCenter.removeObserver(wakeObserver) }
         wakeObserver = nil
+    }
+
+    /// True for `~/.codex/logs_*.sqlite-wal`. Excludes `state_*`, `goals_*`,
+    /// `memories_*` WALs (they bump on background bookkeeping that doesn't
+    /// indicate a model turn), the plain `.sqlite` data file, and the
+    /// `.sqlite-shm` shared-memory index. The `logs_` prefix follows codex
+    /// 1.x's naming (`logs_2.sqlite`); new generations (`logs_3`, …) are
+    /// covered without code change.
+    private static func isLogsWAL(_ path: String) -> Bool {
+        let last = (path as NSString).lastPathComponent
+        return last.hasPrefix("logs_") && last.hasSuffix(".sqlite-wal")
+    }
+
+    /// Rolling debounce: each WAL bump cancels the prior pending flush and
+    /// schedules a fresh one. After `walDebounce` of silence, emit a single
+    /// `.fileWrite` (keep-awake) plus one `.agentResponse` (chart). The flush
+    /// re-checks `isLive()` because the window is wide enough for a sign-out
+    /// to land between schedule and fire. Pure timer — no IO, no allocation
+    /// beyond the Task itself.
+    private func scheduleWALFlush() {
+        walFlushTask?.cancel()
+        let debounce = walDebounce
+        walFlushTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(debounce * 1_000_000_000))
+            if Task.isCancelled { return }
+            guard let self, self.isLive() else { return }
+            let now = self.clock()
+            self.subject.send(ActivityEvent(date: now, provider: .codex, kind: .fileWrite))
+            self.subject.send(ActivityEvent(date: now, provider: .codex, kind: .agentResponse))
+        }
     }
 
     /// Complete lines appended to `path` since we last read it.
@@ -246,10 +295,12 @@ final class CodexActivitySource: ActivitySource {
         return created >= startedAt
     }
 
-    /// The directory to hand to FSEvents: `~/.codex/sessions` if it exists,
-    /// else `~/.codex` (created on install, before the first session) so a
-    /// watcher started before any session still sees one appear later. Returns
-    /// `[]` only when `~/.codex` is absent — Codex isn't installed.
+    /// Scanner / backfill root: prefers the narrower `~/.codex/sessions`
+    /// (only rollout JSONL lives there) so the directory enumeration in
+    /// `ProviderActivityBackfill.scan(Untracked)?` doesn't recurse the whole
+    /// codex tree (cache, sqlite, vendor_imports, etc.). Falls back to
+    /// `~/.codex` only when sessions/ isn't created yet. Returns `[]` when
+    /// `~/.codex` is absent — Codex isn't installed.
     nonisolated static func watchRoots(
         home: URL,
         fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
@@ -261,13 +312,27 @@ final class CodexActivitySource: ActivitySource {
         return []
     }
 
-    /// FSEvents stream over `~/.codex/sessions` (or `~/.codex` — see
-    /// `watchRoots`), file-level. Yields each changed path (the consume loop
-    /// filters to `sessions/`). If `~/.codex` doesn't exist the stream finishes
-    /// immediately and never emits. Tests inject a synthetic stream instead.
+    /// FSEvents root: always `~/.codex` when present, broader than the scanner
+    /// root because the live stream needs to see both rollout JSONL appends
+    /// (sessions/ subtree) AND `logs_*.sqlite-wal` bumps (at the top level).
+    /// fseventsd is system-wide and only delivers paths — broadening adds
+    /// negligible cost. The consume loop strict-filters what it processes.
+    nonisolated static func fsEventsRoots(
+        home: URL,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> [String] {
+        let p = home.appendingPathComponent(".codex").path
+        return fileExists(p) ? [p] : []
+    }
+
+    /// FSEvents stream over `~/.codex`, file-level. Yields each changed path;
+    /// the consume loop dispatches to the rollout branch (under `sessions/`) or
+    /// the WAL debounce branch (`logs_*.sqlite-wal`). If `~/.codex` doesn't
+    /// exist the stream finishes immediately and never emits. Tests inject a
+    /// synthetic stream instead.
     nonisolated static func defaultFileEvents() -> AsyncStream<String> {
         AsyncStream { continuation in
-            let roots = watchRoots(home: FileManager.default.homeDirectoryForCurrentUser)
+            let roots = fsEventsRoots(home: FileManager.default.homeDirectoryForCurrentUser)
             guard !roots.isEmpty else {
                 continuation.finish(); return    // no ~/.codex → never emits
             }
@@ -322,6 +387,7 @@ final class CodexActivitySource: ActivitySource {
     deinit {
         consumeTask?.cancel()
         pollTask?.cancel()
+        walFlushTask?.cancel()
         if let wakeObserver { notificationCenter.removeObserver(wakeObserver) }
     }
 }

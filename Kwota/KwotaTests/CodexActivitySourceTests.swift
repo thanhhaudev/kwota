@@ -334,4 +334,167 @@ final class CodexActivitySourceTests: XCTestCase {
             CodexActivitySource.watchRoots(home: home) { _ in false }.isEmpty
         )
     }
+
+    // MARK: app-server WAL bumps (debounced agent-response signal)
+    //
+    // `codex app-server` (used by the Claude Code Codex plugin) persists to
+    // `~/.codex/logs_*.sqlite` instead of rollout JSONL — sessions/ stays cold
+    // even though the model is replying. Watch the WAL filename via FSEvents
+    // (passive, no IO) and coalesce rapid bumps into one `.agentResponse`.
+
+    private let logsWALPath = "/Users/x/.codex/logs_2.sqlite-wal"
+
+    func testWALEventEmitsAgentResponseAfterDebounce() async throws {
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
+        var received: [ActivityEvent] = []
+        let source = CodexActivitySource(
+            isLive: { true }, makeFileEvents: { stream }, clock: { fixedDate },
+            notificationCenter: NotificationCenter())
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+
+        cont.yield(logsWALPath)
+        await drain()
+        XCTAssertTrue(received.isEmpty, "no emit before debounce flush")
+
+        try await Task.sleep(nanoseconds: 700_000_000)
+        await drain()
+
+        XCTAssertEqual(received.filter { $0.kind == .agentResponse }.count, 1)
+        XCTAssertEqual(received.filter { $0.kind == .fileWrite }.count, 1)
+        XCTAssertEqual(received.first { $0.kind == .agentResponse }?.date, fixedDate)
+        XCTAssertEqual(received.first { $0.kind == .agentResponse }?.provider, .codex)
+        cont.finish(); source.stop()
+    }
+
+    func testRapidWALEventsCoalesceToSingleEvent() async throws {
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        var received: [ActivityEvent] = []
+        let source = CodexActivitySource(
+            isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
+            notificationCenter: NotificationCenter())
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+
+        for _ in 0..<5 {
+            cont.yield(logsWALPath)
+            try? await Task.sleep(nanoseconds: 50_000_000)   // 5 bumps in 250ms
+        }
+        try await Task.sleep(nanoseconds: 700_000_000)
+        await drain()
+
+        XCTAssertEqual(received.filter { $0.kind == .agentResponse }.count, 1,
+                       "burst of WAL bumps within debounce window must collapse to one event")
+        cont.finish(); source.stop()
+    }
+
+    func testWALIgnoredWhenNotLive() async throws {
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        var received: [ActivityEvent] = []
+        let source = CodexActivitySource(
+            isLive: { false }, makeFileEvents: { stream }, clock: { Date() },
+            notificationCenter: NotificationCenter())
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+
+        cont.yield(logsWALPath)
+        try await Task.sleep(nanoseconds: 700_000_000)
+        await drain()
+
+        XCTAssertTrue(received.isEmpty)
+        cont.finish(); source.stop()
+    }
+
+    /// `isLive` may flip false after a WAL event is scheduled but before the
+    /// debounce flush fires — the flush must re-check and skip.
+    func testWALFlushReChecksLiveAtFireTime() async throws {
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        var live = true
+        var received: [ActivityEvent] = []
+        let source = CodexActivitySource(
+            isLive: { live }, makeFileEvents: { stream }, clock: { Date() },
+            notificationCenter: NotificationCenter())
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+
+        cont.yield(logsWALPath)
+        await drain()
+        live = false   // user signs out within the 500ms window
+        try await Task.sleep(nanoseconds: 700_000_000)
+        await drain()
+
+        XCTAssertTrue(received.isEmpty)
+        cont.finish(); source.stop()
+    }
+
+    /// Only `logs_*.sqlite-wal` bumps count as agent activity. State/goals/
+    /// memories WALs and the plain `.sqlite` data file (without `-wal`) must
+    /// be ignored — they aren't reliable agent-response signals.
+    func testNonLogsWALPathsIgnored() async throws {
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        var received: [ActivityEvent] = []
+        let source = CodexActivitySource(
+            isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
+            notificationCenter: NotificationCenter())
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+
+        cont.yield("/Users/x/.codex/state_5.sqlite-wal")
+        cont.yield("/Users/x/.codex/goals_1.sqlite-wal")
+        cont.yield("/Users/x/.codex/memories_1.sqlite-wal")
+        cont.yield("/Users/x/.codex/logs_2.sqlite")           // not -wal
+        cont.yield("/Users/x/.codex/logs_2.sqlite-shm")       // shared-mem index, not WAL
+        try await Task.sleep(nanoseconds: 700_000_000)
+        await drain()
+
+        XCTAssertTrue(received.isEmpty)
+        cont.finish(); source.stop()
+    }
+
+    func testStopCancelsPendingWALFlush() async throws {
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        var received: [ActivityEvent] = []
+        let source = CodexActivitySource(
+            isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
+            notificationCenter: NotificationCenter())
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+
+        cont.yield(logsWALPath)
+        await drain()
+        source.stop()                                    // before the 500ms flush
+        try await Task.sleep(nanoseconds: 700_000_000)
+        await drain()
+
+        XCTAssertTrue(received.isEmpty)
+        cont.finish()
+    }
+
+    // MARK: fsEventsRoots (broader watch surface for app-server WAL files)
+
+    /// FSEvents must watch `~/.codex` (broad) — not the narrower `sessions/`
+    /// — so the same stream sees both rollout JSONL appends AND
+    /// `logs_*.sqlite-wal` bumps. The scanner's narrow root is unrelated.
+    func test_fsEventsRoots_returnsCodexDirWhenPresent() {
+        let home = URL(fileURLWithPath: "/Users/x")
+        let exists: Set<String> = ["/Users/x/.codex", "/Users/x/.codex/sessions"]
+        XCTAssertEqual(
+            CodexActivitySource.fsEventsRoots(home: home) { exists.contains($0) },
+            ["/Users/x/.codex"]
+        )
+    }
+
+    func test_fsEventsRoots_emptyWhenCodexAbsent() {
+        let home = URL(fileURLWithPath: "/Users/x")
+        XCTAssertTrue(
+            CodexActivitySource.fsEventsRoots(home: home) { _ in false }.isEmpty
+        )
+    }
 }
