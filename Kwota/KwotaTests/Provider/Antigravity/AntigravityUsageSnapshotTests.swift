@@ -66,6 +66,23 @@ final class AntigravityUsageSnapshotTests: XCTestCase {
         XCTAssertNil(snap.aiCreditsWallet)
     }
 
+    func test_proto3_walletEntryExistsButCreditAmountAbsent_meansZero() throws {
+        // Live g1-pro-tier wire when AI Credits balance is 0: the entry is
+        // present but `creditAmount` is elided. Must decode as 0, never fall
+        // back to a stale state.vscdb sentinel. Mirrors the remainingFraction
+        // test below.
+        let json = #"""
+        {"userStatus":{"userTier":{"availableCredits":[
+          {"creditType":"GOOGLE_ONE_AI","minimumCreditAmountForUsage":"50"}
+        ]}}}
+        """#
+        var snap = try AntigravityUsageSnapshot.decoder.decode(
+            AntigravityUsageSnapshot.self, from: Data(json.utf8))
+        snap.aiCreditsFallback = 1000
+        XCTAssertEqual(snap.availableCredits.first?.creditAmount, 0)
+        XCTAssertEqual(snap.aiCreditsWallet, 0)
+    }
+
     func test_proto3_quotaInfoExistsButRemainingFractionAbsent_meansZero() throws {
         // Per proto3, default zero values are elided. Reference: ma-do-ka repo line 138.
         let json = #"""

@@ -67,7 +67,13 @@ struct AntigravityUsageSnapshot: Decodable, Equatable, Sendable {
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             self.creditType = try c.decodeIfPresent(String.self, forKey: .creditType)
-            self.creditAmount = try Self.flexibleInt64(c, .creditAmount)
+            // Proto3 zero-elision: when the WalletEntry is present but
+            // `creditAmount` is omitted, the balance is 0 (not unknown). A
+            // nil here would let `aiCreditsWallet` fall back to the stale
+            // state.vscdb sentinel, lying that the wallet is full when it's
+            // actually drained. Mirrors `ModelQuota.remainingFraction`'s
+            // `?? 0` for the same proto3 reason.
+            self.creditAmount = (try Self.flexibleInt64(c, .creditAmount)) ?? 0
             self.minimumCreditAmountForUsage = try Self.flexibleInt64(c, .minimumCreditAmountForUsage)
         }
         init(creditType: String?, creditAmount: Int64?, minimumCreditAmountForUsage: Int64? = nil) {
