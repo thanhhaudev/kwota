@@ -9,7 +9,7 @@ struct NotificationsMuteListCard: View {
     let vm: MenuBarViewModel
 
     var body: some View {
-        let liveProfiles = vm.profileStore.profiles.filter(isLive(_:))
+        let liveProfiles = vm.profileStore.profiles.filter { $0.kind == .auto && isLive($0) }
 
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
