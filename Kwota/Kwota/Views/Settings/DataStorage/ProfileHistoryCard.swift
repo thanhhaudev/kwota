@@ -22,18 +22,39 @@ struct ProfileHistoryCard: View {
     }
 
     var body: some View {
+        let ordered = orderedProfiles
         VStack(spacing: 0) {
-            if vm.profileStore.profiles.isEmpty {
+            if ordered.isEmpty {
                 SettingsRow(title: "No profiles yet",
                             subtitle: "Add a profile to track usage history.") { EmptyView() }
             } else {
-                ForEach(vm.profileStore.profiles.enumerated(), id: \.element.id) { index, profile in
+                ForEach(Array(ordered.enumerated()), id: \.element.id) { index, profile in
                     if index > 0 { SettingsSectionDivider() }
                     profileRow(profile)
                 }
             }
         }
-        .task(id: vm.profileStore.profiles.map(\.id)) { await refreshCounts() }
+        // Counts go stale fast: background refreshes append history entries
+        // to disk without updating any vm-published property the row already
+        // observes. Two triggers handle that:
+        //  - `.task` polls every 5s while the tab is visible — covers
+        //    non-active profiles written by ProfileSwitcherFetchCoordinator.
+        //  - `.onChange(of: vm.lastFetchedAt)` re-reads instantly when the
+        //    active profile lands a fetch, so the row updates in real time.
+        // Both are visibility-gated (task cancels, onChange only fires while
+        // the view is in the hierarchy) so idle Settings windows don't burn
+        // cycles.
+        .task {
+            await refreshCounts()
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled else { return }
+                await refreshCounts()
+            }
+        }
+        .onChange(of: vm.lastFetchedAt) { _, _ in
+            Task { await refreshCounts() }
+        }
         .alert(
             "Clear usage history?",
             isPresented: $showClearAlert,
@@ -59,19 +80,92 @@ struct ProfileHistoryCard: View {
     }
 
     private func profileRow(_ profile: Profile) -> some View {
-        SettingsRow(title: profile.name,
-                    subtitle: "\(rowEntryCounts[profile.id] ?? 0) entries") {
-            HStack(spacing: 6) {
-                Button("Clear") {
-                    clearingTarget = profile
-                    showClearAlert = true
-                }
-                .buttonStyle(.bordered).controlSize(.small)
-                Button("Export…") { exportHistory(for: profile) }
-                    .buttonStyle(.bordered).controlSize(.small)
-                    .disabled((rowEntryCounts[profile.id] ?? 0) == 0)
+        let entryCount = rowEntryCounts[profile.id] ?? 0
+        return SettingsRow(
+            title: profile.name,
+            subtitle: subtitle(for: profile, entries: entryCount),
+            leadingBadges: badges(for: profile)
+        ) {
+            Menu {
+                menuContent(for: profile, entryCount: entryCount)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
             }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityLabel("History actions for \(profile.name)")
         }
+        .contextMenu { menuContent(for: profile, entryCount: entryCount) }
+    }
+
+    @ViewBuilder
+    private func menuContent(for profile: Profile, entryCount: Int) -> some View {
+        Button("Export…") { exportHistory(for: profile) }
+            .disabled(entryCount == 0)
+        Divider()
+        Button("Clear", role: .destructive) {
+            clearingTarget = profile
+            showClearAlert = true
+        }
+    }
+
+    private func subtitle(for profile: Profile, entries: Int) -> String {
+        let countLabel = "\(entries) \(entries == 1 ? "entry" : "entries")"
+        if let email = profile.email, !email.isEmpty {
+            return "\(email) · \(countLabel)"
+        }
+        return countLabel
+    }
+
+    private func badges(for profile: Profile) -> [SettingsRowBadge] {
+        var out: [SettingsRowBadge] = []
+        let providerName = vm.registry.provider(for: profile.providerID)?.displayName
+            ?? profile.providerID.rawValue.capitalized
+        let color = providerBadgeColor(profile.providerID)
+        out.append(SettingsRowBadge(
+            text: providerName,
+            foreground: color,
+            background: color.opacity(0.18)
+        ))
+        if !isLive(profile) {
+            out.append(SettingsRowBadge(
+                text: "Offline",
+                foreground: .secondary,
+                background: Color.secondary.opacity(0.15)
+            ))
+        }
+        return out
+    }
+
+    private func providerBadgeColor(_ id: ProviderID) -> Color {
+        switch id {
+        case .claude:      return .orange
+        case .codex:       return .teal
+        case .antigravity: return .purple
+        }
+    }
+
+    /// Reuses the popover switcher's liveness predicate so a row appearing
+    /// "Offline" here matches the same set of accounts the switcher dims
+    /// and Notifications hides — see [[project_signout_handoff_asymmetry]].
+    private func isLive(_ profile: Profile) -> Bool {
+        ProfileSwitcherCard.isLive(
+            profile: profile,
+            claudeCLIEmail: vm.cliAccountWatcher.current?.email,
+            codexCLIEmail: vm.codexAccountWatcher.current?.email,
+            antigravityProcessAlive: vm.antigravityProcessWatcher.current != nil
+        )
+    }
+
+    /// Live profiles first, offline grouped at the bottom. Stable within
+    /// each group so the on-disk profile order is preserved.
+    private var orderedProfiles: [Profile] {
+        let all = vm.profileStore.profiles
+        return all.filter(isLive) + all.filter { !isLive($0) }
     }
 
     @MainActor
