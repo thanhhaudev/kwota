@@ -74,9 +74,40 @@ final class UsageHistoryStore {
 
     func append(_ entry: UsageHistoryEntry) throws {
         try ensureLoaded()
-        entries.append(entry)
+        // Run-length dedup. Refresh fires every popover open / coord tick /
+        // manual click, so a quiet quota window produces a long run of
+        // identical (fiveHour, sevenDay) readings. Each one would burn an
+        // entry slot for zero chart info — the chart re-draws the same
+        // point. Collapse those into two anchors instead: the entry that
+        // started the plateau, plus a sliding tail that tracks the latest
+        // sample's timestamp. When the value changes, normal append resumes
+        // and the new run begins, preserving the plateau's true bounds.
+        //
+        // The two-back check is the wedge between "starting a plateau"
+        // (only the immediate predecessor matches → keep both as the
+        // bookends) and "extending one" (predecessor AND its predecessor
+        // match → tail is mid-run, slide it forward). Without the second
+        // check we'd lose the plateau's start timestamp on the very first
+        // duplicate, drawing the chart as if the run began later than it did.
+        if entries.count >= 2,
+           sameReading(entry, entries[entries.count - 1]),
+           sameReading(entries[entries.count - 1], entries[entries.count - 2]) {
+            let tail = entries[entries.count - 1]
+            entries[entries.count - 1] = UsageHistoryEntry(
+                id: tail.id,
+                at: entry.at,
+                fiveHour: entry.fiveHour,
+                sevenDay: entry.sevenDay
+            )
+        } else {
+            entries.append(entry)
+        }
         applyCaps()
         scheduleWrite()
+    }
+
+    private func sameReading(_ a: UsageHistoryEntry, _ b: UsageHistoryEntry) -> Bool {
+        a.fiveHour == b.fiveHour && a.sevenDay == b.sevenDay
     }
 
     /// Forces any pending debounced write to complete synchronously. Called from the willTerminate observer to avoid losing the just-appended entry when the app quits within the debounce window.

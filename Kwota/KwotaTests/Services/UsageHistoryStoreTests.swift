@@ -28,8 +28,9 @@ final class UsageHistoryStoreTests: XCTestCase {
 
     func testAppendThenLoadRoundTrips() throws {
         let store = UsageHistoryStore(historyFile: temp.file("h.json"), writeDebounce: 0)
-        let e1 = makeEntry(60)
-        let e2 = makeEntry(30)
+        // Distinct readings — run-length dedup must not fold them.
+        let e1 = makeEntry(60, fiveHour: 50, sevenDay: 60)
+        let e2 = makeEntry(30, fiveHour: 55, sevenDay: 60)
         try store.append(e1)
         try store.append(e2)
         try store.flushPendingWrite()
@@ -95,6 +96,59 @@ final class UsageHistoryStoreTests: XCTestCase {
         XCTAssertEqual(try store.load().count, 2) // 2 newest retained, both caps satisfied
     }
 
+    func testRunLengthDedupFoldsIdenticalRunToTwoAnchors() throws {
+        let store = UsageHistoryStore(historyFile: temp.file("h.json"), writeDebounce: 0)
+        // Five identical readings 1s apart. First two stay as plateau
+        // start + initial tail; samples 3-5 slide the tail's timestamp
+        // forward without growing the array.
+        let base = Date(timeIntervalSince1970: 1_000)
+        var appended: [UsageHistoryEntry] = []
+        for i in 0..<5 {
+            let e = UsageHistoryEntry(
+                at: base.addingTimeInterval(TimeInterval(i)),
+                fiveHour: 50,
+                sevenDay: 17
+            )
+            appended.append(e)
+            try store.append(e)
+        }
+        try store.flushPendingWrite()
+
+        let loaded = try store.load()
+        XCTAssertEqual(loaded.count, 2)
+        XCTAssertEqual(loaded.first?.at, appended[0].at, "Plateau start anchor preserved")
+        XCTAssertEqual(loaded.last?.at, appended[4].at, "Tail slid to latest sample's timestamp")
+        XCTAssertEqual(loaded.last?.fiveHour, 50)
+        XCTAssertEqual(loaded.last?.sevenDay, 17)
+    }
+
+    func testValueChangeStartsNewRunWithoutFolding() throws {
+        let store = UsageHistoryStore(historyFile: temp.file("h.json"), writeDebounce: 0)
+        // A-A-A-B-B-B pattern. Each run independently folds; together
+        // they should produce 4 entries (2 anchors per plateau), with the
+        // mid-stream change preserved.
+        let base = Date(timeIntervalSince1970: 1_000)
+        for i in 0..<3 {
+            try store.append(UsageHistoryEntry(
+                at: base.addingTimeInterval(TimeInterval(i)),
+                fiveHour: 50,
+                sevenDay: 17
+            ))
+        }
+        for i in 0..<3 {
+            try store.append(UsageHistoryEntry(
+                at: base.addingTimeInterval(TimeInterval(10 + i)),
+                fiveHour: 60,
+                sevenDay: 17
+            ))
+        }
+        try store.flushPendingWrite()
+
+        let loaded = try store.load()
+        XCTAssertEqual(loaded.count, 4)
+        XCTAssertEqual(loaded.map(\.fiveHour), [50, 50, 60, 60])
+    }
+
     func test_userDefaultsKey_overridesDefault() throws {
         let suiteName = "kwota.tests.\(UUID().uuidString)"
         let suite = UserDefaults(suiteName: suiteName)!
@@ -109,11 +163,14 @@ final class UsageHistoryStoreTests: XCTestCase {
 
         // The store's resolved caps aren't directly readable, but we can
         // observe them by appending past 50 session entries and verifying
-        // trimming happens at 50.
+        // trimming happens at 50. Vary `fiveHour` per i so run-length
+        // dedup doesn't fold the inserts into 2 anchors before the cap
+        // fires; otherwise this would assert what dedup does, not what
+        // the cap does.
         for i in 0..<55 {
             try store.append(UsageHistoryEntry(
                 at: Date(timeIntervalSince1970: TimeInterval(3_000 + i)),
-                fiveHour: 40,
+                fiveHour: Double(i),
                 sevenDay: nil
             ))
         }
