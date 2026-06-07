@@ -10,6 +10,7 @@ import UniformTypeIdentifiers
 struct ProfileHistoryCard: View {
     let vm: MenuBarViewModel
 
+    @AppStorage(AppStorageKeys.isPrivacyMasked) private var isPrivacyMasked: Bool = false
     @State private var rowEntryCounts: [UUID: Int] = [:]
     @State private var clearingTarget: Profile?
     @State private var showClearAlert: Bool = false
@@ -82,7 +83,7 @@ struct ProfileHistoryCard: View {
     private func profileRow(_ profile: Profile) -> some View {
         let entryCount = rowEntryCounts[profile.id] ?? 0
         return SettingsRow(
-            title: profile.name,
+            title: displayName(for: profile),
             subtitle: subtitle(for: profile, entries: entryCount),
             leadingBadges: badges(for: profile)
         ) {
@@ -113,24 +114,28 @@ struct ProfileHistoryCard: View {
         }
     }
 
+    /// Email as the row title, mirroring ManageProfilesView so the same
+    /// account reads the same in both Settings sections. Falls back to the
+    /// auto-derived display name when an account has no email yet (early
+    /// fetch, signed out before first successful auth probe).
+    private func displayName(for profile: Profile) -> String {
+        if let email = profile.email, !email.isEmpty {
+            return isPrivacyMasked ? (profile.maskedEmail ?? email) : email
+        }
+        return profile.resolvedDisplayName
+    }
+
     private func subtitle(for profile: Profile, entries: Int) -> String {
         let countLabel = "\(entries) \(entries == 1 ? "entry" : "entries")"
-        if let email = profile.email, !email.isEmpty {
-            return "\(email) · \(countLabel)"
-        }
-        return countLabel
+        let plan = isPrivacyMasked ? (profile.maskedPlan ?? "") : (profile.subscriptionPlan ?? "")
+        return plan.isEmpty ? countLabel : "\(plan) · \(countLabel)"
     }
 
     private func badges(for profile: Profile) -> [SettingsRowBadge] {
         var out: [SettingsRowBadge] = []
         let providerName = vm.registry.provider(for: profile.providerID)?.displayName
             ?? profile.providerID.rawValue.capitalized
-        let color = providerBadgeColor(profile.providerID)
-        out.append(SettingsRowBadge(
-            text: providerName,
-            foreground: color,
-            background: color.opacity(0.18)
-        ))
+        out.append(ProviderBadgeStyle.badge(for: profile.providerID, name: providerName))
         if !isLive(profile) {
             out.append(SettingsRowBadge(
                 text: "Offline",
@@ -139,14 +144,6 @@ struct ProfileHistoryCard: View {
             ))
         }
         return out
-    }
-
-    private func providerBadgeColor(_ id: ProviderID) -> Color {
-        switch id {
-        case .claude:      return .orange
-        case .codex:       return .teal
-        case .antigravity: return .purple
-        }
     }
 
     /// Reuses the popover switcher's liveness predicate so a row appearing

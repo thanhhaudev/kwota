@@ -103,7 +103,7 @@ struct ProfileDetailView: View {
                         provider.planBadgeView(profile: liveProfile)
                     }
                     badge(
-                        text: isArchived ? "Archived" : "Default",
+                        text: isArchived ? "Offline" : "Default",
                         foreground: isArchived ? .secondary : .white,
                         background: isArchived
                             ? Color.secondary.opacity(0.18)
@@ -237,6 +237,8 @@ struct ProfileDetailView: View {
             .background(rowBackground)
         } label: {
             sectionTitle("Identifiers")
+                .contentShape(Rectangle())
+                .onTapGesture { withAnimation { identifiersExpanded.toggle() } }
         }
     }
 
@@ -244,9 +246,15 @@ struct ProfileDetailView: View {
         DisclosureGroup(isExpanded: $historyExpanded) {
             historyContent
         } label: {
-            sectionTitle("Usage history (\(history.count))")
+            sectionTitle("Usage history (\(dailyPeaks.count))")
+                .contentShape(Rectangle())
+                .onTapGesture { withAnimation { historyExpanded.toggle() } }
         }
     }
+
+    private static let historyDateWidth: CGFloat = 110
+    private static let historyPctWidth: CGFloat = 72
+    private static let historySeparator = Color.primary.opacity(0.12)
 
     @ViewBuilder
     private var historyContent: some View {
@@ -258,29 +266,109 @@ struct ProfileDetailView: View {
                 .font(.subheadline).foregroundStyle(.secondary)
                 .padding(.vertical, 8)
         } else {
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(history) { entry in
-                    HStack {
-                        Text(entry.at.formatted(date: .abbreviated, time: .omitted))
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        if let pct = entry.sevenDay {
-                            Text("\(Int(pct * 100))%")
-                                .font(.system(size: 12))
-                        } else if let pct = entry.fiveHour {
-                            Text("\(Int(pct * 100))%")
-                                .font(.system(size: 12))
-                        } else {
-                            Text(ProfileDetailFormatter.placeholder)
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
+            historyTable
+        }
+    }
+
+    private var historyTable: some View {
+        VStack(spacing: 0) {
+            historyHeaderRow
+            Rectangle()
+                .fill(Self.historySeparator)
+                .frame(height: 1)
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(Array(dailyPeaks.enumerated()), id: \.element.id) { idx, row in
+                        historyDataRow(row)
+                        if idx < dailyPeaks.count - 1 {
+                            Rectangle()
+                                .fill(Self.historySeparator)
+                                .frame(height: 1)
                         }
                     }
                 }
             }
-            .padding(.vertical, 4)
+            .frame(maxHeight: 220)
         }
+        .background(
+            Color(.controlBackgroundColor).opacity(0.6),
+            in: RoundedRectangle(cornerRadius: 10)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private var historyHeaderRow: some View {
+        HStack(spacing: 0) {
+            historyCell("Date", width: Self.historyDateWidth, isHeader: true)
+            historyVSep
+            historyCell("5h peak", width: Self.historyPctWidth, isHeader: true)
+            historyVSep
+            historyCell("7d peak", width: nil, isHeader: true)
+        }
+    }
+
+    private func historyDataRow(_ row: DailyPeak) -> some View {
+        HStack(spacing: 0) {
+            historyCell(
+                row.date.formatted(date: .abbreviated, time: .omitted),
+                width: Self.historyDateWidth
+            )
+            historyVSep
+            historyCell(formatPct(row.sessionPercent), width: Self.historyPctWidth)
+            historyVSep
+            historyCell(formatPct(row.weeklyPercent), width: nil)
+        }
+    }
+
+    private func historyCell(_ text: String, width: CGFloat?, isHeader: Bool = false) -> some View {
+        Text(text)
+            .font(.system(.caption, design: .monospaced))
+            .foregroundStyle(isHeader ? .secondary : .primary)
+            .textSelection(.enabled)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(width: width, alignment: .leading)
+            .frame(maxWidth: width == nil ? .infinity : nil, alignment: .leading)
+    }
+
+    private var historyVSep: some View {
+        Rectangle()
+            .fill(Self.historySeparator)
+            .frame(width: 1)
+    }
+
+    private func formatPct(_ value: Double?) -> String {
+        guard let v = value else { return ProfileDetailFormatter.placeholder }
+        return "\(Int(v.rounded()))%"
+    }
+
+    /// One row per calendar day, newest first. Tracks the peak reading for
+    /// each window separately so the table shows both columns; raw history
+    /// can contain hundreds of entries per day from per-fetch refreshes, so
+    /// daily collapse turns a noisy log dump into a usable timeline.
+    private var dailyPeaks: [DailyPeak] {
+        let cal = Calendar.current
+        var sessionByDay: [Date: Double] = [:]
+        var weeklyByDay: [Date: Double] = [:]
+        for e in history {
+            let day = cal.startOfDay(for: e.at)
+            if let s = e.fiveHour { sessionByDay[day] = max(sessionByDay[day] ?? -1, s) }
+            if let w = e.sevenDay { weeklyByDay[day] = max(weeklyByDay[day] ?? -1, w) }
+        }
+        let days = Set(sessionByDay.keys).union(weeklyByDay.keys)
+        return days
+            .map { DailyPeak(date: $0, sessionPercent: sessionByDay[$0], weeklyPercent: weeklyByDay[$0]) }
+            .sorted { $0.date > $1.date }
+    }
+
+    private struct DailyPeak: Identifiable {
+        let date: Date
+        let sessionPercent: Double?
+        let weeklyPercent: Double?
+        var id: Date { date }
     }
 
     private var deleteButton: some View {

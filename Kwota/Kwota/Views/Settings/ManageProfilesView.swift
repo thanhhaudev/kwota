@@ -51,7 +51,7 @@ struct ManageProfilesView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 16) {
                 pageHeader
                 accountsSection
                 if !archived.isEmpty { archivedSection }
@@ -119,47 +119,42 @@ struct ManageProfilesView: View {
 
     // MARK: - Sections
 
+    @ViewBuilder
     private var accountsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            sectionTitle("Accounts")
-            let rows = displayedAccountRows
-            if rows.isEmpty {
+        let rows = displayedAccountRows
+        if rows.isEmpty {
+            SettingsGroupedSection(caption: "Accounts") {
                 NoActiveAccountEmptyView(
                     providerNames: vm.registry.all.map(\.displayName))
-                    .background(rowBackground)
-            } else {
-                VStack(spacing: 0) {
-                    ForEach(Array(rows.enumerated()), id: \.element.profile.id) { idx, row in
-                        profileRow(row.profile, isActive: row.isActive, isLive: row.isLive) {
-                            selectedDetail = row.profile
-                        }
-                        if idx < rows.count - 1 {
-                            Divider().padding(.leading, 16)
-                        }
+            }
+        } else {
+            SettingsGroupedSection(caption: "Accounts") {
+                ForEach(Array(rows.enumerated()), id: \.element.profile.id) { idx, row in
+                    if idx > 0 { SettingsSectionDivider() }
+                    profileRow(row.profile, isActive: row.isActive, isLive: row.isLive) {
+                        selectedDetail = row.profile
                     }
                 }
-                .background(rowBackground)
             }
         }
     }
 
     private var archivedSection: some View {
         DisclosureGroup(isExpanded: $archivedExpanded) {
-            VStack(spacing: 0) {
+            SettingsGroupedSection(caption: "") {
                 ForEach(Array(archived.enumerated()), id: \.element.id) { idx, p in
+                    if idx > 0 { SettingsSectionDivider() }
                     archivedRow(p)
-                    if idx < archived.count - 1 {
-                        Divider().padding(.leading, 16)
-                    }
                 }
             }
-            .background(rowBackground)
             .padding(.top, 8)
         } label: {
             // DisclosureGroup only toggles on a click of the chevron itself;
             // make the whole title row toggle too so tapping the label opens
             // it. contentShape widens the hit area past the text glyphs.
-            sectionTitle("Archived accounts (\(archived.count))")
+            Text("Offline accounts (\(archived.count))")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.primary)
                 .contentShape(Rectangle())
                 .onTapGesture {
                     withAnimation { archivedExpanded.toggle() }
@@ -169,91 +164,39 @@ struct ManageProfilesView: View {
 
     // MARK: - Rows
 
-    @ViewBuilder
-    private func profileRow(_ profile: Profile, isActive: Bool, isLive: Bool, tap: (() -> Void)?) -> some View {
-        let content = HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
-                    Text(displayName(for: profile))
-                        .font(.system(size: 14, weight: isActive ? .semibold : .medium))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    if isActive {
-                        Text("Default")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.accentColor, in: Capsule())
-                    } else if !isLive {
-                        Text("Signed out")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.secondary.opacity(0.18), in: Capsule())
-                    }
-                }
-                Text(metadataText(for: profile))
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+    private func profileRow(_ profile: Profile, isActive: Bool, isLive: Bool, tap: @escaping () -> Void) -> some View {
+        Button(action: tap) {
+            SettingsRow(
+                title: displayName(for: profile),
+                subtitle: planSubtitle(for: profile),
+                leadingBadges: accountBadges(profile: profile, isActive: isActive, isLive: isLive)
+            ) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.tertiary)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .contentShape(Rectangle())
+        .buttonStyle(.plain)
         .opacity(isActive || isLive ? 1.0 : 0.55)
-
-        if let tap {
-            Button(action: tap) { content }
-                .buttonStyle(.plain)
-        } else {
-            content
-        }
     }
 
     private func archivedRow(_ profile: Profile) -> some View {
         Button {
             selectedDetail = profile
         } label: {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(displayName(for: profile))
-                        .font(.system(size: 14, weight: .medium))
-                        .lineLimit(1)
-                    Text(archivedMetadataText(for: profile))
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            SettingsRow(
+                title: displayName(for: profile),
+                subtitle: archivedMetadataText(for: profile)
+            ) {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.tertiary)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
 
     // MARK: - Helpers
-
-    private func sectionTitle(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(.secondary)
-            .textCase(.uppercase)
-    }
-
-    private var rowBackground: some View {
-        Color(.controlBackgroundColor).opacity(0.6)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-    }
 
     private func displayName(for profile: Profile) -> String {
         if let email = profile.email, !email.isEmpty {
@@ -262,15 +205,36 @@ struct ManageProfilesView: View {
         return profile.resolvedDisplayName
     }
 
-    private func metadataText(for profile: Profile) -> String {
+    /// Subtitle inside `SettingsRow`. Plan only — provider moved to a leading
+    /// badge and "tracking since" lives in the detail sheet now.
+    private func planSubtitle(for profile: Profile) -> String? {
         let plan = isPrivacyMasked ? (profile.maskedPlan ?? "") : (profile.subscriptionPlan ?? "")
-        let providerName = vm.registry.provider(for: profile.providerID)?.displayName ?? "Claude"
-        var parts: [String] = [providerName]
-        if !plan.isEmpty { parts.append(plan) }
-        if let boundary = profile.ownershipBoundary {
-            parts.append("tracking since \(boundary.formatted(date: .abbreviated, time: .omitted))")
+        return plan.isEmpty ? nil : plan
+    }
+
+    /// Provider pill + Default (when active) + Offline (when non-live) —
+    /// same grammar as `ProfileHistoryCard` so identical accounts read the
+    /// same across Settings.
+    private func accountBadges(profile: Profile, isActive: Bool, isLive: Bool) -> [SettingsRowBadge] {
+        var out: [SettingsRowBadge] = []
+        let providerName = vm.registry.provider(for: profile.providerID)?.displayName
+            ?? profile.providerID.rawValue.capitalized
+        out.append(ProviderBadgeStyle.badge(for: profile.providerID, name: providerName))
+        if isActive {
+            out.append(SettingsRowBadge(
+                text: "Default",
+                foreground: .accentColor,
+                background: Color.accentColor.opacity(0.18)
+            ))
         }
-        return parts.joined(separator: " • ")
+        if !isLive {
+            out.append(SettingsRowBadge(
+                text: "Offline",
+                foreground: .secondary,
+                background: Color.secondary.opacity(0.15)
+            ))
+        }
+        return out
     }
 
     private func archivedMetadataText(for profile: Profile) -> String {
