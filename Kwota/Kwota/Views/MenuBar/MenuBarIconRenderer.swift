@@ -70,7 +70,24 @@ enum MenuBarIconRenderer {
             ) {
                 PercentRingTail(reading: reading)
             }
+        case .tintDot:
+            TintDotIcon(tint: reading.tint)
         }
+    }
+}
+
+/// Standalone circular indicator for `.tintDot`. 14×14pt, hairline primary
+/// border, interior fill uses the same usage-level tint as `.fillBackground`
+/// (green/yellow/red by utilization, gray when nil). No "K" glyph, no pill —
+/// reads like a native macOS status indicator (Bluetooth/wifi style).
+private struct TintDotIcon: View {
+    let tint: Color
+
+    var body: some View {
+        Circle()
+            .fill(tint.gradient)
+            .overlay(Circle().strokeBorder(Color.primary, lineWidth: 0.5))
+            .frame(width: 14, height: 14)
     }
 }
 

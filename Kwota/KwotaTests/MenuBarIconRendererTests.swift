@@ -15,7 +15,7 @@ final class MenuBarIconRendererTests: XCTestCase {
     }
 
     func test_image_returnsNonNilForAllStylesAndReadings() {
-        let styles: [MenuBarStyle] = [.original, .fillBackground, .percentText, .percentRing]
+        let styles: [MenuBarStyle] = [.original, .fillBackground, .percentText, .percentRing, .tintDot]
         let utilizations: [Double?] = [nil, 0, 50, 100]
         let schemes: [ColorScheme] = [.dark, .light]
 

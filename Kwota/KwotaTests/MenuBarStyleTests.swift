@@ -12,6 +12,7 @@ final class MenuBarStyleTests: XCTestCase {
         XCTAssertEqual(MenuBarStyle.resolve("fillBackground"), .fillBackground)
         XCTAssertEqual(MenuBarStyle.resolve("percentText"), .percentText)
         XCTAssertEqual(MenuBarStyle.resolve("percentRing"), .percentRing)
+        XCTAssertEqual(MenuBarStyle.resolve("tintDot"), .tintDot)
     }
 
     func test_resolve_unknown_fallsBackToOriginal() {
@@ -25,9 +26,10 @@ final class MenuBarStyleTests: XCTestCase {
         XCTAssertTrue(MenuBarStyle.fillBackground.requiresUsageSource)
         XCTAssertTrue(MenuBarStyle.percentText.requiresUsageSource)
         XCTAssertTrue(MenuBarStyle.percentRing.requiresUsageSource)
+        XCTAssertTrue(MenuBarStyle.tintDot.requiresUsageSource)
     }
 
     func test_allCases_orderForPicker() {
-        XCTAssertEqual(MenuBarStyle.allCases, [.original, .fillBackground, .percentText, .percentRing])
+        XCTAssertEqual(MenuBarStyle.allCases, [.original, .fillBackground, .percentText, .percentRing, .tintDot])
     }
 }

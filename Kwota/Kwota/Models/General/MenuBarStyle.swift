@@ -10,6 +10,7 @@ enum MenuBarStyle: String, CaseIterable, Identifiable {
     case fillBackground
     case percentText
     case percentRing
+    case tintDot
 
     var id: String { rawValue }
 
@@ -19,6 +20,7 @@ enum MenuBarStyle: String, CaseIterable, Identifiable {
         case .fillBackground: return "Fill background"
         case .percentText:    return "Percent text"
         case .percentRing:    return "Percent ring"
+        case .tintDot:        return "Status dot"
         }
     }
 
