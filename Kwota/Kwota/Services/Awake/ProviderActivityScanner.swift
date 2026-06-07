@@ -142,16 +142,20 @@ enum ProviderActivityBackfill {
         isoFractional.date(from: s) ?? isoPlain.date(from: s)
     }
 
-    /// Codex: `~/.codex/sessions/**/rollout-*.jsonl`. Counts one Codex
-    /// model-output step per `response_item` that is either an assistant text
-    /// message (`payload.type=="message"`, `role=="assistant"`) or a tool call
-    /// the model issued (`payload.type` ending `_call`). The `_call` suffix
-    /// excludes the matching `_call_output` (tool RESULTS, not model output);
-    /// `reasoning` and user/developer messages aren't counted. This matches
-    /// Claude's per-record / Antigravity's per-step unit so the shared-scale
-    /// chart compares like with like. Reuses `CodexActivitySource.watchRoots`
-    /// (deepest existing of `~/.codex/sessions` → `~/.codex`); `[]` when Codex
-    /// isn't installed.
+    /// Codex: `~/.codex/sessions/**/rollout-*.jsonl`. Counts one event per
+    /// `response_item` whose payload is the assistant's text reply
+    /// (`payload.type=="message"`, `role=="assistant"`). Tool calls
+    /// (`function_call`, `web_search_call`, etc.), their `_call_output`
+    /// results, `reasoning`, and user/developer messages are NOT counted —
+    /// each turn produces one event, matching Claude's per-`type=="assistant"`
+    /// record unit and Antigravity's per-`PLANNER_RESPONSE` unit so the
+    /// shared-scale multi-wave chart compares like with like. (Without this,
+    /// a turn with N tool calls inflated the Codex wave by N× relative to
+    /// the same turn on Claude/Antigravity, and a turn taken via `codex`
+    /// CLI showed many more bars than the same turn taken via the
+    /// app-server WAL path which already collapses to one event per turn.)
+    /// Reuses `CodexActivitySource.watchRoots` (deepest existing of
+    /// `~/.codex/sessions` → `~/.codex`); `[]` when Codex isn't installed.
     static func codex(
         home: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> ProviderActivityScanner {
@@ -166,8 +170,7 @@ enum ProviderActivityBackfill {
                       let s = obj["timestamp"] as? String else { return nil }
                 let ptype = (payload["type"] as? String) ?? ""
                 let isAssistantMessage = ptype == "message" && (payload["role"] as? String) == "assistant"
-                let isToolCall = ptype.hasSuffix("_call")
-                guard isAssistantMessage || isToolCall else { return nil }
+                guard isAssistantMessage else { return nil }
                 return parseDate(s)
             }
         )

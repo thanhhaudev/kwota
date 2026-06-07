@@ -120,16 +120,24 @@ final class ProviderActivityScannerTests: XCTestCase {
 
     // MARK: agent-response discriminator (factory closures)
 
-    func test_codexFactory_countsModelStepsNotReasoningOrToolOutput() throws {
+    func test_codexFactory_countsAssistantRepliesOnly_perTurn() throws {
         let home = root.appendingPathComponent("ch", isDirectory: true)
         let dir = home.appendingPathComponent(".codex/sessions/2026/05/31")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let iso = ISO8601DateFormatter(); iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let now = Date(timeIntervalSince1970: 1_780_000_000)
         let ts = iso.string(from: now.addingTimeInterval(-600))
+        // A single Codex turn writes ONE assistant message plus N tool calls
+        // (and possibly internal reasoning) — Codex's rollout JSONL splits a
+        // turn into multiple `response_item` lines, whereas Claude writes a
+        // turn as a single `type=="assistant"` record and Antigravity writes
+        // one `PLANNER_RESPONSE`. Counting the tool calls here would inflate
+        // Codex's wave by N× relative to the other providers' for the same
+        // amount of user-visible work, so only the assistant message counts.
         let lines = [
-            // Counted — model-output steps (text reply + tool calls):
+            // Counted — the assistant's text reply (one per turn):
             "{\"timestamp\":\"\(ts)\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\"}}",
+            // Not counted — tool CALLS the model issued during this same turn:
             "{\"timestamp\":\"\(ts)\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\"}}",
             "{\"timestamp\":\"\(ts)\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\"}}",
             "{\"timestamp\":\"\(ts)\",\"type\":\"response_item\",\"payload\":{\"type\":\"web_search_call\"}}",
@@ -145,7 +153,7 @@ final class ProviderActivityScannerTests: XCTestCase {
 
         let scanner = ProviderActivityBackfill.codex(home: home)
         let dates = ProviderActivityBackfill.scan(scanner, cutoff: now.addingTimeInterval(-24 * 3600))
-        XCTAssertEqual(dates.count, 4)   // assistant message + 3 tool calls
+        XCTAssertEqual(dates.count, 1)   // assistant message only — per-turn unit
     }
 
     func test_antigravityFactory_countsOnlyPlannerResponses() throws {
