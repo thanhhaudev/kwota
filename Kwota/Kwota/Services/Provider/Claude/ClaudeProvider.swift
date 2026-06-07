@@ -137,9 +137,9 @@ final class ClaudeProvider: AccountProvider {
             return try profileStore.apply(oauthProfile: response, for: profile.id)
         } catch ProfileStore.StoreError.identityMismatch {
             throw ProviderMetadataRefreshError.identityMismatch(
-                message: "This profile is bound to a different account. Sign in to the matching Claude CLI account, or remove and re-add the profile.")
+                message: "This account is bound to a different Claude login. Sign back into the matching Claude CLI account, or remove and re-add this entry.")
         } catch {
-            throw ProviderMetadataRefreshError.other(message: "Could not save profile: \(error.localizedDescription)")
+            throw ProviderMetadataRefreshError.other(message: "Could not save account: \(error.localizedDescription)")
         }
     }
 

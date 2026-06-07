@@ -233,7 +233,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
 
         let result = await vm.refreshProfileMetadata(for: p.id)
         if case .otherError(let msg) = result {
-            XCTAssertTrue(msg.contains("different account"),
+            XCTAssertTrue(msg.contains("different Claude"),
                           "expected user-readable identity-mismatch message, got: \(msg)")
         } else {
             XCTFail("expected .otherError, got \(result)")
