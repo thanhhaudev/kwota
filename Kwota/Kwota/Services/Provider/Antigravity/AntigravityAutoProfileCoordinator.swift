@@ -85,15 +85,19 @@ final class AntigravityAutoProfileCoordinator {
         }
 
         // Re-promote-or-create heuristic.
-        // Antigravity is single-account-per-machine in MVP — at most one
-        // archived Antigravity profile can exist. If found, promote it
-        // back to .auto rather than creating a duplicate. Scoping to
-        // `.antigravity` ensures we never promote a different-provider
-        // profile by accident.
-        if let archived = profileStore.profiles.first(where: {
-            $0.providerID == .antigravity && $0.kind == .archived
+        // Antigravity is single-account-per-machine in MVP — any existing
+        // Antigravity profile (.auto OR .archived) represents the same user
+        // and must be reused, never duplicated. The `.archived` case is the
+        // graceful path (Antigravity was closed first, then reopened). The
+        // `.auto` case covers Kwota relaunching while Antigravity stayed up:
+        // Check 1 fails (active belongs to another provider) and the prior
+        // profile is still `.auto` because the close-emit never fired —
+        // without this branch, a fresh profile would be created and the old
+        // one archived, leaving an orphan for the same email on every cycle.
+        if let existing = profileStore.profiles.first(where: {
+            $0.providerID == .antigravity && ($0.kind == .auto || $0.kind == .archived)
         }) {
-            var promoted = archived
+            var promoted = existing
             promoted.kind = .auto
             try? profileStore.updateProfile(promoted)
             profileStore.activateOnAppearance(id: promoted.id, provider: .antigravity)

@@ -194,22 +194,27 @@ final class AntigravityAutoProfileCoordinatorTests: XCTestCase {
                        "Claude takes focus when Antigravity disappears")
     }
 
-    func test_freshCreate_archivesStaleSiblingAntigravityAutoProfiles() throws {
-        // Reproduce the bug: stale Antigravity .auto profile lingers when
-        // active is something else (Codex), then Antigravity emits → must
-        // archive the stale sibling so only one .auto Antigravity exists.
+    func test_kwotaRestart_withAGStillRunning_reusesStaleAutoProfile_doesNotDuplicate() throws {
+        // Real-world bug: user quits Kwota while Antigravity is running and a
+        // non-Antigravity profile is active. The Antigravity .auto profile
+        // never gets archived (the watcher emits nil only when Antigravity
+        // closes, not when Kwota closes). On Kwota relaunch the watcher emits
+        // a fresh identity; before the fix the coordinator (a) failed Check 1
+        // because active was Codex, (b) failed Check 2 because the prior
+        // profile was .auto not .archived, and (c) fell through to creating
+        // a new Antigravity profile and archiving the old one — leaving an
+        // archived orphan for the same account on every restart cycle.
         let watcher = StubAntigravityProcessWatcher()
         let coord = makeCoord(watcher: watcher)
         coord.start()
 
-        // Pre-seed: stale Antigravity .auto + active Codex .auto.
         let stale = Profile(
             name: "Antigravity",
             authMethod: .cliSync,
             providerID: .antigravity,
             organizationId: nil,
             subscriptionRenewsAt: nil,
-            email: nil,
+            email: "user@example.com",
             kind: .auto,
             ownershipBoundary: Date()
         )
@@ -227,17 +232,18 @@ final class AntigravityAutoProfileCoordinatorTests: XCTestCase {
         try profileStore.add(codex)
         try profileStore.setActive(id: codex.id)
 
-        // Trigger: Antigravity emits with a new CSRF (process restart).
-        watcher.emit(makeIdentity(token: "new-csrf"))
+        watcher.emit(makeIdentity(token: "new-csrf-after-relaunch"))
 
-        // Expect: exactly one Antigravity .auto profile (the new one), and
-        // the stale one is now .archived.
-        let antigravityAuto = profileStore.profiles.filter {
-            $0.providerID == .antigravity && $0.kind == .auto
-        }
-        XCTAssertEqual(antigravityAuto.count, 1, "must have exactly one .auto Antigravity profile")
-        let staleAfter = profileStore.profiles.first { $0.id == stale.id }
-        XCTAssertEqual(staleAfter?.kind, .archived, "stale Antigravity profile must be archived")
+        let antigravity = profileStore.profiles.filter { $0.providerID == .antigravity }
+        XCTAssertEqual(antigravity.count, 1,
+                       "Must reuse the stale .auto profile — no archived orphan, no duplicate")
+        XCTAssertEqual(antigravity.first?.id, stale.id,
+                       "Must be the exact same profile id (email + identity preserved)")
+        XCTAssertEqual(antigravity.first?.kind, .auto)
+        XCTAssertEqual(antigravity.first?.email, "user@example.com",
+                       "Email from the prior session survives the relaunch")
+        XCTAssertEqual(profileStore.activeProfileId, codex.id,
+                       "Reuse must not steal focus from the active Codex profile")
     }
 
     func test_promoteArchived_archivesStaleSiblingAntigravityAutoProfiles() throws {
