@@ -39,6 +39,22 @@ final class CodexActivitySource: ActivitySource {
     private var walFlushTask: Task<Void, Never>?
     private let walDebounce: TimeInterval = 0.5
 
+    /// Last observed mtime per `~/.codex/logs_*.sqlite-wal`. Updated by both
+    /// the FSEvent branch (stat at notify-time) and the stat-poll backstop;
+    /// either path bumping it suppresses a redundant fire from the other so
+    /// the same turn isn't double-counted.
+    private var logsWALMtimes: [String: Date] = [:]
+    /// Tight stat-only loop for WAL files. FSEvents is unreliable for SQLite
+    /// WAL writes that overwrite preallocated space without extending the
+    /// file (the common case when `codex app-server` commits within an
+    /// already-grown WAL), so the chart can't depend on FSEvents alone.
+    /// Polling at the cadence of a typical Codex turn (~5–30s) catches every
+    /// turn with negligible cost: one `attributesOfItem` per WAL file per
+    /// tick, no open/read/lock — invisible to Codex's writer.
+    private var walPollTask: Task<Void, Never>?
+    private let walPollInterval: TimeInterval
+    private let walProbe: () -> [(path: String, mtime: Date)]
+
     var activityPublisher: AnyPublisher<ActivityEvent, Never> {
         subject.eraseToAnyPublisher()
     }
@@ -52,6 +68,12 @@ final class CodexActivitySource: ActivitySource {
         // has already discovered, so a stalled FSEvents stream (e.g. after a
         // sleep/wake) can't silently freeze the activity chart mid-session.
         pollInterval: TimeInterval = 60,
+        // 5s — matches a typical Codex turn (~5–30s) so each turn produces its
+        // own chart event without collapsing multiple turns into one. Far
+        // tighter than `pollInterval` because the WAL probe is metadata-only
+        // (`stat`) while the rollout poll reopens and reads file content.
+        walPollInterval: TimeInterval = 5,
+        walProbe: @escaping () -> [(path: String, mtime: Date)] = { CodexActivitySource.defaultWALProbe() },
         notificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter
     ) {
         self.isLive = isLive
@@ -59,12 +81,19 @@ final class CodexActivitySource: ActivitySource {
         self.clock = clock
         self.scanner = scanner
         self.pollInterval = pollInterval
+        self.walPollInterval = walPollInterval
+        self.walProbe = walProbe
         self.notificationCenter = notificationCenter
     }
 
     func start() {
         stop()
         startedAt = clock()
+        // Baseline the WAL mtimes so the first real tick only fires for
+        // mtime ADVANCES — a pre-existing WAL (from before launch) isn't a
+        // turn, and replaying historical content here would double-count what
+        // the launch backfill already covered for rollout JSONL.
+        seedWALMtimes()
         startConsuming()
         // Poll backstop: FSEvents delivery isn't guaranteed for a long-running
         // process (it can stall after a sleep/wake), and the stream is armed once
@@ -78,6 +107,18 @@ final class CodexActivitySource: ActivitySource {
                 await self?.pollAndDiscover()
             }
         }
+        // WAL stat-poll backstop: FSEvents is unreliable for SQLite WAL
+        // content-overwrites (no file-size extension → no kernel notification
+        // in practice), so the chart can't depend on the stream alone. A
+        // separate timer stat'ing only `~/.codex/logs_*.sqlite-wal` catches
+        // every turn at the cost of a single metadata call per file per tick.
+        walPollTask = Task { @MainActor [weak self, walPollInterval] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(walPollInterval * 1_000_000_000))
+                if Task.isCancelled { return }
+                self?.pollLogsWAL()
+            }
+        }
         // On wake, re-arm the FSEvents stream (a fresh stream resumes delivery and
         // discovers sessions created while asleep) and catch up immediately rather
         // than waiting for the next poll tick.
@@ -88,6 +129,7 @@ final class CodexActivitySource: ActivitySource {
                 guard let self else { return }
                 self.startConsuming()
                 await self.pollAndDiscover()
+                self.pollLogsWAL()
             }
         }
     }
@@ -112,6 +154,13 @@ final class CodexActivitySource: ActivitySource {
                 // Debounce coalesces a turn's worth of appends into one event.
                 if Self.isLogsWAL(path) {
                     guard self.isLive() else { continue }
+                    // Suppress the next stat-poll tick from re-firing for the
+                    // same bump: record the current mtime so `pollLogsWAL`'s
+                    // advance check returns false until the next real append.
+                    if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                       let mtime = attrs[.modificationDate] as? Date {
+                        self.logsWALMtimes[path] = mtime
+                    }
                     self.scheduleWALFlush()
                     continue
                 }
@@ -202,9 +251,41 @@ final class CodexActivitySource: ActivitySource {
     func stop() {
         consumeTask?.cancel(); consumeTask = nil
         pollTask?.cancel(); pollTask = nil
+        walPollTask?.cancel(); walPollTask = nil
         walFlushTask?.cancel(); walFlushTask = nil
         if let wakeObserver { notificationCenter.removeObserver(wakeObserver) }
         wakeObserver = nil
+    }
+
+    /// Baseline `logsWALMtimes` from the current `walProbe()` snapshot so the
+    /// first real poll fires only on advances. A pre-existing WAL with mtime
+    /// older than `startedAt` isn't a turn — it's whatever Codex did before
+    /// Kwota launched.
+    private func seedWALMtimes() {
+        for entry in walProbe() {
+            logsWALMtimes[entry.path] = entry.mtime
+        }
+    }
+
+    /// Stat-only WAL backstop. For each `~/.codex/logs_*.sqlite-wal`, compare
+    /// the current mtime to the last seen one; on advance, schedule a WAL
+    /// flush (same path FSEvents would take). First sight of a file (no prior
+    /// entry, e.g. a generation `logs_3` rolled while running) seeds the
+    /// baseline without firing — we can't tell whether the file was just
+    /// created for this turn or rolled before we noticed.
+    private func pollLogsWAL() {
+        guard isLive() else { return }
+        for entry in walProbe() {
+            let prior = logsWALMtimes[entry.path]
+            guard prior != nil else {
+                logsWALMtimes[entry.path] = entry.mtime
+                continue
+            }
+            if entry.mtime > prior! {
+                logsWALMtimes[entry.path] = entry.mtime
+                scheduleWALFlush()
+            }
+        }
     }
 
     /// True for `~/.codex/logs_*.sqlite-wal`. Excludes `state_*`, `goals_*`,
@@ -384,9 +465,30 @@ final class CodexActivitySource: ActivitySource {
         }
     }
 
+    /// Production WAL probe: enumerate `~/.codex` for files matching the
+    /// same `logs_*.sqlite-wal` filter the FSEvent branch uses, then `stat`
+    /// each for its modification date. Returns `[]` when `~/.codex` is
+    /// absent (Codex not installed) — the source then never fires WAL
+    /// events, which is correct.
+    nonisolated static func defaultWALProbe() -> [(path: String, mtime: Date)] {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex").path
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
+        var out: [(path: String, mtime: Date)] = []
+        for name in entries where name.hasPrefix("logs_") && name.hasSuffix(".sqlite-wal") {
+            let full = (dir as NSString).appendingPathComponent(name)
+            guard let attrs = try? fm.attributesOfItem(atPath: full),
+                  let mtime = attrs[.modificationDate] as? Date else { continue }
+            out.append((path: full, mtime: mtime))
+        }
+        return out
+    }
+
     deinit {
         consumeTask?.cancel()
         pollTask?.cancel()
+        walPollTask?.cancel()
         walFlushTask?.cancel()
         if let wakeObserver { notificationCenter.removeObserver(wakeObserver) }
     }

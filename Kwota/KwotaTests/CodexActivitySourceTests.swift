@@ -497,4 +497,129 @@ final class CodexActivitySourceTests: XCTestCase {
             CodexActivitySource.fsEventsRoots(home: home) { _ in false }.isEmpty
         )
     }
+
+    // MARK: - WAL stat-poll backstop
+    //
+    // FSEvents is unreliable for SQLite WAL writes that overwrite preallocated
+    // space (the common case when `codex app-server` commits within an
+    // already-grown WAL). A separate stat-only poll catches what the stream
+    // misses; these tests pin the contract: pre-launch mtime never replays,
+    // an advance fires exactly one event, and the FSEvent path suppresses the
+    // next poll tick from double-counting the same bump.
+
+    /// A pre-existing WAL whose mtime is older than `start()` must not
+    /// re-fire on the first poll tick — that's not a turn, just whatever
+    /// Codex did before Kwota launched. We seed `logsWALMtimes` at start so
+    /// the very first mtime read becomes the baseline.
+    func test_walPoll_seedsBaseline_andDoesNotFireOnFirstTick() async throws {
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        var received: [ActivityEvent] = []
+        let walPath = "/Users/x/.codex/logs_2.sqlite-wal"
+        let initialMtime = Date(timeIntervalSince1970: 1_700_000_000)
+        let probedMtime = initialMtime
+        let source = CodexActivitySource(
+            isLive: { true },
+            makeFileEvents: { stream },
+            clock: { Date() },
+            walPollInterval: 0.05,
+            walProbe: { [(path: walPath, mtime: probedMtime)] },
+            notificationCenter: NotificationCenter()
+        )
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+
+        // Run several poll ticks with the same mtime — must stay silent.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        await drain()
+        XCTAssertTrue(received.isEmpty, "stable mtime must not fire")
+        cont.finish(); source.stop()
+    }
+
+    /// When the WAL mtime advances after `start()`, the poll must fire one
+    /// agent-response (and one file-write) via the same debounce path
+    /// FSEvents takes.
+    func test_walPoll_firesOnMtimeAdvance() async throws {
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        var received: [ActivityEvent] = []
+        let walPath = "/Users/x/.codex/logs_2.sqlite-wal"
+        // Wrap mtime in a reference so the closure sees the latest write.
+        final class Box { var mtime = Date(timeIntervalSince1970: 1_700_000_000) }
+        let box = Box()
+        let source = CodexActivitySource(
+            isLive: { true },
+            makeFileEvents: { stream },
+            clock: { Date() },
+            walPollInterval: 0.05,
+            walProbe: { [(path: walPath, mtime: box.mtime)] },
+            notificationCenter: NotificationCenter()
+        )
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+
+        // Let the baseline seed and a couple of stable ticks land.
+        try await Task.sleep(nanoseconds: 150_000_000)
+        await drain()
+        XCTAssertTrue(received.isEmpty, "stable baseline must not fire")
+
+        // Advance the mtime; next poll should detect and schedule a flush.
+        box.mtime = Date(timeIntervalSince1970: 1_700_000_010)
+        try await Task.sleep(nanoseconds: 800_000_000)   // tick + 0.5s debounce
+        await drain()
+
+        XCTAssertEqual(received.filter { $0.kind == .agentResponse }.count, 1)
+        XCTAssertEqual(received.filter { $0.kind == .fileWrite }.count, 1)
+        cont.finish(); source.stop()
+    }
+
+    /// An FSEvent for a WAL path must update `logsWALMtimes` so the next
+    /// stat-poll tick does not refire the same bump.
+    func test_walFSEventSuppressesPollDoubleFire() async throws {
+        // Use a real temp WAL file so the FSEvent branch's stat call can read
+        // its mtime; the WAL probe also reflects the same file.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kwota-codex-wal-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let walURL = tmp.appendingPathComponent("logs_2.sqlite-wal")
+        FileManager.default.createFile(atPath: walURL.path, contents: Data("seed".utf8))
+        // Make the seed mtime distinctly in the past.
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -60)], ofItemAtPath: walURL.path)
+
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        var received: [ActivityEvent] = []
+        // walProbe stats the real file so the FSEvent's mtime-store matches.
+        let source = CodexActivitySource(
+            isLive: { true },
+            makeFileEvents: { stream },
+            clock: { Date() },
+            walPollInterval: 0.05,
+            walProbe: {
+                guard let attrs = try? FileManager.default.attributesOfItem(atPath: walURL.path),
+                      let mtime = attrs[.modificationDate] as? Date else { return [] }
+                return [(path: walURL.path, mtime: mtime)]
+            },
+            notificationCenter: NotificationCenter()
+        )
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+
+        // Bump the WAL's mtime, then yield the FSEvent. The FSEvent branch
+        // will stat the file and record the new mtime, suppressing the next
+        // poll-tick from refiring.
+        let bumped = Date()
+        try FileManager.default.setAttributes(
+            [.modificationDate: bumped], ofItemAtPath: walURL.path)
+        cont.yield(walURL.path)
+
+        try await Task.sleep(nanoseconds: 800_000_000)   // debounce + a few poll ticks
+        await drain()
+
+        XCTAssertEqual(received.filter { $0.kind == .agentResponse }.count, 1,
+                       "FSEvent + same-bump poll must collapse to a single event")
+        cont.finish(); source.stop()
+    }
 }
