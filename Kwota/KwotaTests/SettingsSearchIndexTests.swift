@@ -62,10 +62,10 @@ final class SettingsSearchIndexTests: XCTestCase {
     }
 
     func test_resultGroups_section_only_match_has_empty_items() {
-        let groups = SettingsSearchIndex.resultGroups(for: "profiles")
-        let profiles = groups.first { $0.section == .profiles }
-        XCTAssertNotNil(profiles)
-        XCTAssertTrue(profiles!.items.isEmpty)
+        let groups = SettingsSearchIndex.resultGroups(for: "accounts")
+        let accounts = groups.first { $0.section == .profiles }
+        XCTAssertNotNil(accounts)
+        XCTAssertTrue(accounts!.items.isEmpty)
     }
 
     func test_resultGroups_ordering_is_deterministic() {

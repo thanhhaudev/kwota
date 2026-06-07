@@ -23,7 +23,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .profiles:      return "Profiles"
+        case .profiles:      return "Accounts"
         case .awake:         return "Awake"
         case .cache:         return "Cache"
         case .general:       return "General"

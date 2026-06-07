@@ -26,8 +26,8 @@ struct ProfileHistoryCard: View {
         let ordered = orderedProfiles
         VStack(spacing: 0) {
             if ordered.isEmpty {
-                SettingsRow(title: "No profiles yet",
-                            subtitle: "Add a profile to track usage history.") { EmptyView() }
+                SettingsRow(title: "No accounts yet",
+                            subtitle: "Accounts appear here once you sign into a provider's CLI.") { EmptyView() }
             } else {
                 ForEach(Array(ordered.enumerated()), id: \.element.id) { index, profile in
                     if index > 0 { SettingsSectionDivider() }

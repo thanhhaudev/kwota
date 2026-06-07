@@ -128,7 +128,7 @@ struct ProfileDetailView: View {
         }
         .buttonStyle(.borderless)
         .disabled(refreshState == .loading)
-        .help("Refresh profile from \(provider?.displayName ?? "provider")")
+        .help("Refresh account from \(provider?.displayName ?? "provider")")
     }
 
     private func badge(text: String, foreground: Color, background: Color) -> some View {
@@ -232,7 +232,7 @@ struct ProfileDetailView: View {
                     copyableRow("Org UUID", liveProfile.organizationId)
                     Divider().padding(.leading, 14)
                 }
-                copyableRow("Profile ID", liveProfile.id.uuidString)
+                copyableRow("Kwota ID", liveProfile.id.uuidString)
             }
             .background(rowBackground)
         } label: {
@@ -376,7 +376,7 @@ struct ProfileDetailView: View {
             onDelete()
             dismiss()
         } label: {
-            Label("Delete profile", systemImage: "trash")
+            Label("Delete account", systemImage: "trash")
         }
     }
 
@@ -501,10 +501,10 @@ struct ProfileDetailView: View {
         let result = await vm.refreshProfileMetadata(for: profile.id)
         switch result {
         case .updated:
-            refreshState = .banner(.success, message: "Profile updated")
+            refreshState = .banner(.success, message: "Account updated")
             scheduleSuccessDismiss()
         case .noChange:
-            refreshState = .banner(.success, message: "Profile is up to date")
+            refreshState = .banner(.success, message: "Account is up to date")
             scheduleSuccessDismiss()
         case .unauthorized:
             refreshState = .banner(.error,

@@ -68,7 +68,7 @@ final class CodexProvider: AccountProvider {
         if let onDisk = auth.email, let target = profile.email,
            onDisk.caseInsensitiveCompare(target) != .orderedSame {
             throw ProviderMetadataRefreshError.identityMismatch(
-                message: "The Codex CLI is signed in as a different account. Switch the Codex CLI back to this account, or remove and re-add the profile.")
+                message: "The Codex CLI is signed in as a different account. Switch the Codex CLI back to this account, or remove and re-add this entry.")
         }
         let changed = reconcileProfile(profile, with: auth)
 
@@ -80,7 +80,7 @@ final class CodexProvider: AccountProvider {
             throw ProviderMetadataRefreshError.rateLimited(retryAfter: retry)
         } catch is CodexProvider.IdentityMismatchError {
             throw ProviderMetadataRefreshError.identityMismatch(
-                message: "The Codex CLI is signed in as a different account. Switch the Codex CLI back to this account, or remove and re-add the profile.")
+                message: "The Codex CLI is signed in as a different account. Switch the Codex CLI back to this account, or remove and re-add this entry.")
         } catch let urlError as URLError where ProviderMetadataRefreshError.isOfflineCode(urlError.code) {
             throw ProviderMetadataRefreshError.offline
         } catch {

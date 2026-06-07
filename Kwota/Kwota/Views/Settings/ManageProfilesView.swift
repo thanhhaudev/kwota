@@ -87,7 +87,7 @@ struct ManageProfilesView: View {
         }
         .alert(item: $removeError) { err in
             Alert(
-                title: Text("Profile removed with residual data"),
+                title: Text("Account removed with residual data"),
                 message: Text("Kwota removed '\(err.profileName)' from the list but some files could not be deleted: \(err.message). You may want to clean these manually."),
                 dismissButton: .default(Text("OK"))
             )

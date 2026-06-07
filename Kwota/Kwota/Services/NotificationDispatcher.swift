@@ -158,7 +158,7 @@ final class NotificationDispatcher {
                 : "Long-window quota reset. Full quota available."
         case .tokenExpiry(let at):
             let hours = max(1, Int(at.timeIntervalSinceNow / 3600))
-            return "CLI token expires in \(hours)h. Re-authenticate from Profiles."
+            return "CLI token expires in \(hours)h. Re-authenticate from Accounts."
         }
     }
 

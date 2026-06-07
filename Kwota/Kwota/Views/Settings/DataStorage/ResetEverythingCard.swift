@@ -25,7 +25,7 @@ struct ResetEverythingCard: View {
             .buttonStyle(.borderedProminent)
             .tint(.red)
 
-            Text("Removes profiles, credentials, usage history, settings, and cache results. Kwota will quit after reset.")
+            Text("Removes accounts, credentials, usage history, settings, and cache results. Kwota will quit after reset.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -41,7 +41,7 @@ struct ResetEverythingCard: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This wipes profiles, credentials, usage history, settings, and cache scan results, then quits Kwota.")
+            Text("This wipes accounts, credentials, usage history, settings, and cache scan results, then quits Kwota.")
         }
         .sheet(isPresented: $secondAlertShown) {
             ResetConfirmSheet(resetField: $resetField) {

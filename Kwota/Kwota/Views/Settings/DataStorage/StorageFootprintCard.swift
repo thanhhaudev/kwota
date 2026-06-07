@@ -41,8 +41,8 @@ struct StorageFootprintCard: View {
 
             SettingsSectionDivider()
 
-            chevronRow(label: "Profiles",
-                       detail: "\(profileCount) \(profileCount == 1 ? "profile" : "profiles") · \(byteString(profilesSize.bytes))",
+            chevronRow(label: "Accounts",
+                       detail: "\(profileCount) \(profileCount == 1 ? "account" : "accounts") · \(byteString(profilesSize.bytes))",
                        url: AppPaths.applicationSupportDirectory.appendingPathComponent("profiles", isDirectory: true))
 
             SettingsSectionDivider()

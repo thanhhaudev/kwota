@@ -23,7 +23,7 @@ struct DataStorageTabView: View {
                     }
                     .id("data.usagehistory")
 
-                    SettingsGroupedSection(caption: "Profile history") {
+                    SettingsGroupedSection(caption: "Account history") {
                         ProfileHistoryCard(vm: vm)
                     }
                     .id("data.profilehistory")

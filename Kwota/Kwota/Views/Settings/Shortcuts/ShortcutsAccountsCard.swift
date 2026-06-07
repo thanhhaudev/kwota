@@ -15,7 +15,7 @@ struct ShortcutsAccountsCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if profileStore.profiles.isEmpty {
-                Text("Add a profile in Profiles to assign a shortcut.")
+                Text("Add an account in Accounts to assign a shortcut.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 8)
@@ -48,7 +48,7 @@ struct ShortcutsAccountsCard: View {
                 }
             }
 
-            Text("Reorder or rename profiles in the Profiles tab.")
+            Text("Manage accounts in the Accounts tab.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
