@@ -77,13 +77,13 @@ The Makefile pins a shared DerivedData path so worktrees + subagent invocations 
 
 ## Signing & install
 
-The app runs unsigned (ad-hoc) for everything except **system-cache cleaning**, which goes through a root LaunchDaemon (`KwotaPrivilegedHelper`) installed via `SMAppService`. `SMAppService` requires Developer-ID signing, so:
+The app runs ad-hoc except for **system-cache cleaning**, which uses a root LaunchDaemon (`KwotaPrivilegedHelper`) installed via `SMAppService`. To install:
 
 1. Copy `Local.xcconfig.example` to `Local.xcconfig` (gitignored) and set `DEVELOPMENT_TEAM` to your own Apple team ID. `make build` does this copy automatically on first run if the file is missing — leave it empty for ad-hoc.
 2. `make release-app` → `build/Release/Kwota.app`. Drag to `/Applications`.
 3. In the app: Settings → Cache → Privileged helper → Install. Approve in System Settings → General → Login Items & Extensions.
 
-A free Apple personal team works on your own machine but its certificate expires after ~7 days. A paid Developer ID does not.
+Any Apple ID added to Xcode (Settings → Accounts) is enough — the helper's XPC requirement binds to the signing team at runtime, so any team works. A paid Apple Developer Program is only required to distribute the app to other Macs.
 
 If you previously experimented with the helper and `Install` returns errors, clear the stale registration once: `sudo sfltool resetbtm`.
 
