@@ -959,13 +959,21 @@ final class UsageMonitorTests: XCTestCase {
         XCTAssertEqual(result, [], "KernelDropped ⇒ full-walk sentinel")
     }
 
-    func testParseFSEventsBatch_mustScanSubDirsFlag_returnsFullWalkSentinel() {
+    func testParseFSEventsBatch_mustScanSubDirsFlag_isNOTTreatedAsOverflow() {
+        // MustScanSubDirs is deliberately excluded from the overflow mask
+        // (see the doc-comment on parseFSEventsBatch). Apple's docs frame
+        // it as data loss, but in practice the kernel fires it whenever
+        // events are coalesced hierarchically — under load it can fire
+        // every few seconds, and treating each as a full-walk request put
+        // the process at >50% CPU. The 5-minute safety-poll catches any
+        // truly-missed events.
         let result = UsageMonitor.parseFSEventsBatch(
             numEvents: 1,
             paths: ["/foo/a.jsonl"],
             flags: [FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs)]
         )
-        XCTAssertEqual(result, [], "MustScanSubDirs ⇒ full-walk sentinel")
+        XCTAssertEqual(result, [URL(fileURLWithPath: "/foo/a.jsonl")],
+                       "MustScanSubDirs falls through to normal path processing")
     }
 
     // MARK: - tickAsync deferred-paths state (Codex Fix 1)

@@ -385,14 +385,26 @@ final class UsageMonitor: ObservableObject {
     ///
     /// Returns:
     ///   - `[]` (empty set, full-walk sentinel) when the kernel signals an
-    ///     overflow via any of `kFSEventStreamEventFlagUserDropped`,
-    ///     `kFSEventStreamEventFlagKernelDropped`, or
-    ///     `kFSEventStreamEventFlagMustScanSubDirs`. The path list is
+    ///     overflow via `kFSEventStreamEventFlagUserDropped` or
+    ///     `kFSEventStreamEventFlagKernelDropped`. The path list is
     ///     incomplete; the caller must force a full walk.
     ///   - A non-empty `Set<URL>` of changed `.jsonl` paths when the batch
     ///     is reliable and at least one path matches.
     ///   - `nil` when the batch is reliable but contains no `.jsonl` paths
     ///     (caller suppresses the yield — directory-only events).
+    ///
+    /// `kFSEventStreamEventFlagMustScanSubDirs` is deliberately NOT in the
+    /// overflow mask. Apple's docs describe it as also indicating data loss,
+    /// but in practice the kernel sets it whenever events are "coalesced
+    /// hierarchically" — i.e., under sustained event load. A live sample
+    /// during heavy subagent activity showed `MustScanSubDirs` firing every
+    /// few seconds, which combined with the deferred-paths loop in
+    /// `tickAsync` produced a chain of full walks (~1.4s each in Debug) that
+    /// drove process CPU above 50%. The 5-minute safety-poll backstop is
+    /// the recovery path for any events truly missed under MustScanSubDirs.
+    /// We trust the path list FSEvents delivers alongside MustScanSubDirs;
+    /// under-counting is bounded by the safety-poll interval, same as the
+    /// pre-Phase-3 behavior.
     nonisolated static func parseFSEventsBatch(
         numEvents: Int,
         paths: [String],
@@ -403,7 +415,6 @@ final class UsageMonitor: ObservableObject {
         let overflowMask: FSEventStreamEventFlags = FSEventStreamEventFlags(
             kFSEventStreamEventFlagUserDropped
             | kFSEventStreamEventFlagKernelDropped
-            | kFSEventStreamEventFlagMustScanSubDirs
         )
         for i in 0..<numEvents {
             if (flags[i] & overflowMask) != 0 {
