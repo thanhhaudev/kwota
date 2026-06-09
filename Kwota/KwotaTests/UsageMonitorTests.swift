@@ -967,4 +967,133 @@ final class UsageMonitorTests: XCTestCase {
         )
         XCTAssertEqual(result, [], "MustScanSubDirs ⇒ full-walk sentinel")
     }
+
+    // MARK: - tickAsync deferred-paths state (Codex Fix 1)
+
+    func testCoalesce_pathThenPath_mergesIntoUnion() {
+        let tmp = TempDirectory()
+        let reader = FakeJSONLogReader()
+        let clock = InMemoryClock(date("2026-04-26T12:00:00Z"))
+        let monitor = UsageMonitor(
+            reader: reader,
+            ledgerURL: tmp.file("ledger.json"),
+            appLaunchInstant: date("2026-04-26T11:00:00Z"),
+            clock: clock.dateProvider,
+            legacyDailyQuotaEstimate: 1_000_000,
+            persistDebounce: 10.0
+        )
+
+        monitor.coalesceForTesting([URL(fileURLWithPath: "/a.jsonl")])
+        monitor.coalesceForTesting([URL(fileURLWithPath: "/b.jsonl")])
+
+        XCTAssertEqual(monitor.pendingPathsForTesting, [
+            URL(fileURLWithPath: "/a.jsonl"),
+            URL(fileURLWithPath: "/b.jsonl")
+        ], "two re-entrant path calls coalesce into the union")
+        XCTAssertFalse(monitor.pendingFullWalkForTesting)
+    }
+
+    func testCoalesce_pathThenFullWalk_fullWalkSupersedes() {
+        let tmp = TempDirectory()
+        let reader = FakeJSONLogReader()
+        let monitor = UsageMonitor(
+            reader: reader,
+            ledgerURL: tmp.file("ledger.json"),
+            persistDebounce: 10.0
+        )
+
+        monitor.coalesceForTesting([URL(fileURLWithPath: "/a.jsonl")])
+        monitor.coalesceForTesting(nil)   // full walk requested
+
+        XCTAssertTrue(monitor.pendingFullWalkForTesting,
+                      "full-walk request must override pending path set")
+        // The pending paths set may be unchanged or cleared — either is
+        // fine because the loop discards them once pendingFullWalk is true.
+        // We don't assert on its contents.
+    }
+
+    func testCoalesce_fullWalkThenPath_pathSubsumed() {
+        let tmp = TempDirectory()
+        let reader = FakeJSONLogReader()
+        let monitor = UsageMonitor(
+            reader: reader,
+            ledgerURL: tmp.file("ledger.json"),
+            persistDebounce: 10.0
+        )
+
+        monitor.coalesceForTesting(nil)
+        monitor.coalesceForTesting([URL(fileURLWithPath: "/a.jsonl")])
+
+        XCTAssertTrue(monitor.pendingFullWalkForTesting,
+                      "full-walk stays pending after a later path call")
+        XCTAssertEqual(monitor.pendingPathsForTesting, [],
+                       "path call after a pending full walk is subsumed")
+    }
+
+    func testTickAsync_loopConsumesPendingPaths_incrementalNotFullWalk() async {
+        // The deferred-paths state primes the loop: first iteration uses
+        // the call-site filter; second iteration consumes the deferred
+        // path set. No `read()` (full walk) is ever called.
+        let tmp = TempDirectory()
+        let reader = FakeJSONLogReader()
+        let clock = InMemoryClock(date("2026-04-26T12:00:00Z"))
+        let monitor = UsageMonitor(
+            reader: reader,
+            ledgerURL: tmp.file("ledger.json"),
+            appLaunchInstant: date("2026-04-26T11:00:00Z"),
+            clock: clock.dateProvider,
+            legacyDailyQuotaEstimate: 1_000_000,
+            persistDebounce: 10.0
+        )
+        monitor.ownership = .init(profileId: UUID(), boundary: .distantPast)
+        reader.queue = [
+            [event("a", "2026-04-26T11:30:00Z", billable: 100)],
+            [event("b", "2026-04-26T11:31:00Z", billable: 100)]
+        ]
+        monitor.setPendingForTesting(
+            fullWalk: false,
+            paths: [URL(fileURLWithPath: "/b.jsonl")]
+        )
+
+        await monitor.tickAsync(only: [URL(fileURLWithPath: "/a.jsonl")])
+
+        XCTAssertEqual(reader.readFullCount, 0,
+                       "loop must not escalate to a full walk")
+        XCTAssertEqual(reader.readOnlyHistory, [
+            [URL(fileURLWithPath: "/a.jsonl")],
+            [URL(fileURLWithPath: "/b.jsonl")]
+        ], "two incremental reads in order: initial paths, then deferred paths")
+        XCTAssertEqual(monitor.pendingPathsForTesting, [],
+                       "deferred paths consumed")
+        XCTAssertFalse(monitor.pendingFullWalkForTesting)
+    }
+
+    func testTickAsync_loopConsumesPendingFullWalk_afterIncremental() async {
+        // First iteration: read(only:) with the call-site filter.
+        // Deferred state has fullWalk=true, so second iteration is read().
+        let tmp = TempDirectory()
+        let reader = FakeJSONLogReader()
+        let clock = InMemoryClock(date("2026-04-26T12:00:00Z"))
+        let monitor = UsageMonitor(
+            reader: reader,
+            ledgerURL: tmp.file("ledger.json"),
+            appLaunchInstant: date("2026-04-26T11:00:00Z"),
+            clock: clock.dateProvider,
+            legacyDailyQuotaEstimate: 1_000_000,
+            persistDebounce: 10.0
+        )
+        monitor.ownership = .init(profileId: UUID(), boundary: .distantPast)
+        reader.queue = [
+            [event("a", "2026-04-26T11:30:00Z", billable: 100)],
+            []
+        ]
+        monitor.setPendingForTesting(fullWalk: true, paths: [])
+
+        await monitor.tickAsync(only: [URL(fileURLWithPath: "/a.jsonl")])
+
+        XCTAssertEqual(reader.readFullCount, 1, "second iteration is a full walk")
+        XCTAssertEqual(reader.readOnlyHistory.count, 1)
+        XCTAssertFalse(monitor.pendingFullWalkForTesting,
+                       "deferred full walk consumed")
+    }
 }

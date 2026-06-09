@@ -117,7 +117,12 @@ final class UsageMonitor: ObservableObject {
     /// Serializes `tickAsync` reads (see `tickAsync`). `@MainActor` state, only
     /// touched on the main actor at the suspension-free head of `tickAsync`.
     private var isReading = false
-    private var readAgain = false
+    /// Re-entrant tick requests that arrived while `isReading` was true.
+    /// Consumed by the in-flight `tickAsync`'s loop AFTER its current read
+    /// returns. A full-walk request supersedes any pending path set; later
+    /// path requests are subsumed by a pending full walk.
+    private var pendingFullWalk = false
+    private var pendingPaths: Set<URL> = []
 
     /// Serial background queue for `persistLedger`/`persistDailyCounterState`.
     /// Separate from `readQueue` so a long write can't block the read path and
@@ -250,18 +255,36 @@ final class UsageMonitor: ObservableObject {
     /// instances and starved parallel tests sharing the process.
     private let readQueue = DispatchQueue(label: "com.thanhhaudev.kwota.usage-read", qos: .utility)
 
+    /// Merges a re-entrant `tickAsync` request into the deferred state.
+    /// Called only when `isReading` is true; the caller returns
+    /// immediately after coalescing.
+    private func coalescePending(_ paths: Set<URL>?) {
+        if paths == nil {
+            // Full-walk request supersedes any pending paths.
+            pendingFullWalk = true
+        } else if !pendingFullWalk {
+            // Only merge if a full walk isn't already queued.
+            pendingPaths.formUnion(paths!)
+        }
+    }
+
     /// Production tick path: runs the (heavy, frequent) filesystem walk off the
     /// main thread, then ingests on the main actor. Reads are serialized via
     /// `isReading` — `read()` mutates the reader's per-file offsets, so two
-    /// concurrent walks would race; a tick that arrives mid-read sets
-    /// `readAgain` so the in-flight read re-runs once to catch the new data.
+    /// concurrent walks would race. A tick that arrives mid-read is COALESCED
+    /// into `pendingFullWalk`/`pendingPaths`; the in-flight loop consumes that
+    /// deferred state to drive the next iteration. Path requests merge into
+    /// the union; a full-walk request supersedes any pending paths; a later
+    /// path request is subsumed by a pending full walk.
     func tickAsync(only paths: Set<URL>? = nil) async {
-        if isReading { readAgain = true; return }
+        if isReading {
+            coalescePending(paths)
+            return
+        }
         isReading = true
         defer { isReading = false }
-        var currentPaths = paths
-        repeat {
-            readAgain = false
+        var currentPaths: Set<URL>? = paths
+        while true {
             let p = currentPaths
             let events = await withCheckedContinuation { (cont: CheckedContinuation<[UsageEvent], Never>) in
                 readQueue.async { [reader] in
@@ -273,12 +296,39 @@ final class UsageMonitor: ObservableObject {
                 }
             }
             ingest(events)
-            // If a tick arrived while we were reading, escalate to full
-            // walk on the next iteration: we don't know which file changed
-            // during the gap, and missing it is worse than re-stat'ing
-            // the tree once.
-            currentPaths = nil
-        } while readAgain
+            // Consume any tick requests that arrived during the read.
+            if pendingFullWalk {
+                pendingFullWalk = false
+                pendingPaths.removeAll(keepingCapacity: true)
+                currentPaths = nil   // next iteration: full walk
+            } else if !pendingPaths.isEmpty {
+                let next = pendingPaths
+                pendingPaths.removeAll(keepingCapacity: true)
+                currentPaths = next  // next iteration: deferred paths
+            } else {
+                return   // no more work
+            }
+        }
+    }
+
+    // MARK: Test seams for the deferred-paths state machine
+
+    /// Read access to `pendingPaths` for tests. Production code uses the
+    /// field directly.
+    var pendingPathsForTesting: Set<URL> { pendingPaths }
+    /// Read access to `pendingFullWalk` for tests. Production code uses
+    /// the field directly.
+    var pendingFullWalkForTesting: Bool { pendingFullWalk }
+    /// Invokes `coalescePending` directly so tests can assert the
+    /// coalescing rules without driving a real race.
+    func coalesceForTesting(_ paths: Set<URL>?) {
+        coalescePending(paths)
+    }
+    /// Pre-populate the deferred state before calling `tickAsync` so
+    /// tests can verify the loop's consume-pending behavior end-to-end.
+    func setPendingForTesting(fullWalk: Bool, paths: Set<URL>) {
+        pendingFullWalk = fullWalk
+        pendingPaths = paths
     }
 
     private func ingest(_ events: [UsageEvent]) {
