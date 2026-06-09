@@ -109,6 +109,30 @@ final class UsageMonitor: ObservableObject {
     private var isReading = false
     private var readAgain = false
 
+    /// Serial background queue for `persistLedger`/`persistDailyCounterState`.
+    /// Separate from `readQueue` so a long write can't block the read path and
+    /// vice versa. Background QoS so it never preempts UI work.
+    private let persistQueue = DispatchQueue(
+        label: "com.thanhhaudev.kwota.usage-persist",
+        qos: .utility
+    )
+    /// Trailing-debounce work items. Cancelled + rescheduled on every dirty
+    /// notification; fire on `persistQueue` after `persistDebounce` seconds.
+    /// The matching `pending…Action` closure captures the snapshot at
+    /// scheduling time so `flushPersistForTesting()` can re-run the write
+    /// after cancellation (a cancelled `DispatchWorkItem.perform()` is a
+    /// no-op, so the closure has to live outside the work item).
+    private var pendingLedgerPersist: DispatchWorkItem?
+    private var pendingLedgerAction: (() -> Void)?
+    private var pendingCounterPersist: DispatchWorkItem?
+    private var pendingCounterAction: (() -> Void)?
+    /// Debounce window. Production default 1.0s; tests inject longer windows
+    /// plus `flushPersistForTesting()` for deterministic ordering.
+    private let persistDebounce: TimeInterval
+    /// Optional hook fired on `persistQueue` after a successful ledger write.
+    /// Used by tests to count writes; nil in production.
+    private let persistDidWriteForTesting: (() -> Void)?
+
     /// Yields once per batch of writes under `~/.claude/projects`. Production
     /// gets a real FSEvents stream via `UsageMonitor.live()`; the default is
     /// inert so unit tests (which inject a fake reader and drive `tick()`
@@ -129,7 +153,9 @@ final class UsageMonitor: ObservableObject {
         clock: @escaping () -> Date = { Date() },
         fileEvents: AsyncStream<Void> = AsyncStream { _ in },
         safetyPollInterval: TimeInterval = 60,
-        legacyDailyQuotaEstimate: Int = 1_000_000
+        legacyDailyQuotaEstimate: Int = 1_000_000,
+        persistDebounce: TimeInterval = 1.0,
+        persistDidWriteForTesting: (() -> Void)? = nil
     ) {
         self.reader = reader
         self.ledgerURL = ledgerURL
@@ -139,6 +165,8 @@ final class UsageMonitor: ObservableObject {
         self.fileEvents = fileEvents
         self.safetyPollInterval = safetyPollInterval
         self.legacyDailyQuotaEstimate = legacyDailyQuotaEstimate
+        self.persistDebounce = persistDebounce
+        self.persistDidWriteForTesting = persistDidWriteForTesting
         self.ledger = Self.loadLedger(at: ledgerURL)
         publishFromLedger()
     }
@@ -177,6 +205,7 @@ final class UsageMonitor: ObservableObject {
         timer = nil
         listenTask?.cancel()
         listenTask = nil
+        flushPendingPersist()
     }
 
     deinit {
@@ -360,13 +389,25 @@ final class UsageMonitor: ObservableObject {
             count: dailyBillableSinceOwnership,
             ledgerLastUpdate: ledger.lastUpdate
         )
+        let url = dailyCounterURL
+        pendingCounterPersist?.cancel()
+        let action: () -> Void = { Self.writeCounter(state, to: url) }
+        let item = DispatchWorkItem(block: action)
+        pendingCounterPersist = item
+        pendingCounterAction = action
+        persistQueue.asyncAfter(deadline: .now() + persistDebounce, execute: item)
+    }
+
+    /// Pure write helper. `nonisolated static` so it can run on
+    /// `persistQueue` without touching `@MainActor` state.
+    private nonisolated static func writeCounter(_ state: DailyCounterState, to url: URL) {
         do {
             try FileManager.default.createDirectory(
-                at: dailyCounterURL.deletingLastPathComponent(),
+                at: url.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
             let data = try JSONEncoder().encode(state)
-            try data.write(to: dailyCounterURL, options: .atomic)
+            try data.write(to: url, options: .atomic)
         } catch {
             AppLog.shared.log("UsageMonitor daily-counter persist failed: \(error)", level: .error)
         }
@@ -408,16 +449,71 @@ final class UsageMonitor: ObservableObject {
         }
     }
 
+    /// Trailing-debounce persist. Each call cancels any pending write and
+    /// reschedules a single write `persistDebounce` seconds later on
+    /// `persistQueue`. The ledger value is snapshotted on the caller's actor
+    /// (cheap — `UsageLedger` is a value type) and the encode/write run off
+    /// main. `flushPersistForTesting()` and `stop()` force pending writes
+    /// to complete synchronously.
     private func persistLedger() {
+        pendingLedgerPersist?.cancel()
+        let snapshot = ledger
+        let url = ledgerURL
+        let onWrite = persistDidWriteForTesting
+        let action: () -> Void = {
+            Self.writeLedger(snapshot, to: url)
+            onWrite?()
+        }
+        let item = DispatchWorkItem(block: action)
+        pendingLedgerPersist = item
+        pendingLedgerAction = action
+        persistQueue.asyncAfter(deadline: .now() + persistDebounce, execute: item)
+    }
+
+    /// Pure write helper. `nonisolated static` so it can run on
+    /// `persistQueue` without touching `@MainActor` state.
+    private nonisolated static func writeLedger(_ ledger: UsageLedger, to url: URL) {
         do {
             try FileManager.default.createDirectory(
-                at: ledgerURL.deletingLastPathComponent(),
+                at: url.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
             let data = try JSONEncoder().encode(ledger)
-            try data.write(to: ledgerURL, options: .atomic)
+            try data.write(to: url, options: .atomic)
         } catch {
             AppLog.shared.log("UsageMonitor persist failed: \(error)", level: .error)
         }
+    }
+
+    /// Cancel pending persist work items and run their captured actions
+    /// synchronously on `persistQueue`. Called from `stop()` (so app quit
+    /// cannot lose state inside the debounce window) and from
+    /// `flushPersistForTesting()` (so tests can deterministically observe
+    /// post-write state).
+    ///
+    /// Cancelled `DispatchWorkItem.perform()` is a no-op, which is why we
+    /// keep the raw action closures alongside the work items and re-execute
+    /// those directly. `sync` is safe because `persistQueue` is serial and
+    /// we hold no shared locks across the call.
+    private func flushPendingPersist() {
+        pendingLedgerPersist?.cancel()
+        pendingCounterPersist?.cancel()
+        let ledgerAction = pendingLedgerAction
+        let counterAction = pendingCounterAction
+        pendingLedgerPersist = nil
+        pendingLedgerAction = nil
+        pendingCounterPersist = nil
+        pendingCounterAction = nil
+        persistQueue.sync {
+            ledgerAction?()
+            counterAction?()
+        }
+    }
+
+    /// Synchronously executes any pending persist work and waits for it to
+    /// land on disk. Production code does not call this; it exists so unit
+    /// tests can deterministically assert post-write state without sleeping.
+    func flushPersistForTesting() {
+        flushPendingPersist()
     }
 }

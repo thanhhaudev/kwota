@@ -122,6 +122,7 @@ final class UsageMonitorTests: XCTestCase {
         m1.ownership = .init(profileId: profileId, boundary: .distantPast)
         m1.tick()
         XCTAssertEqual(m1.dailyTokens, 500)
+        m1.flushPersistForTesting()   // force debounced ledger write to disk before recreation
 
         let reader2 = FakeJSONLogReader()
         let m2 = UsageMonitor(
@@ -375,6 +376,7 @@ final class UsageMonitorTests: XCTestCase {
         reader1?.queue = [[event("a", "2026-04-26T14:00:00Z", billable: 250)]]
         m1.tick()
         XCTAssertEqual(m1.dailyTokens, 250)
+        m1.flushPersistForTesting()   // force debounced ledger write to disk before recreation
 
         // Recreate the monitor with the same persistence URLs. New ledger
         // load will dedupe the JSONL event — without persistence the
@@ -414,6 +416,7 @@ final class UsageMonitorTests: XCTestCase {
         (m1.reader as? FakeJSONLogReader)?.queue = [[event("a", "2026-04-26T13:30:00Z", billable: 100)]]
         m1.tick()
         XCTAssertEqual(m1.dailyTokens, 100)
+        m1.flushPersistForTesting()   // force debounced ledger write to disk before recreation
 
         // Day 2: new day, counter must reset even though persistence had day 1's value.
         let day2 = date("2026-04-27T01:00:00Z")
@@ -449,6 +452,7 @@ final class UsageMonitorTests: XCTestCase {
         (m1.reader as? FakeJSONLogReader)?.queue = [[event("a", "2026-04-26T14:00:00Z", billable: 100)]]
         m1.tick()
         XCTAssertEqual(m1.dailyTokens, 100)
+        m1.flushPersistForTesting()   // force debounced ledger write to disk before recreation
 
         let profileB = UUID()
         let m2 = UsageMonitor(
@@ -488,6 +492,7 @@ final class UsageMonitorTests: XCTestCase {
         (m1.reader as? FakeJSONLogReader)?.queue = [[event("a", "2026-04-26T14:00:00Z", billable: 250)]]
         m1.tick()
         XCTAssertEqual(m1.dailyTokens, 250)
+        m1.flushPersistForTesting()   // force debounced ledger write to disk before simulating ledger loss
 
         // Simulate ledger loss/corruption by deleting it. Counter file persists.
         try? FileManager.default.removeItem(at: ledgerURL)
@@ -534,6 +539,7 @@ final class UsageMonitorTests: XCTestCase {
         m0.ownership = .init(profileId: profileId, boundary: .distantPast)
         (m0.reader as? FakeJSONLogReader)?.queue = [[event("z", "2026-04-26T14:00:00Z", billable: 50)]]
         m0.tick()
+        m0.flushPersistForTesting()   // force debounced ledger write to disk before recreation
         // ledger now has lastUpdate = now (a real date, not distantPast)
 
         // Write a counter file in the old format (no ledgerLastUpdate field).
@@ -560,5 +566,141 @@ final class UsageMonitorTests: XCTestCase {
         // Live ledger has lastUpdate = now (a real date) → mismatch → counter reset.
         XCTAssertEqual(m.dailyTokens, 0,
                        "old-format counter (ledgerLastUpdate defaults to distantPast) must be discarded when live ledger has a real lastUpdate")
+    }
+
+    func testPersistLedger_doesNotWriteSynchronouslyInsideIngest() {
+        // The on-disk file must NOT exist immediately after tick() returns
+        // when a debounce window is configured. Proves persist hopped off
+        // the calling actor and onto the persist queue.
+        let tmp = TempDirectory()
+        let reader = FakeJSONLogReader()
+        let clock = InMemoryClock(date("2026-04-26T12:00:00Z"))
+        let ledgerURL = tmp.file("ledger.json")
+        let monitor = UsageMonitor(
+            reader: reader,
+            ledgerURL: ledgerURL,
+            appLaunchInstant: date("2026-04-26T11:00:00Z"),
+            clock: clock.dateProvider,
+            legacyDailyQuotaEstimate: 1_000,
+            persistDebounce: 10.0      // long enough that the write cannot land synchronously
+        )
+        reader.queue = [[event("a", "2026-04-26T11:30:00Z", billable: 100)]]
+        monitor.ownership = .init(profileId: UUID(), boundary: .distantPast)
+        monitor.tick()
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: ledgerURL.path),
+            "tick() must not produce a synchronous on-disk write"
+        )
+    }
+
+    func testPersistLedger_coalescesBurstsIntoOneWrite() {
+        // Three back-to-back ticks under a debounce window must produce
+        // exactly one on-disk write after flush.
+        let tmp = TempDirectory()
+        let reader = FakeJSONLogReader()
+        let clock = InMemoryClock(date("2026-04-26T12:00:00Z"))
+        let ledgerURL = tmp.file("ledger.json")
+        var writeCount = 0
+        let monitor = UsageMonitor(
+            reader: reader,
+            ledgerURL: ledgerURL,
+            appLaunchInstant: date("2026-04-26T11:00:00Z"),
+            clock: clock.dateProvider,
+            legacyDailyQuotaEstimate: 1_000,
+            persistDebounce: 10.0,
+            persistDidWriteForTesting: { writeCount += 1 }
+        )
+        reader.queue = [
+            [event("a", "2026-04-26T11:30:00Z", billable: 100)],
+            [event("b", "2026-04-26T11:31:00Z", billable: 100)],
+            [event("c", "2026-04-26T11:32:00Z", billable: 100)]
+        ]
+        monitor.ownership = .init(profileId: UUID(), boundary: .distantPast)
+        monitor.tick()
+        monitor.tick()
+        monitor.tick()
+
+        monitor.flushPersistForTesting()
+        XCTAssertEqual(writeCount, 1, "three ticks within the debounce window must produce one write")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ledgerURL.path))
+    }
+
+    func testFlushPersistForTesting_writesPendingState() {
+        // flush executes the deferred write immediately and returns only
+        // after the file is on disk.
+        let tmp = TempDirectory()
+        let reader = FakeJSONLogReader()
+        let clock = InMemoryClock(date("2026-04-26T12:00:00Z"))
+        let ledgerURL = tmp.file("ledger.json")
+        let monitor = UsageMonitor(
+            reader: reader,
+            ledgerURL: ledgerURL,
+            appLaunchInstant: date("2026-04-26T11:00:00Z"),
+            clock: clock.dateProvider,
+            legacyDailyQuotaEstimate: 1_000,
+            persistDebounce: 10.0
+        )
+        reader.queue = [[event("a", "2026-04-26T11:30:00Z", billable: 100)]]
+        monitor.ownership = .init(profileId: UUID(), boundary: .distantPast)
+        monitor.tick()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ledgerURL.path))
+
+        monitor.flushPersistForTesting()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ledgerURL.path))
+    }
+
+    func testPersistDailyCounter_alsoDebouncesAndWritesOffMain() {
+        let tmp = TempDirectory()
+        let reader = FakeJSONLogReader()
+        let clock = InMemoryClock(date("2026-04-26T12:00:00Z"))
+        let counterURL = tmp.file("daily.json")
+        let monitor = UsageMonitor(
+            reader: reader,
+            ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: counterURL,
+            appLaunchInstant: date("2026-04-26T11:00:00Z"),
+            clock: clock.dateProvider,
+            legacyDailyQuotaEstimate: 1_000,
+            persistDebounce: 10.0
+        )
+        reader.queue = [[event("a", "2026-04-26T11:30:00Z", billable: 100)]]
+        monitor.ownership = .init(profileId: UUID(), boundary: .distantPast)
+        monitor.tick()
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: counterURL.path),
+            "tick() must not write the counter synchronously"
+        )
+        monitor.flushPersistForTesting()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: counterURL.path))
+    }
+
+    func testStop_flushesPendingPersist() {
+        // Pending debounced writes must land on disk by the time stop()
+        // returns. Otherwise an app quit during the debounce window would
+        // lose recent state.
+        let tmp = TempDirectory()
+        let reader = FakeJSONLogReader()
+        let clock = InMemoryClock(date("2026-04-26T12:00:00Z"))
+        let ledgerURL = tmp.file("ledger.json")
+        let monitor = UsageMonitor(
+            reader: reader,
+            ledgerURL: ledgerURL,
+            appLaunchInstant: date("2026-04-26T11:00:00Z"),
+            clock: clock.dateProvider,
+            legacyDailyQuotaEstimate: 1_000,
+            persistDebounce: 60.0    // far longer than the test
+        )
+        reader.queue = [[event("a", "2026-04-26T11:30:00Z", billable: 100)]]
+        monitor.ownership = .init(profileId: UUID(), boundary: .distantPast)
+        monitor.tick()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ledgerURL.path))
+
+        monitor.stop()
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: ledgerURL.path),
+            "stop() must flush pending debounced writes"
+        )
     }
 }
