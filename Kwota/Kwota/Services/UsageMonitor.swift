@@ -328,6 +328,47 @@ final class UsageMonitor: ObservableObject {
         AppPaths.applicationSupportDirectory.appendingPathComponent("usage-monitor-daily.json")
     }
 
+    /// Parses one batch of FSEvents callback args into the AsyncStream's
+    /// payload type. Pure and `nonisolated static` so the callback (which
+    /// runs on the FSEvents dispatch queue, not MainActor) can call it and
+    /// so it's directly unit-testable.
+    ///
+    /// Returns:
+    ///   - `[]` (empty set, full-walk sentinel) when the kernel signals an
+    ///     overflow via any of `kFSEventStreamEventFlagUserDropped`,
+    ///     `kFSEventStreamEventFlagKernelDropped`, or
+    ///     `kFSEventStreamEventFlagMustScanSubDirs`. The path list is
+    ///     incomplete; the caller must force a full walk.
+    ///   - A non-empty `Set<URL>` of changed `.jsonl` paths when the batch
+    ///     is reliable and at least one path matches.
+    ///   - `nil` when the batch is reliable but contains no `.jsonl` paths
+    ///     (caller suppresses the yield — directory-only events).
+    nonisolated static func parseFSEventsBatch(
+        numEvents: Int,
+        paths: [String],
+        flags: [FSEventStreamEventFlags]
+    ) -> Set<URL>? {
+        precondition(paths.count == numEvents)
+        precondition(flags.count == numEvents)
+        let overflowMask: FSEventStreamEventFlags = FSEventStreamEventFlags(
+            kFSEventStreamEventFlagUserDropped
+            | kFSEventStreamEventFlagKernelDropped
+            | kFSEventStreamEventFlagMustScanSubDirs
+        )
+        for i in 0..<numEvents {
+            if (flags[i] & overflowMask) != 0 {
+                return []   // overflow → request full walk
+            }
+        }
+        var changed = Set<URL>()
+        for i in 0..<numEvents {
+            let path = paths[i]
+            guard path.hasSuffix(".jsonl") else { continue }
+            changed.insert(URL(fileURLWithPath: path))
+        }
+        return changed.isEmpty ? nil : changed
+    }
+
     /// FSEvents stream over `~/.claude/projects`, file-level. Yields a
     /// Set<URL> per callback containing the .jsonl paths the kernel
     /// reported as changed. Empty yields are suppressed at the callback
@@ -348,23 +389,38 @@ final class UsageMonitor: ObservableObject {
                 info: Unmanaged.passRetained(box).toOpaque(),
                 retain: nil, release: nil, copyDescription: nil
             )
-            let callback: FSEventStreamCallback = { _, info, numEvents, eventPaths, _, _ in
+            let callback: FSEventStreamCallback = { _, info, numEvents, eventPaths, eventFlags, _ in
                 guard let info else { return }
-                // eventPaths is a CFArrayRef of CFStringRef. We set
-                // kFSEventStreamCreateFlagUseCFTypes in the create call
-                // below so the kernel delivers CF types here instead of
-                // the default char** layout.
+                // eventPaths is a CFArrayRef of CFStringRef (we set
+                // kFSEventStreamCreateFlagUseCFTypes below). eventFlags is a
+                // UnsafePointer<FSEventStreamEventFlags> indexed 0..<numEvents.
                 let cfPaths = Unmanaged<CFArray>.fromOpaque(eventPaths).takeUnretainedValue()
-                var changed = Set<URL>()
+                var pathStrings: [String] = []
+                pathStrings.reserveCapacity(numEvents)
                 for i in 0..<numEvents {
-                    guard let raw = CFArrayGetValueAtIndex(cfPaths, i) else { continue }
-                    let cfString = Unmanaged<CFString>.fromOpaque(raw).takeUnretainedValue()
-                    let path = cfString as String
-                    guard path.hasSuffix(".jsonl") else { continue }
-                    changed.insert(URL(fileURLWithPath: path))
+                    guard let raw = CFArrayGetValueAtIndex(cfPaths, i) else {
+                        pathStrings.append("")   // defensive placeholder
+                        continue
+                    }
+                    pathStrings.append(Unmanaged<CFString>.fromOpaque(raw).takeUnretainedValue() as String)
                 }
-                guard !changed.isEmpty else { return }
-                Unmanaged<Box>.fromOpaque(info).takeUnretainedValue().cont.yield(changed)
+                var flagValues: [FSEventStreamEventFlags] = []
+                flagValues.reserveCapacity(numEvents)
+                for i in 0..<numEvents {
+                    flagValues.append(eventFlags[i])
+                }
+                let parsed = UsageMonitor.parseFSEventsBatch(
+                    numEvents: numEvents,
+                    paths: pathStrings,
+                    flags: flagValues
+                )
+                let box = Unmanaged<Box>.fromOpaque(info).takeUnretainedValue()
+                if let result = parsed {
+                    // `[]` ⇒ overflow → consumer routes to full walk.
+                    // Non-empty ⇒ incremental read of these paths.
+                    box.cont.yield(result)
+                }
+                // `nil` ⇒ no .jsonl + no overflow → suppress yield.
             }
             guard let stream = FSEventStreamCreate(
                 kCFAllocatorDefault, callback, &ctx,

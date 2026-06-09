@@ -914,4 +914,57 @@ final class UsageMonitorTests: XCTestCase {
         XCTAssertEqual(monitor.safetyPollIntervalForTesting, 300)
         _ = monitor
     }
+
+    // MARK: - FSEvents parser (Codex Fix 3)
+
+    func testParseFSEventsBatch_normalBatch_returnsJsonlPaths() {
+        let result = UsageMonitor.parseFSEventsBatch(
+            numEvents: 3,
+            paths: ["/foo/a.jsonl", "/foo/dir", "/foo/b.jsonl"],
+            flags: [0, 0, 0]
+        )
+        XCTAssertEqual(result, [
+            URL(fileURLWithPath: "/foo/a.jsonl"),
+            URL(fileURLWithPath: "/foo/b.jsonl")
+        ])
+    }
+
+    func testParseFSEventsBatch_noJsonlPaths_returnsNil() {
+        // Directory-only event: no .jsonl in the batch and no overflow.
+        // Caller suppresses the yield entirely.
+        let result = UsageMonitor.parseFSEventsBatch(
+            numEvents: 1,
+            paths: ["/foo/dir"],
+            flags: [0]
+        )
+        XCTAssertNil(result, "no .jsonl + no overflow ⇒ caller suppresses yield")
+    }
+
+    func testParseFSEventsBatch_userDroppedFlag_returnsFullWalkSentinel() {
+        let result = UsageMonitor.parseFSEventsBatch(
+            numEvents: 2,
+            paths: ["/foo/a.jsonl", "/foo/b.jsonl"],
+            flags: [0, FSEventStreamEventFlags(kFSEventStreamEventFlagUserDropped)]
+        )
+        XCTAssertEqual(result, [],
+                       "UserDropped on any event ⇒ empty-set sentinel (full walk)")
+    }
+
+    func testParseFSEventsBatch_kernelDroppedFlag_returnsFullWalkSentinel() {
+        let result = UsageMonitor.parseFSEventsBatch(
+            numEvents: 1,
+            paths: ["/foo/a.jsonl"],
+            flags: [FSEventStreamEventFlags(kFSEventStreamEventFlagKernelDropped)]
+        )
+        XCTAssertEqual(result, [], "KernelDropped ⇒ full-walk sentinel")
+    }
+
+    func testParseFSEventsBatch_mustScanSubDirsFlag_returnsFullWalkSentinel() {
+        let result = UsageMonitor.parseFSEventsBatch(
+            numEvents: 1,
+            paths: ["/foo/a.jsonl"],
+            flags: [FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs)]
+        )
+        XCTAssertEqual(result, [], "MustScanSubDirs ⇒ full-walk sentinel")
+    }
 }
