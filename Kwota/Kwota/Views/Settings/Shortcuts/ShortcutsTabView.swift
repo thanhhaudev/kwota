@@ -42,9 +42,11 @@ struct ShortcutsTabView: View {
                     ShortcutsTabsCard()
                 }
 
-                VStack(alignment: .leading, spacing: 0) {
-                    SectionHeader(title: "Switch Account")
-                    ShortcutsAccountsCard(profileStore: vm.profileStore)
+                SettingsGroupedSection(
+                    caption: "Switch Account",
+                    footer: "Works only while the popup is open. Manage accounts in the Accounts tab."
+                ) {
+                    ShortcutsAccountsCard(vm: vm)
                 }
             }
             .padding(.horizontal, 20)

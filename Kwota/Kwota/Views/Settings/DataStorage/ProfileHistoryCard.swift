@@ -114,55 +114,42 @@ struct ProfileHistoryCard: View {
         }
     }
 
-    /// Email as the row title, mirroring ManageProfilesView so the same
-    /// account reads the same in both Settings sections. Falls back to the
-    /// auto-derived display name when an account has no email yet (early
-    /// fetch, signed out before first successful auth probe).
     private func displayName(for profile: Profile) -> String {
-        if let email = profile.email, !email.isEmpty {
-            return isPrivacyMasked ? (profile.maskedEmail ?? email) : email
-        }
-        return profile.resolvedDisplayName
+        ProfileRowPresentation.displayName(profile, privacyMasked: isPrivacyMasked)
     }
 
     private func subtitle(for profile: Profile, entries: Int) -> String {
         let countLabel = "\(entries) \(entries == 1 ? "entry" : "entries")"
-        let plan = isPrivacyMasked ? (profile.maskedPlan ?? "") : (profile.subscriptionPlan ?? "")
-        return plan.isEmpty ? countLabel : "\(plan) · \(countLabel)"
+        if let plan = ProfileRowPresentation.planSubtitle(profile, privacyMasked: isPrivacyMasked) {
+            return "\(plan) · \(countLabel)"
+        }
+        return countLabel
     }
 
     private func badges(for profile: Profile) -> [SettingsRowBadge] {
-        var out: [SettingsRowBadge] = []
         let providerName = vm.registry.provider(for: profile.providerID)?.displayName
             ?? profile.providerID.rawValue.capitalized
-        out.append(ProviderBadgeStyle.badge(for: profile.providerID, name: providerName))
-        if !isLive(profile) {
-            out.append(SettingsRowBadge(
-                text: "Offline",
-                foreground: .secondary,
-                background: Color.secondary.opacity(0.15)
-            ))
-        }
-        return out
+        return ProfileRowPresentation.badges(
+            for: profile,
+            providerName: providerName,
+            isLive: isLive(profile)
+        )
     }
 
-    /// Reuses the popover switcher's liveness predicate so a row appearing
-    /// "Offline" here matches the same set of accounts the switcher dims
-    /// and Notifications hides — see [[project_signout_handoff_asymmetry]].
-    private func isLive(_ profile: Profile) -> Bool {
-        ProfileSwitcherCard.isLive(
-            profile: profile,
+    private var liveness: ProfileLivenessContext {
+        ProfileLivenessContext(
             claudeCLIEmail: vm.cliAccountWatcher.current?.email,
             codexCLIEmail: vm.codexAccountWatcher.current?.email,
             antigravityProcessAlive: vm.antigravityProcessWatcher.current != nil
         )
     }
 
-    /// Live profiles first, offline grouped at the bottom. Stable within
-    /// each group so the on-disk profile order is preserved.
+    private func isLive(_ profile: Profile) -> Bool {
+        ProfileRowPresentation.isLive(profile, liveness: liveness)
+    }
+
     private var orderedProfiles: [Profile] {
-        let all = vm.profileStore.profiles
-        return all.filter(isLive) + all.filter { !isLive($0) }
+        ProfileRowPresentation.ordered(vm.profileStore.profiles, liveness: liveness)
     }
 
     @MainActor

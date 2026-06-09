@@ -6,55 +6,84 @@
 import SwiftUI
 
 struct ShortcutsAccountsCard: View {
-    let profileStore: ProfileStore
+    let vm: MenuBarViewModel
 
+    @AppStorage(AppStorageKeys.isPrivacyMasked) private var isPrivacyMasked: Bool = false
     @State private var definitions: [UUID: HotKeyDefinition] = [:]
     @State private var errors: [UUID: String] = [:]
+    @State private var previousLiveSet: Set<UUID> = []
     private let store = HotKeyStore()
 
+    private var profileStore: ProfileStore { vm.profileStore }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let live = liveness
+        let liveProfiles = profileStore.profiles.filter {
+            $0.kind == .auto && ProfileRowPresentation.isLive($0, liveness: live)
+        }
+        VStack(spacing: 0) {
             if profileStore.profiles.isEmpty {
-                Text("Add an account in Accounts to assign a shortcut.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 8)
+                SettingsRow(
+                    title: "No accounts yet",
+                    subtitle: "Accounts appear here once you sign into a provider's CLI."
+                ) { EmptyView() }
+            } else if liveProfiles.isEmpty {
+                SettingsRow(
+                    title: "No live accounts",
+                    subtitle: "Sign back into a provider's CLI to assign switch-account shortcuts."
+                ) { EmptyView() }
             } else {
-                ForEach(profileStore.profiles, id: \.id) { profile in
-                    HStack(spacing: 8) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(profile.name)
-                                .font(.body)
-                            if let email = profile.email {
-                                Text(email)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        Spacer()
-                        HotKeyRecorderView(definition: binding(for: profile.id)) {
-                            handleChange(for: profile.id)
-                        }
-                    }
-                    if let error = errors[profile.id] {
-                        Text(error)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    if profile.id != profileStore.profiles.last?.id {
-                        Divider()
-                    }
+                ForEach(Array(liveProfiles.enumerated()), id: \.element.id) { index, profile in
+                    if index > 0 { SettingsSectionDivider() }
+                    profileRow(profile)
                 }
             }
-
-            Text("Manage accounts in the Accounts tab.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
-        .settingsCard()
-        .onAppear { reload() }
+        .onAppear {
+            reload()
+            previousLiveSet = Set(liveProfiles.map(\.id))
+        }
         .onChange(of: profileStore.profiles.map(\.id)) { _, _ in reload() }
+        .onChange(of: liveness) { _, _ in handleLivenessChange() }
+    }
+
+    @ViewBuilder
+    private func profileRow(_ profile: Profile) -> some View {
+        SettingsRow(
+            title: ProfileRowPresentation.displayName(profile, privacyMasked: isPrivacyMasked),
+            subtitle: ProfileRowPresentation.planSubtitle(profile, privacyMasked: isPrivacyMasked),
+            leadingBadges: ProfileRowPresentation.badges(
+                for: profile,
+                providerName: providerName(for: profile),
+                isLive: true,
+                includeOfflinePill: false
+            )
+        ) {
+            HotKeyRecorderView(definition: binding(for: profile.id)) {
+                handleChange(for: profile.id)
+            }
+        }
+        if let error = errors[profile.id] {
+            Text(error)
+                .font(.caption)
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 8)
+        }
+    }
+
+    private var liveness: ProfileLivenessContext {
+        ProfileLivenessContext(
+            claudeCLIEmail: vm.cliAccountWatcher.current?.email,
+            codexCLIEmail: vm.codexAccountWatcher.current?.email,
+            antigravityProcessAlive: vm.antigravityProcessWatcher.current != nil
+        )
+    }
+
+    private func providerName(for profile: Profile) -> String {
+        vm.registry.provider(for: profile.providerID)?.displayName
+            ?? profile.providerID.rawValue.capitalized
     }
 
     private func binding(for id: UUID) -> Binding<HotKeyDefinition?> {
@@ -73,9 +102,18 @@ struct ShortcutsAccountsCard: View {
             return
         }
 
+        // Catalog uses live profiles only — offline accounts are hidden
+        // from this card and their stored bindings stay dormant. If a
+        // live profile takes a key currently bound to an offline account,
+        // the collision is resolved when that account returns live (see
+        // `handleLivenessChange`).
+        let live = liveness
+        let liveProfiles = profileStore.profiles.filter {
+            $0.kind == .auto && ProfileRowPresentation.isLive($0, liveness: live)
+        }
         let catalog = ShortcutCatalog.make(
             store: store,
-            profiles: profileStore.profiles,
+            profiles: liveProfiles,
             excluding: .localSwitchProfile(profileID: id)
         )
 
@@ -98,6 +136,49 @@ struct ShortcutsAccountsCard: View {
             store.reset(hiddenName)
         }
         store.setDefinition(definition, for: key)
+    }
+
+    /// When a previously-offline account returns live, restore its
+    /// historical hotkey claim: clear any *other live* row that has been
+    /// using the same key, and surface a per-row error so the user notices.
+    private func handleLivenessChange() {
+        let live = liveness
+        let currentLiveSet: Set<UUID> = Set(
+            profileStore.profiles
+                .filter { $0.kind == .auto && ProfileRowPresentation.isLive($0, liveness: live) }
+                .map(\.id)
+        )
+        let returners = currentLiveSet.subtracting(previousLiveSet)
+        previousLiveSet = currentLiveSet
+        guard !returners.isEmpty else { return }
+
+        var liveBindings: [UUID: HotKeyDefinition] = [:]
+        for id in currentLiveSet {
+            if let def = store.definition(for: ShortcutNames.switchProfile(id: id)) {
+                liveBindings[id] = def
+            }
+        }
+
+        for returnerID in returners {
+            let displaced = BindingReclaim.displacedByReturner(
+                returnerID: returnerID, bindings: liveBindings
+            )
+            guard !displaced.isEmpty else { continue }
+            let returnerName = displayName(for: returnerID)
+            for displacedID in displaced {
+                store.setDefinition(nil, for: ShortcutNames.switchProfile(id: displacedID))
+                liveBindings[displacedID] = nil
+                errors[displacedID] = "Reset because '\(returnerName)' reclaimed this shortcut on return."
+            }
+        }
+        reload()
+    }
+
+    private func displayName(for id: UUID) -> String {
+        guard let profile = profileStore.profiles.first(where: { $0.id == id }) else {
+            return "another account"
+        }
+        return ProfileRowPresentation.displayName(profile, privacyMasked: isPrivacyMasked)
     }
 
     private func reload() {

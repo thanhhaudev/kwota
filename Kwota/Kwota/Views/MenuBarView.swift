@@ -176,7 +176,18 @@ struct MenuBarView: View {
             return .previousProfile
         }
 
-        for profile in vm.profileStore.profiles {
+        // Dormant hotkeys for offline accounts must not fire — those rows
+        // are hidden from Shortcuts settings, so firing them would switch
+        // to an account the user can't even see in the popover switcher
+        // (and the subsequent fetch would fail anyway).
+        let live = ProfileLivenessContext(
+            claudeCLIEmail: vm.cliAccountWatcher.current?.email,
+            codexCLIEmail: vm.codexAccountWatcher.current?.email,
+            antigravityProcessAlive: vm.antigravityProcessWatcher.current != nil
+        )
+        for profile in vm.profileStore.profiles
+            where profile.kind == .auto
+            && ProfileRowPresentation.isLive(profile, liveness: live) {
             guard let storedDefinition = hotKeyStore.definition(
                 for: ShortcutNames.switchProfile(id: profile.id)
             ) else {
