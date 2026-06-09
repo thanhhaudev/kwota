@@ -8,6 +8,12 @@ import os
 
 protocol JSONLogReader: AnyObject, Sendable {
     func read() -> [UsageEvent]
+    /// Incremental read variant. Only the named files are stat'd and
+    /// opened; the directory tree is not enumerated. Use when the caller
+    /// already knows which files changed (e.g., from an FSEvents callback).
+    /// Default impl falls back to the full `read()` so test fakes that
+    /// don't care about the distinction stay untouched.
+    func read(only paths: Set<URL>) -> [UsageEvent]
     func lastSeenLine() -> String?
     /// Snapshot of the reader's per-file offset/mtime table. Codable so
     /// `UsageMonitor` can persist it as part of the ledger envelope.
@@ -21,6 +27,9 @@ protocol JSONLogReader: AnyObject, Sendable {
 }
 
 extension JSONLogReader {
+    /// Default: fall back to full read. Lets test fakes that don't care
+    /// about incremental reads stay untouched.
+    func read(only paths: Set<URL>) -> [UsageEvent] { read() }
     /// Default no-op so test fakes that don't care about persistence stay
     /// untouched. `FilesystemJSONLogReader` provides the real implementation.
     func state() -> ReaderState { ReaderState() }
@@ -79,6 +88,40 @@ final class FilesystemJSONLogReader: JSONLogReader, @unchecked Sendable {
             readOne(fileURL, into: &emitted)
         }
         return emitted
+    }
+
+    func read(only paths: Set<URL>) -> [UsageEvent] {
+        guard fm.fileExists(atPath: root.path) else { return [] }
+        var emitted: [UsageEvent] = []
+        for fileURL in paths {
+            // Normalize via realpath so the offset key matches what
+            // `discoverFiles()` produces. On macOS, FileManager resolves
+            // `/var` -> `/private/var` for paths returned from
+            // `contentsOfDirectory(at:)`, but `URL.standardizedFileURL`
+            // / `URL.resolvingSymlinksInPath()` do NOT. Without realpath,
+            // a file touched via read(only:) and re-read by a follow-up
+            // full read() would land in two different dictionary keys.
+            let normalized = Self.canonicalize(fileURL)
+            // Defense-in-depth: only consume paths under our root. FSEvents
+            // can (rarely) deliver paths outside the watched dir.
+            guard normalized.path.hasPrefix(Self.canonicalize(root).path) else { continue }
+            guard normalized.pathExtension == "jsonl" else { continue }
+            readOne(normalized, into: &emitted)
+        }
+        return emitted
+    }
+
+    /// `realpath(3)` wrapper. Resolves both `..` components and `/var` ->
+    /// `/private/var` style symlinks so URL keys stay stable across
+    /// `read()` (via FileManager.enumerator) and `read(only:)` (caller-
+    /// supplied paths). Falls back to the input URL when realpath fails,
+    /// e.g. for a path that does not exist yet.
+    private static func canonicalize(_ url: URL) -> URL {
+        var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
+        if realpath(url.path, &buf) != nil {
+            return URL(fileURLWithPath: String(cString: buf))
+        }
+        return url
     }
 
     /// Per-file logic shared by `read()` (full walk) and `read(only:)`

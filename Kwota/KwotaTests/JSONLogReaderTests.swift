@@ -183,6 +183,68 @@ final class JSONLogReaderTests: XCTestCase {
         XCTAssertEqual(decoded, s)
     }
 
+    // MARK: - read(only:) incremental
+
+    func testReadOnly_emitsEventsForListedFileOnly() throws {
+        let tmp = TempDirectory()
+        let projects = tmp.file("projects")
+        try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+        let session = projects.appendingPathComponent("proj").appendingPathComponent("s1")
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        let touched = session.appendingPathComponent("a.jsonl")
+        let untouched = session.appendingPathComponent("b.jsonl")
+        try (assistantLine(uuid: "u1", ts: "2026-04-26T11:30:00.000Z") + "\n")
+            .write(to: touched, atomically: true, encoding: .utf8)
+        try (assistantLine(uuid: "u2", ts: "2026-04-26T11:31:00.000Z") + "\n")
+            .write(to: untouched, atomically: true, encoding: .utf8)
+
+        let reader = FilesystemJSONLogReader(root: projects)
+        let events = reader.read(only: [touched])
+        XCTAssertEqual(events.map(\.uuid), ["u1"],
+                       "read(only:) must emit only events for the named file")
+
+        // The untouched file's offset is never advanced; a full read after
+        // the incremental call still emits its content.
+        let full = reader.read()
+        XCTAssertEqual(full.map(\.uuid), ["u2"],
+                       "full read after read(only:) must still process the file we skipped")
+    }
+
+    func testReadOnly_advancesOffsetForTouchedFile() throws {
+        let tmp = TempDirectory()
+        let projects = tmp.file("projects")
+        try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+        let session = projects.appendingPathComponent("proj").appendingPathComponent("s1")
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        let file = session.appendingPathComponent("a.jsonl")
+        try (assistantLine(uuid: "u1", ts: "2026-04-26T11:30:00.000Z") + "\n")
+            .write(to: file, atomically: true, encoding: .utf8)
+
+        let reader = FilesystemJSONLogReader(root: projects)
+        let first = reader.read(only: [file])
+        XCTAssertEqual(first.count, 1, "first incremental read emits the line")
+
+        let second = reader.read(only: [file])
+        XCTAssertEqual(second.count, 0,
+                       "second incremental read on unchanged file emits nothing — offset advanced")
+    }
+
+    func testReadOnly_ignoresPathsOutsideRoot() throws {
+        let tmp = TempDirectory()
+        let projects = tmp.file("projects")
+        try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+        // A file that exists but lives outside `projects`. The reader must
+        // refuse to touch it.
+        let outside = tmp.file("outside.jsonl")
+        try (assistantLine(uuid: "u-outside", ts: "2026-04-26T11:30:00.000Z") + "\n")
+            .write(to: outside, atomically: true, encoding: .utf8)
+
+        let reader = FilesystemJSONLogReader(root: projects)
+        let events = reader.read(only: [outside])
+        XCTAssertTrue(events.isEmpty,
+                      "read(only:) must ignore paths whose prefix is not the watched root")
+    }
+
     private func assistantLine(uuid: String, ts: String) -> String {
         """
         {"type":"assistant","uuid":"\(uuid)","sessionId":"s1","timestamp":"\(ts)","message":{"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
