@@ -351,6 +351,7 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { true }, makeFileEvents: { stream }, clock: { fixedDate },
+            isClaudeCodexCompanionRunning: { true },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
         source.start()
@@ -375,6 +376,7 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
+            isClaudeCodexCompanionRunning: { true },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
         source.start()
@@ -418,6 +420,7 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { live }, makeFileEvents: { stream }, clock: { Date() },
+            isClaudeCodexCompanionRunning: { true },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
         source.start()
@@ -430,6 +433,273 @@ final class CodexActivitySourceTests: XCTestCase {
 
         XCTAssertTrue(received.isEmpty)
         cont.finish(); source.stop()
+    }
+
+    /// `/codex` slash command spawns `node codex-companion.mjs` as a Bash-tool
+    /// child of Claude Code, alive only while the call is in flight. Its
+    /// presence is a precise "user is actively driving codex" bridge — must
+    /// trust WAL bumps even with no rollout JSONL append and no recent Claude
+    /// activity, since a long `/codex` call can outlast the Claude bracket.
+    func testWALTrustedWhileClaudeCodexCompanionRunning() async throws {
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        var received: [ActivityEvent] = []
+        let source = CodexActivitySource(
+            isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
+            isClaudeCodexCompanionRunning: { true },
+            notificationCenter: NotificationCenter())
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+
+        cont.yield(logsWALPath)
+        try await Task.sleep(nanoseconds: 700_000_000)
+        await drain()
+
+        XCTAssertEqual(received.filter { $0.kind == .agentResponse }.count, 1,
+                       "companion running must keep WAL trusted even with no rollout/claude precedent")
+        cont.finish(); source.stop()
+    }
+
+    /// Regression for adversarial review: companion trust must be captured at
+    /// WAL-bump OBSERVATION time, not at flush fire time. `scheduleWALFlush`
+    /// debounces (0.5s) and rapid bumps cancel + reschedule. A real /codex burst
+    /// that ends with the companion exiting before the final debounce fires
+    /// would otherwise drop the keep-awake emit. Setting `pendingFlushTrusted`
+    /// when each bump is observed keeps the flush emitting as long as some
+    /// bump in the burst saw the companion alive.
+    func testWALEmittedWhenCompanionWasAliveAtBumpButExitedBeforeFlush() async throws {
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        var companionAlive = true
+        var received: [ActivityEvent] = []
+        let source = CodexActivitySource(
+            isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
+            isClaudeCodexCompanionRunning: { companionAlive },
+            notificationCenter: NotificationCenter())
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+
+        cont.yield(logsWALPath)
+        await drain()
+        companionAlive = false   // companion exits within the 500ms debounce
+        try await Task.sleep(nanoseconds: 700_000_000)
+        await drain()
+
+        XCTAssertEqual(received.filter { $0.kind == .agentResponse }.count, 1,
+                       "companion alive at bump observation must trust the emit even if it exits during debounce")
+        cont.finish(); source.stop()
+    }
+
+    /// Companion was never alive at any WAL observation, so subsequent orphan
+    /// bumps must not emit. Pairs with the above: snapshot-at-observation must
+    /// not retroactively open the gate just because companion was alive at some
+    /// past, unrelated moment in another process.
+    func testWALIgnoredWhenCompanionNeverObservedAtBumpTime() async throws {
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        var received: [ActivityEvent] = []
+        let source = CodexActivitySource(
+            isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
+            isClaudeCodexCompanionRunning: { false },
+            notificationCenter: NotificationCenter())
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+
+        cont.yield(logsWALPath)
+        try await Task.sleep(nanoseconds: 700_000_000)
+        await drain()
+
+        XCTAssertTrue(received.isEmpty,
+                      "WAL bump observed with no companion alive must not emit")
+        cont.finish(); source.stop()
+    }
+
+    /// Regression for adversarial-review finding: Claude's global `.agentResponse`
+    /// is NOT a valid trust signal for the shared `logs_*.sqlite-wal`. The WAL is
+    /// machine-wide, so an unrelated Claude conversation (any project) plus a
+    /// background WAL bump (orphan broker from another project) must NOT emit a
+    /// keep-awake pulse. Only a Codex-scoped signal (rollout JSONL append or live
+    /// `codex-companion.mjs` process) is allowed to open the gate.
+    func testWALIgnoredWhenOnlyUnrelatedClaudeActivityIsRecent() async throws {
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        var received: [ActivityEvent] = []
+        // Companion is NOT running (the user is not driving `/codex`); the only
+        // "recent" thing is unrelated Claude chat happening in some other project.
+        let source = CodexActivitySource(
+            isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
+            isClaudeCodexCompanionRunning: { false },
+            notificationCenter: NotificationCenter())
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+
+        // Orphan WAL bumps arriving from leftover brokers in other worktrees.
+        cont.yield(logsWALPath)
+        try await Task.sleep(nanoseconds: 700_000_000)
+        await drain()
+
+        XCTAssertTrue(received.isEmpty,
+                      "Claude global activity must NOT bridge the shared WAL gate — only a live codex-companion.mjs may")
+        cont.finish(); source.stop()
+    }
+
+    /// Regression for adversarial review finding: companion trust must apply
+    /// only to the currently debounced WAL burst, not to all bumps for some
+    /// rolling time window. After a real /codex burst's flush fires and clears
+    /// the flag, a later orphan WAL bump observed with the companion gone must
+    /// NOT emit — otherwise the prior call's authorization leaks into orphan
+    /// noise from other-project zombies and the Mac stays awake indefinitely.
+    func testPerBurstTrustDoesNotLeakAcrossBursts() async throws {
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        var companionAlive = true
+        var received: [ActivityEvent] = []
+        let source = CodexActivitySource(
+            isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
+            isClaudeCodexCompanionRunning: { companionAlive },
+            notificationCenter: NotificationCenter())
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+
+        // Burst 1: companion alive → flush emits and clears trust
+        cont.yield(logsWALPath)
+        try await Task.sleep(nanoseconds: 700_000_000)
+        await drain()
+        XCTAssertEqual(received.filter { $0.kind == .agentResponse }.count, 1,
+                       "burst 1 with companion alive must emit")
+        received.removeAll()
+
+        // Companion exits between bursts (call ended).
+        companionAlive = false
+
+        // Burst 2 (orphan zombie bump): no emit — burst 1's authorization
+        // must not carry over.
+        cont.yield(logsWALPath)
+        try await Task.sleep(nanoseconds: 700_000_000)
+        await drain()
+        XCTAssertTrue(received.isEmpty,
+                      "burst 2 with companion gone must NOT inherit burst 1's trust")
+        cont.finish(); source.stop()
+    }
+
+    /// Regression for adversarial review: a trusted burst whose flush is SKIPPED
+    /// (because `isLive()` flipped false during the 0.5s debounce) must still
+    /// clear the trust flag. Otherwise a later orphan WAL bump observed after
+    /// the user signs back in (companion gone, only zombies bumping) would
+    /// inherit the stale `true` and falsely emit — reopening the bug per-burst
+    /// trust was designed to prevent.
+    func testStaleTrustClearedWhenLivenessLostDuringDebounce() async throws {
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        var live = true
+        var companion = true
+        var received: [ActivityEvent] = []
+        let source = CodexActivitySource(
+            isLive: { live }, makeFileEvents: { stream }, clock: { Date() },
+            isClaudeCodexCompanionRunning: { companion },
+            notificationCenter: NotificationCenter())
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+
+        // Burst 1: companion alive → pendingFlushTrusted=true
+        cont.yield(logsWALPath)
+        await drain()
+
+        // User signs out of Codex BEFORE the debounce fires.
+        live = false
+        try await Task.sleep(nanoseconds: 700_000_000)
+        await drain()
+        XCTAssertTrue(received.isEmpty, "flush skipped due to !isLive()")
+
+        // User signs back in; companion is gone (no /codex in flight).
+        live = true
+        companion = false
+
+        // Orphan WAL bump arrives from a zombie broker.
+        cont.yield(logsWALPath)
+        try await Task.sleep(nanoseconds: 700_000_000)
+        await drain()
+
+        XCTAssertTrue(received.isEmpty,
+                      "trust from pre-sign-out burst must be cleared on the skipped flush — orphan bump after sign-in must not emit")
+        cont.finish(); source.stop()
+    }
+
+    /// Regression for system-sleep edge case: when the lid closes during the
+    /// 0.5s debounce, `Task.sleep` tracks wall-clock so the timer "expires"
+    /// mid-sleep and the body resumes only at wake — potentially hours later.
+    /// Without the staleness guard, that resume would emit a fresh keep-awake
+    /// event for an arbitrarily-old observation, resetting the supervisor's
+    /// idle timer at wake for stale activity. The injected clock here jumps
+    /// forward AFTER scheduling but BEFORE the body runs, mimicking the
+    /// wall-clock advance that occurs during system sleep.
+    func testWALFlushSkipsEmitWhenSchedulingClockIsStale() async throws {
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        var clockTime = Date(timeIntervalSince1970: 1_700_000_000)
+        var received: [ActivityEvent] = []
+        let source = CodexActivitySource(
+            isLive: { true }, makeFileEvents: { stream }, clock: { clockTime },
+            isClaudeCodexCompanionRunning: { true },
+            notificationCenter: NotificationCenter())
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+
+        // Burst observed at t=0: companion alive → trusted, schedule flush
+        cont.yield(logsWALPath)
+        await drain()
+
+        // Simulate system sleep: wall clock jumps an hour while the debounce
+        // task is "sleeping". Real production behavior — Task.sleep tracks
+        // wall time, body would resume at wake with `now` far past schedule.
+        clockTime = clockTime.addingTimeInterval(3600)
+
+        try await Task.sleep(nanoseconds: 700_000_000)
+        await drain()
+
+        XCTAssertTrue(received.isEmpty,
+                      "WAL flush body resumed long after scheduling (system-sleep simulation) must skip emit")
+        cont.finish(); source.stop()
+    }
+
+    /// Regression for adversarial review: a `stop()` while a flush is pending
+    /// must clear the trust flag so the next `start()` cycle begins fresh. A
+    /// stale `true` would let the first WAL bump after restart emit even with
+    /// no companion running.
+    func testStaleTrustClearedAcrossStopStartCycle() async throws {
+        final class Holder { var cont: AsyncStream<String>.Continuation? }
+        let holder = Holder()
+        let makeStream: () -> AsyncStream<String> = {
+            AsyncStream { holder.cont = $0 }
+        }
+        var companion = true
+        var received: [ActivityEvent] = []
+        let source = CodexActivitySource(
+            isLive: { true }, makeFileEvents: makeStream, clock: { Date() },
+            isClaudeCodexCompanionRunning: { companion },
+            notificationCenter: NotificationCenter())
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+
+        source.start()
+        holder.cont?.yield(logsWALPath)   // companion alive → trust set
+        await drain()
+
+        // stop() before the 500ms debounce fires.
+        source.stop()
+        try await Task.sleep(nanoseconds: 700_000_000)
+        await drain()
+        XCTAssertTrue(received.isEmpty, "stop() cancels the pending flush")
+
+        // Restart with companion gone (different session, no /codex).
+        companion = false
+        source.start()
+        holder.cont?.yield(logsWALPath)   // pure orphan bump
+        try await Task.sleep(nanoseconds: 700_000_000)
+        await drain()
+
+        XCTAssertTrue(received.isEmpty,
+                      "trust from the burst before stop() must not survive into the new start() cycle")
+        source.stop()
     }
 
     /// Only `logs_*.sqlite-wal` bumps count as agent activity. State/goals/
@@ -553,6 +823,7 @@ final class CodexActivitySourceTests: XCTestCase {
             clock: { Date() },
             walPollInterval: 0.05,
             walProbe: { [(path: walPath, mtime: box.mtime)] },
+            isClaudeCodexCompanionRunning: { true },
             notificationCenter: NotificationCenter()
         )
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
@@ -602,6 +873,7 @@ final class CodexActivitySourceTests: XCTestCase {
                       let mtime = attrs[.modificationDate] as? Date else { return [] }
                 return [(path: walURL.path, mtime: mtime)]
             },
+            isClaudeCodexCompanionRunning: { true },
             notificationCenter: NotificationCenter()
         )
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)

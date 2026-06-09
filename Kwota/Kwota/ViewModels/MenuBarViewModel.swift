@@ -656,9 +656,12 @@ final class MenuBarViewModel {
         } else {
             let composite = activitySource ?? CompositeActivitySource(sources: [
                 UsageMonitorActivitySource(usage: self.usage),
-                CodexActivitySource(isLive: { [weak resolvedCodexWatcher] in
-                    resolvedCodexWatcher?.current != nil
-                }),
+                CodexActivitySource(
+                    isLive: { [weak resolvedCodexWatcher] in
+                        resolvedCodexWatcher?.current != nil
+                    },
+                    isClaudeCodexCompanionRunning: { CodexActivitySource.defaultCompanionRunning() }
+                ),
                 AntigravityActivitySource(isLive: { [weak antigravityWatcherInternal] in
                     antigravityWatcherInternal?.currentPID != nil
                 }),

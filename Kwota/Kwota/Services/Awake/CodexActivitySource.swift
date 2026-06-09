@@ -54,6 +54,32 @@ final class CodexActivitySource: ActivitySource {
     private var walPollTask: Task<Void, Never>?
     private let walPollInterval: TimeInterval
     private let walProbe: () -> [(path: String, mtime: Date)]
+    /// Per-burst trust flag for the next debounced WAL flush. `logs_*.sqlite-wal`
+    /// is shared across every `codex app-server` on the machine — orphan brokers
+    /// from other projects' worktrees keep bumping it after their session ends.
+    /// We only emit a keep-awake pulse for a WAL flush if SOMETHING in the
+    /// debounce window observed a live `codex-companion.mjs` process at WAL bump
+    /// time. The flag is set at observation time (so a companion that exits
+    /// during the 0.5s debounce window doesn't drop the final emit of a real
+    /// `/codex` burst) and cleared at fire time (so once the burst finishes,
+    /// later orphan bumps don't inherit the prior call's authorization — that
+    /// would reintroduce the exact "WAL noise wakes the Mac forever" bug this
+    /// gate exists to prevent). Set is monotone-true within a burst: any bump
+    /// in the burst that sees the companion alive trusts the whole burst.
+    /// Claude `.agentResponse` history is deliberately NOT a trust signal —
+    /// it's a global last-Claude-response across every project on the machine,
+    /// and gating on it would let any unrelated Claude chat re-authorize WAL
+    /// noise from other-project zombies. The companion process IS the precise
+    /// Codex-scoped bridge for the "/codex and wait" flow.
+    private var pendingFlushTrusted: Bool = false
+    /// `/codex` slash command (the codex-companion plugin) spawns `node
+    /// codex-companion.mjs` as a Bash-tool child of Claude Code while the
+    /// request is in flight; the process exits when the call returns. Its
+    /// presence is an unambiguous "user is actively driving codex right
+    /// now" signal — orthogonal to Claude's `.agentResponse` cadence and
+    /// rollout-JSONL writes (the companion talks to app-server via socket
+    /// and never touches `sessions/`).
+    private let isClaudeCodexCompanionRunning: () -> Bool
 
     var activityPublisher: AnyPublisher<ActivityEvent, Never> {
         subject.eraseToAnyPublisher()
@@ -74,6 +100,7 @@ final class CodexActivitySource: ActivitySource {
         // (`stat`) while the rollout poll reopens and reads file content.
         walPollInterval: TimeInterval = 5,
         walProbe: @escaping () -> [(path: String, mtime: Date)] = { CodexActivitySource.defaultWALProbe() },
+        isClaudeCodexCompanionRunning: @escaping () -> Bool = { false },
         notificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter
     ) {
         self.isLive = isLive
@@ -83,11 +110,48 @@ final class CodexActivitySource: ActivitySource {
         self.pollInterval = pollInterval
         self.walPollInterval = walPollInterval
         self.walProbe = walProbe
+        self.isClaudeCodexCompanionRunning = isClaudeCodexCompanionRunning
         self.notificationCenter = notificationCenter
+    }
+
+    /// Default companion check via `pgrep -u <uid> -f <pattern>`. Tightened
+    /// past a raw `codex-companion.mjs` substring match so that:
+    ///   * Cross-user processes are excluded (`-u <uid>` restricts to the
+    ///     current user) — prevents another login's stale companion from
+    ///     bridging WAL trust on this user's Kwota.
+    ///   * The match is anchored to the official Claude Code plugin install
+    ///     path (`openai-codex/codex/<version>/scripts/codex-companion.mjs`).
+    ///     Random user scripts or grep'd command lines that happen to mention
+    ///     the filename don't pass.
+    /// Both narrow the false-positive surface called out by the adversarial
+    /// review without taking on a heartbeat-file dependency in the plugin.
+    /// Stdout/stderr → `/dev/null` (we only care about exit status); returns
+    /// false on any spawn error so a sandbox/permission denial degrades to
+    /// "no bridge" instead of crashing the WAL gate.
+    nonisolated static func defaultCompanionRunning() -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        p.arguments = [
+            "-u", String(getuid()),
+            "-f", "openai-codex/codex/[^/]+/scripts/codex-companion\\.mjs",
+        ]
+        p.standardOutput = FileHandle(forWritingAtPath: "/dev/null")
+        p.standardError = FileHandle(forWritingAtPath: "/dev/null")
+        do {
+            try p.run()
+            p.waitUntilExit()
+            return p.terminationStatus == 0
+        } catch {
+            return false
+        }
     }
 
     func start() {
         stop()
+        // Defensive: `stop()` already clears, but if a future caller invokes
+        // `start()` without going through `stop()` first the flag must still
+        // be a clean false. Belt-and-suspenders for the per-burst invariant.
+        pendingFlushTrusted = false
         startedAt = clock()
         // Baseline the WAL mtimes so the first real tick only fires for
         // mtime ADVANCES — a pre-existing WAL (from before launch) isn't a
@@ -160,6 +224,9 @@ final class CodexActivitySource: ActivitySource {
                     if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
                        let mtime = attrs[.modificationDate] as? Date {
                         self.logsWALMtimes[path] = mtime
+                    }
+                    if self.isClaudeCodexCompanionRunning() {
+                        self.pendingFlushTrusted = true
                     }
                     self.scheduleWALFlush()
                     continue
@@ -253,6 +320,11 @@ final class CodexActivitySource: ActivitySource {
         pollTask?.cancel(); pollTask = nil
         walPollTask?.cancel(); walPollTask = nil
         walFlushTask?.cancel(); walFlushTask = nil
+        // Cancelling the flush task doesn't run its body, so the trust flag
+        // would otherwise survive into the next `start()` cycle and authorize
+        // the first WAL bump after restart — even if that bump is pure orphan
+        // noise with no companion running.
+        pendingFlushTrusted = false
         if let wakeObserver { notificationCenter.removeObserver(wakeObserver) }
         wakeObserver = nil
     }
@@ -283,6 +355,9 @@ final class CodexActivitySource: ActivitySource {
             }
             if entry.mtime > prior! {
                 logsWALMtimes[entry.path] = entry.mtime
+                if isClaudeCodexCompanionRunning() {
+                    pendingFlushTrusted = true
+                }
                 scheduleWALFlush()
             }
         }
@@ -303,16 +378,39 @@ final class CodexActivitySource: ActivitySource {
     /// schedules a fresh one. After `walDebounce` of silence, emit a single
     /// `.fileWrite` (keep-awake) plus one `.agentResponse` (chart). The flush
     /// re-checks `isLive()` because the window is wide enough for a sign-out
-    /// to land between schedule and fire. Pure timer — no IO, no allocation
-    /// beyond the Task itself.
+    /// to land between schedule and fire. Gates on `pendingFlushTrusted` —
+    /// set at WAL bump OBSERVATION time when the companion was alive, sticky
+    /// across debounce cancels within a burst, cleared on EVERY terminal path
+    /// (whether the emit fires or not) so a skipped flush can't leave stale
+    /// authorization for a later burst. Also gates on elapsed wall-clock to
+    /// catch system-sleep staleness: `Task.sleep` tracks wall time, so a
+    /// lid-close during the 0.5s debounce makes the timer "expire" mid-sleep
+    /// and the body resumes post-wake for an observation that may now be
+    /// hours old; emitting it would reset the idle timer at wake for stale
+    /// activity. Pure timer — no IO, no allocation beyond the Task itself.
     private func scheduleWALFlush() {
         walFlushTask?.cancel()
         let debounce = walDebounce
+        let scheduledAt = clock()
         walFlushTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(debounce * 1_000_000_000))
             if Task.isCancelled { return }
-            guard let self, self.isLive() else { return }
+            guard let self else { return }
+            // Capture + clear the trust flag BEFORE any other guard. If we
+            // returned through `!isLive()` without clearing, a later burst
+            // that arrives after the user signs back in (companion gone, only
+            // orphan zombies bumping) would inherit this stale `true` and
+            // falsely emit — reopening the exact bug the per-burst design
+            // exists to prevent.
+            let trusted = self.pendingFlushTrusted
+            self.pendingFlushTrusted = false
+            guard self.isLive() else { return }
+            guard trusted else { return }
             let now = self.clock()
+            // 5s tolerates any plausible MainActor congestion (normal: ~0.5s);
+            // anything beyond is almost certainly system sleep restoring an
+            // arbitrarily-old debounce timer.
+            guard now.timeIntervalSince(scheduledAt) < 5 else { return }
             self.subject.send(ActivityEvent(date: now, provider: .codex, kind: .fileWrite))
             self.subject.send(ActivityEvent(date: now, provider: .codex, kind: .agentResponse))
         }
