@@ -691,9 +691,13 @@ final class MenuBarViewModel {
         }
         // Backfill scan is gated on live startup so unit tests with a stub
         // historian don't touch the real `~/.claude/projects` tree.
+        // persistURL same gating — tests don't touch real Application Support.
         let builtHistorian = (activityHistorian == nil)
         self.activityHistorian = activityHistorian
-            ?? ActivityHistorian(autoBackfill: startupMode == .live)
+            ?? ActivityHistorian(
+                autoBackfill: startupMode == .live,
+                persistURL: startupMode == .live ? ActivityHistorian.defaultPersistURL() : nil
+            )
 
         // Forward non-Claude activity into the historian so the chart can draw a
         // per-provider wave. Claude already flows through the uuid-deduped

@@ -161,6 +161,85 @@ final class ActivityHistorianTests: XCTestCase {
         XCTAssertTrue(h.timestamps(for: .codex).isEmpty)
     }
 
+    // MARK: - Disk persistence
+
+    /// `/codex` via app-server emits provider events at runtime with no source
+    /// file to backfill from. Persisting non-Claude events lets the chart
+    /// survive Kwota relaunch instead of going blank.
+    func test_persistedProviderEvents_restoredOnNextInit() {
+        let tmp = TempDirectory()
+        let url = tmp.file("activity-events.json")
+
+        // First session: record events, persist to disk on every record.
+        let h1 = ActivityHistorian(
+            windowSeconds: 24 * 3600, clock: { self.now }, autoBackfill: false,
+            persistURL: url)
+        h1.record(provider: .codex, at: now.addingTimeInterval(-100))
+        h1.record(provider: .codex, at: now.addingTimeInterval(-200))
+        h1.record(provider: .antigravity, at: now.addingTimeInterval(-300))
+
+        // Second session: same persist URL — should load from disk.
+        let h2 = ActivityHistorian(
+            windowSeconds: 24 * 3600, clock: { self.now }, autoBackfill: false,
+            persistURL: url)
+        XCTAssertEqual(h2.timestamps(for: .codex).count, 2)
+        XCTAssertEqual(h2.timestamps(for: .antigravity).count, 1)
+        XCTAssertTrue(h2.timestamps(for: .claude).isEmpty)
+    }
+
+    /// On restore, dates older than the window are discarded — a long-quit
+    /// Kwota shouldn't repopulate the chart with stale events.
+    func test_persistLoad_dropsOutOfWindowDates() {
+        let tmp = TempDirectory()
+        let url = tmp.file("activity-events.json")
+
+        let h1 = ActivityHistorian(
+            windowSeconds: 24 * 3600, clock: { self.now }, autoBackfill: false,
+            persistURL: url)
+        h1.record(provider: .codex, at: now.addingTimeInterval(-1 * 3600))   // in window
+        h1.record(provider: .codex, at: now.addingTimeInterval(-23 * 3600))  // in window
+
+        // Move the clock forward 25h — the events on disk are now all > 24h
+        // old relative to the loader's `now`.
+        let later = now.addingTimeInterval(25 * 3600)
+        let h2 = ActivityHistorian(
+            windowSeconds: 24 * 3600, clock: { later }, autoBackfill: false,
+            persistURL: url)
+        XCTAssertTrue(h2.timestamps(for: .codex).isEmpty)
+    }
+
+    /// Restored events are also installed into `seenOtherDates` so the next
+    /// backfill scan doesn't double-count the same date.
+    func test_persistLoad_dedupsAgainstRestoredEvents() {
+        let tmp = TempDirectory()
+        let url = tmp.file("activity-events.json")
+        let date = now.addingTimeInterval(-100)
+
+        let h1 = ActivityHistorian(
+            windowSeconds: 24 * 3600, clock: { self.now }, autoBackfill: false,
+            persistURL: url)
+        h1.record(provider: .codex, at: date)
+
+        let h2 = ActivityHistorian(
+            windowSeconds: 24 * 3600, clock: { self.now }, autoBackfill: false,
+            persistURL: url)
+        // Re-record the same date — should be dropped by dedup.
+        h2.record(provider: .codex, at: date)
+        XCTAssertEqual(h2.timestamps(for: .codex).count, 1)
+    }
+
+    /// Missing persist file (first launch) loads as empty — must not crash or
+    /// pollute the store with anything.
+    func test_persistLoad_missingFileLoadsEmpty() {
+        let tmp = TempDirectory()
+        let url = tmp.file("nonexistent.json")
+        let h = ActivityHistorian(
+            windowSeconds: 24 * 3600, clock: { self.now }, autoBackfill: false,
+            persistURL: url)
+        XCTAssertTrue(h.timestamps(for: .codex).isEmpty)
+        XCTAssertTrue(h.timestamps(for: .antigravity).isEmpty)
+    }
+
     // MARK: - Helpers
 
     private func makeAssistantEvent(uuid: String, at date: Date) -> UsageEvent {

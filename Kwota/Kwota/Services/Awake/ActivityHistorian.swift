@@ -46,12 +46,23 @@ final class ActivityHistorian {
     @ObservationIgnored private let windowSeconds: TimeInterval
     @ObservationIgnored private let clock: () -> Date
     @ObservationIgnored private let backfillRoot: URL
+    /// Where to persist `otherEvents` so non-Claude history survives relaunch.
+    /// Only the non-Claude providers are persisted: Claude is re-backfilled
+    /// from `~/.claude/projects/**/*.jsonl` on every launch (Claude Code writes
+    /// those itself), and interactive Codex CLI is re-backfilled from
+    /// `~/.codex/sessions/**/rollout-*.jsonl`. But Codex via `/codex` app-server
+    /// only bumps the shared SQLite WAL — `scheduleWALFlush` emits those at
+    /// runtime with `clock()` timestamps, and there's no source file to scan
+    /// from on relaunch. Without disk persistence the chart's Codex bars
+    /// vanish whenever Kwota restarts even though the user was using Codex.
+    @ObservationIgnored private let persistURL: URL?
 
     init(
         windowSeconds: TimeInterval = 24 * 3600,
         clock: @escaping () -> Date = { Date() },
         backfillRoot: URL? = nil,
-        autoBackfill: Bool = true
+        autoBackfill: Bool = true,
+        persistURL: URL? = nil
     ) {
         self.windowSeconds = windowSeconds
         self.clock = clock
@@ -59,9 +70,22 @@ final class ActivityHistorian {
         // which can't safely call the MainActor-bound `defaultRoot()`. Resolve
         // inside the init body where we're guaranteed on the actor.
         self.backfillRoot = backfillRoot ?? FilesystemJSONLogReader.defaultRoot()
+        self.persistURL = persistURL
+
+        if let url = persistURL {
+            let cutoff = clock().addingTimeInterval(-windowSeconds)
+            let loaded = Self.loadPersisted(from: url, cutoff: cutoff)
+            self.otherEvents = loaded.events
+            self.seenOtherDates = loaded.seen
+        }
+
         if autoBackfill {
             Task { [weak self] in await self?.backfillAsync() }
         }
+    }
+
+    nonisolated static func defaultPersistURL() -> URL {
+        AppPaths.applicationSupportDirectory.appendingPathComponent("activity-events.json")
     }
 
     /// Streaming intake from `UsageMonitor.tick`. Filters out events older than
@@ -97,6 +121,7 @@ final class ActivityHistorian {
         arr.sort()
         otherEvents[provider] = arr
         prune()
+        persist()
     }
 
     /// Timestamps for one provider. `.claude` returns the existing Claude store;
@@ -117,18 +142,21 @@ final class ActivityHistorian {
 
     /// Merge provider backfill results into `otherEvents` on the main actor.
     func applyProviderBackfill(_ results: [(provider: ProviderID, dates: [Date])]) {
+        var changed = false
         for r in results where r.provider != .claude && !r.dates.isEmpty {
             var seen = seenOtherDates[r.provider] ?? []
             var arr = otherEvents[r.provider] ?? []
             for d in r.dates where !seen.contains(d) {
                 seen.insert(d)
                 arr.append(d)
+                changed = true
             }
             seenOtherDates[r.provider] = seen
             arr.sort()
             otherEvents[r.provider] = arr
         }
         prune()
+        if changed { persist() }
     }
 
     /// Synchronous provider backfill (scan on the current thread). Kept for
@@ -275,6 +303,72 @@ final class ActivityHistorian {
         for (provider, dates) in seenOtherDates {
             let kept = dates.filter { $0 >= cutoff }
             if kept.count != dates.count { seenOtherDates[provider] = kept }
+        }
+    }
+
+    // MARK: - Persistence
+
+    /// On-disk format for non-Claude provider history. Keyed on `ProviderID`'s
+    /// raw value (String) so the JSON object stays human-readable and so
+    /// unknown providers from a future build degrade silently to ignored
+    /// entries on the older binary instead of failing the whole decode.
+    private struct ActivityHistorianPersisted: Codable {
+        let lastPersistedAt: Date
+        let providerEvents: [String: [Date]]
+    }
+
+    private static func loadPersisted(
+        from url: URL, cutoff: Date
+    ) -> (events: [ProviderID: [Date]], seen: [ProviderID: Set<Date>]) {
+        var events: [ProviderID: [Date]] = [:]
+        var seen: [ProviderID: Set<Date>] = [:]
+        guard FileManager.default.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url) else {
+            return (events, seen)
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let payload = try? decoder.decode(ActivityHistorianPersisted.self, from: data) else {
+            return (events, seen)
+        }
+        // Strict rawValue match — ProviderID's default init folds unknown
+        // values to `.claude`, which would corrupt Claude's store with
+        // provider events from a future-build file. We only persist non-Claude
+        // events, so any "claude" key here is a malformed file and gets
+        // skipped along with unknown providers.
+        let known: [String: ProviderID] = ["codex": .codex, "antigravity": .antigravity]
+        for (rawProvider, dates) in payload.providerEvents {
+            guard let provider = known[rawProvider] else { continue }
+            let inWindow = dates.filter { $0 >= cutoff }
+            guard !inWindow.isEmpty else { continue }
+            events[provider] = inWindow.sorted()
+            seen[provider] = Set(inWindow)
+        }
+        return (events, seen)
+    }
+
+    /// Synchronous atomic write — payload is a few KB JSON, main-thread cost
+    /// is well under a ms. Matches `AwakeSessionLog.persist`. No-op when
+    /// `persistURL == nil` (tests without disk).
+    private func persist() {
+        guard let url = persistURL else { return }
+        let payload = ActivityHistorianPersisted(
+            lastPersistedAt: clock(),
+            providerEvents: Dictionary(
+                uniqueKeysWithValues: otherEvents.map { ($0.key.rawValue, $0.value) }
+            )
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try encoder.encode(payload)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            AppLog.shared.log("ActivityHistorian persist failed: \(error)", level: .error)
         }
     }
 }
