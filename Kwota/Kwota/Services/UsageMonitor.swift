@@ -63,6 +63,16 @@ final class UsageMonitor: ObservableObject {
         }
     }
 
+    /// On-disk wrapping format. schemaVersion 3 introduced the envelope shape
+    /// (ledger + reader cursor). schemaVersion 2 files are pre-envelope (just
+    /// a UsageLedger directly serialized at the top level) and migrated on
+    /// load — see `loadEnvelope`.
+    private struct PersistedLedgerEnvelope: Codable {
+        var schemaVersion: Int
+        var ledger: UsageLedger
+        var readerState: ReaderState
+    }
+
     var ownership: Ownership? {
         didSet {
             guard oldValue?.profileId != ownership?.profileId else { return }
@@ -167,7 +177,9 @@ final class UsageMonitor: ObservableObject {
         self.legacyDailyQuotaEstimate = legacyDailyQuotaEstimate
         self.persistDebounce = persistDebounce
         self.persistDidWriteForTesting = persistDidWriteForTesting
-        self.ledger = Self.loadLedger(at: ledgerURL)
+        let (loadedLedger, loadedReaderState) = Self.loadEnvelope(at: ledgerURL)
+        self.ledger = loadedLedger
+        reader.restore(loadedReaderState)
         publishFromLedger()
     }
 
@@ -425,27 +437,39 @@ final class UsageMonitor: ObservableObject {
         return Int((remaining * 100.0).rounded())
     }
 
-    private static func loadLedger(at url: URL) -> UsageLedger {
-        guard FileManager.default.fileExists(atPath: url.path) else { return UsageLedger() }
+    /// Returns the (ledger, readerState) pair from the envelope file. The
+    /// reader state is empty when the on-disk file is legacy v2 (pre-envelope);
+    /// the caller must still invoke `reader.restore(.init())` so the
+    /// "restore is always called before read" contract holds.
+    private static func loadEnvelope(at url: URL) -> (UsageLedger, ReaderState) {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return (UsageLedger(), ReaderState())
+        }
         do {
             let data = try Data(contentsOf: url)
-            let decoded = try JSONDecoder().decode(UsageLedger.self, from: data)
-            // schemaVersion 1 (or missing) → keys were formatted in the user's
-            // local timezone. Drop the cache so the next ingest from JSONL
-            // rebuilds with UTC keys. seenUUIDs are also dropped, but the
-            // JSONL log is the source of truth and re-ingest will re-derive
-            // the same uuid set within the retention window.
-            if decoded.schemaVersion < 2 {
+            // Try v3 envelope first.
+            if let envelope = try? JSONDecoder().decode(PersistedLedgerEnvelope.self, from: data),
+               envelope.schemaVersion >= 3 {
+                return (envelope.ledger, envelope.readerState)
+            }
+            // Fallback: legacy v2 ledger directly at the top level. UsageLedger's
+            // custom decoder already drops seenUUIDs into an empty Set.
+            let legacyLedger = try JSONDecoder().decode(UsageLedger.self, from: data)
+            if legacyLedger.schemaVersion < 2 {
                 AppLog.shared.log(
-                    "UsageMonitor: ledger schema v\(decoded.schemaVersion) < 2, dropping (will rebuild from JSONL with UTC dayKeys)",
+                    "UsageMonitor: ledger schema v\(legacyLedger.schemaVersion) < 2, dropping (will rebuild from JSONL with UTC dayKeys)",
                     level: .info
                 )
-                return UsageLedger()
+                return (UsageLedger(), ReaderState())
             }
-            return decoded
+            AppLog.shared.log(
+                "UsageMonitor: legacy v2 ledger migrated to envelope schema (readerState empty, will re-walk once)",
+                level: .info
+            )
+            return (legacyLedger, ReaderState())
         } catch {
             AppLog.shared.log("UsageMonitor ledger load failed: \(error)", level: .warn)
-            return UsageLedger()
+            return (UsageLedger(), ReaderState())
         }
     }
 
@@ -458,10 +482,11 @@ final class UsageMonitor: ObservableObject {
     private func persistLedger() {
         pendingLedgerPersist?.cancel()
         let snapshot = ledger
+        let readerSnapshot = reader.state()   // ≤100 fileExists checks; ≤1 Hz under debounce; safe on main
         let url = ledgerURL
         let onWrite = persistDidWriteForTesting
         let action: () -> Void = {
-            Self.writeLedger(snapshot, to: url)
+            Self.writeEnvelope(ledger: snapshot, readerState: readerSnapshot, to: url)
             onWrite?()
         }
         let item = DispatchWorkItem(block: action)
@@ -472,13 +497,22 @@ final class UsageMonitor: ObservableObject {
 
     /// Pure write helper. `nonisolated static` so it can run on
     /// `persistQueue` without touching `@MainActor` state.
-    private nonisolated static func writeLedger(_ ledger: UsageLedger, to url: URL) {
+    private nonisolated static func writeEnvelope(
+        ledger: UsageLedger,
+        readerState: ReaderState,
+        to url: URL
+    ) {
+        let envelope = PersistedLedgerEnvelope(
+            schemaVersion: 3,
+            ledger: ledger,
+            readerState: readerState
+        )
         do {
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
-            let data = try JSONEncoder().encode(ledger)
+            let data = try JSONEncoder().encode(envelope)
             try data.write(to: url, options: .atomic)
         } catch {
             AppLog.shared.log("UsageMonitor persist failed: \(error)", level: .error)

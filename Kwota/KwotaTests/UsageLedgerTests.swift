@@ -80,8 +80,11 @@ final class UsageLedgerTests: XCTestCase {
 
         XCTAssertEqual(decoded.dailyBillable(day: ledger.dayKey(for: date("2026-04-26T10:00:00Z"))), 15)
 
+        // seenUUIDs is in-memory only as of schemaVersion 3 — JSON round-trip
+        // intentionally drops it. Reader-offset persistence (in UsageMonitor)
+        // is the cross-restart dedup mechanism now.
         let reingest = decoded.ingestPreview(events: [event("a", "2026-04-26T10:00:00Z")])
-        XCTAssertTrue(reingest.isEmpty, "uuid set should round-trip")
+        XCTAssertFalse(reingest.isEmpty, "decoded ledger must not carry seenUUIDs across encode/decode")
     }
 
     // MARK: - UTC dayKey (cross-tz invariance)
@@ -147,12 +150,51 @@ final class UsageLedgerTests: XCTestCase {
         let decoded = try JSONDecoder().decode(UsageLedger.self, from: legacyJSON)
 
         XCTAssertEqual(decoded.schemaVersion, 1, "missing schemaVersion must decode as 1 (legacy)")
-        XCTAssertEqual(decoded.seenUUIDs, ["a", "b"])
+        XCTAssertEqual(decoded.seenUUIDs, [], "seenUUIDs is in-memory only — never decoded from disk")
         XCTAssertEqual(decoded.dailyBillable(day: "2026-05-01"), 150)
     }
 
     func testNewLedgerInstancesAreSchemaV2() {
         XCTAssertEqual(UsageLedger().schemaVersion, 2)
+    }
+
+    // MARK: - seenUUIDs is in-memory only (Phase 2)
+
+    func testEncode_doesNotIncludeSeenUUIDs() throws {
+        var ledger = UsageLedger()
+        _ = ledger.ingest(
+            events: [event("u1", "2026-04-26T10:00:00Z")],
+            now: date("2026-04-26T10:00:00Z")
+        )
+        XCTAssertEqual(ledger.seenUUIDs.count, 1, "in-memory dedup still tracks UUIDs")
+        let data = try JSONEncoder().encode(ledger)
+        let json = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertFalse(json.contains("seenUUIDs"),
+                       "encoded ledger must not include seenUUIDs (in-memory only)")
+    }
+
+    func testDecode_legacyV2WithSeenUUIDs_dropsTheField() throws {
+        // A v2 on-disk shape carried seenUUIDs at the top level. Decoding
+        // it must succeed but leave the in-memory Set empty.
+        let legacy = """
+        {
+          "schemaVersion": 2,
+          "seenUUIDs": ["a", "b", "c"],
+          "dailyByDay": {
+            "2026-04-26": {
+              "input_tokens": 10,
+              "output_tokens": 20,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0
+            }
+          },
+          "lastUpdate": 770000000.0
+        }
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(UsageLedger.self, from: legacy)
+        XCTAssertEqual(decoded.seenUUIDs, [], "legacy seenUUIDs must not populate in-memory Set")
+        XCTAssertEqual(decoded.dailyBillable(day: "2026-04-26"), 30)
+        XCTAssertEqual(decoded.schemaVersion, 2)
     }
 
 }

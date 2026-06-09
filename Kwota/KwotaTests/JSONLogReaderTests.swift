@@ -128,4 +128,64 @@ final class JSONLogReaderTests: XCTestCase {
         _ = reader.read()
         XCTAssertEqual(reader.lastSeenLine(), only)
     }
+
+    // MARK: - ReaderState snapshot/restore (Phase 2)
+
+    func testStateAndRestore_roundTrip() throws {
+        let tmp = TempDirectory()
+        let projects = tmp.file("projects")
+        try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+        let session = projects.appendingPathComponent("proj").appendingPathComponent("s1")
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        let file = session.appendingPathComponent("a.jsonl")
+        try (assistantLine(uuid: "u1", ts: "2026-04-26T11:30:00Z") + "\n").write(to: file, atomically: true, encoding: .utf8)
+
+        let reader = FilesystemJSONLogReader(root: projects)
+        _ = reader.read()                          // advance offsets
+        let snapshot = reader.state()
+        XCTAssertEqual(snapshot.entries.count, 1)
+        // Stored path may resolve symlinks (e.g. /var → /private/var on macOS
+        // temp dirs), so look up by basename rather than exact `file.path`.
+        let only = snapshot.entries.first
+        XCTAssertEqual((only?.key as NSString?)?.lastPathComponent, "a.jsonl")
+        XCTAssertGreaterThan(only?.value.offset ?? 0, 0)
+
+        let reader2 = FilesystemJSONLogReader(root: projects)
+        reader2.restore(snapshot)
+        let events = reader2.read()
+        XCTAssertTrue(events.isEmpty, "restoring offset must mean read() emits no events for unchanged content")
+    }
+
+    func testState_prunesEntriesForDeletedFiles() throws {
+        let tmp = TempDirectory()
+        let projects = tmp.file("projects")
+        try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+        let session = projects.appendingPathComponent("proj").appendingPathComponent("s1")
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        let file = session.appendingPathComponent("a.jsonl")
+        try (assistantLine(uuid: "u1", ts: "2026-04-26T11:30:00Z") + "\n").write(to: file, atomically: true, encoding: .utf8)
+
+        let reader = FilesystemJSONLogReader(root: projects)
+        _ = reader.read()
+        XCTAssertEqual(reader.state().entries.count, 1)
+
+        try FileManager.default.removeItem(at: file)
+        let pruned = reader.state()
+        XCTAssertEqual(pruned.entries.count, 0, "state() must drop entries for files no longer on disk")
+    }
+
+    func testStateIsCodable() throws {
+        let s = ReaderState(entries: [
+            "/tmp/a.jsonl": .init(offset: 1234, mtime: Date(timeIntervalSince1970: 1_700_000_000))
+        ])
+        let data = try JSONEncoder().encode(s)
+        let decoded = try JSONDecoder().decode(ReaderState.self, from: data)
+        XCTAssertEqual(decoded, s)
+    }
+
+    private func assistantLine(uuid: String, ts: String) -> String {
+        """
+        {"type":"assistant","uuid":"\(uuid)","sessionId":"s1","timestamp":"\(ts)","message":{"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+        """
+    }
 }

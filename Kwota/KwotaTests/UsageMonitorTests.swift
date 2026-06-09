@@ -101,47 +101,6 @@ final class UsageMonitorTests: XCTestCase {
         XCTAssertEqual(monitor.dailyTokens, 250)
     }
 
-    func testLedgerPersistsAcrossMonitorRecreation() {
-        // The ledger persists seenUUIDs across recreation so re-ingesting the
-        // same events does not double-count. The daily counter is also persisted,
-        // so after recreation with the same profile + ledger + counter file,
-        // dailyTokens is restored to its previous value.
-        let tmp = TempDirectory()
-        let url = tmp.file("ledger.json")
-        let counterURL = tmp.file("daily-counter.json")
-        let profileId = UUID()
-        let reader1 = FakeJSONLogReader()
-        let clock = InMemoryClock(date("2026-04-26T12:00:00Z"))
-        let m1 = UsageMonitor(
-            reader: reader1, ledgerURL: url,
-            dailyCounterURL: counterURL,
-            appLaunchInstant: date("2026-04-26T11:00:00Z"),
-            clock: clock.dateProvider, legacyDailyQuotaEstimate: 1_000_000
-        )
-        reader1.queue = [[event("a", "2026-04-26T11:30:00Z", billable: 500)]]
-        m1.ownership = .init(profileId: profileId, boundary: .distantPast)
-        m1.tick()
-        XCTAssertEqual(m1.dailyTokens, 500)
-        m1.flushPersistForTesting()   // force debounced ledger write to disk before recreation
-
-        let reader2 = FakeJSONLogReader()
-        let m2 = UsageMonitor(
-            reader: reader2, ledgerURL: url,
-            dailyCounterURL: counterURL,
-            appLaunchInstant: date("2026-04-26T13:00:00Z"),
-            clock: clock.dateProvider, legacyDailyQuotaEstimate: 1_000_000
-        )
-        // Replay the same event — the persisted ledger must suppress the duplicate.
-        reader2.queue = [[event("a", "2026-04-26T11:30:00Z", billable: 500)]]
-        m2.ownership = .init(profileId: profileId, boundary: .distantPast)
-        m2.tick()
-
-        // uuid "a" was already seen; ledger dedup prevents double-counting.
-        // The persisted daily counter restores the value from before the restart.
-        XCTAssertEqual(m2.sessionTokens, 0, "deduped event must not add to session")
-        XCTAssertEqual(m2.dailyTokens, 500, "persisted counter must be restored after recreation")
-    }
-
     func testRemainingPercentClampsAtZero() {
         let tmp = TempDirectory()
         let reader = FakeJSONLogReader()
@@ -702,5 +661,97 @@ final class UsageMonitorTests: XCTestCase {
             FileManager.default.fileExists(atPath: ledgerURL.path),
             "stop() must flush pending debounced writes"
         )
+    }
+
+    func testRestart_restoresReaderOffsets_noDoubleEmit() {
+        // After a fake restart, the new monitor must call reader.restore() with
+        // the offsets the prior monitor persisted. Proves reader.state() is
+        // captured into the envelope and reader.restore() is wired on init.
+        let tmp = TempDirectory()
+        let ledgerURL = tmp.file("ledger.json")
+        let counterURL = tmp.file("daily.json")
+
+        let reader1 = FakeJSONLogReader()
+        let monitor1 = UsageMonitor(
+            reader: reader1,
+            ledgerURL: ledgerURL,
+            dailyCounterURL: counterURL,
+            appLaunchInstant: date("2026-04-26T11:00:00Z"),
+            clock: InMemoryClock(date("2026-04-26T12:00:00Z")).dateProvider,
+            legacyDailyQuotaEstimate: 1_000_000,
+            persistDebounce: 10.0
+        )
+        reader1.queue = [[event("a", "2026-04-26T11:30:00Z", billable: 100)]]
+        // Pretend the reader advanced its offset by 42 bytes after emitting "a".
+        reader1.stateOverride = ReaderState(entries: [
+            "/tmp/fake.jsonl": .init(offset: 42, mtime: date("2026-04-26T11:30:00Z"))
+        ])
+        monitor1.ownership = .init(profileId: UUID(), boundary: .distantPast)
+        monitor1.tick()
+        monitor1.flushPersistForTesting()
+
+        // Second monitor with a fresh reader. The persisted envelope must
+        // have included the offset; the new reader must receive it via
+        // restore() before any read.
+        let reader2 = FakeJSONLogReader()
+        _ = UsageMonitor(
+            reader: reader2,
+            ledgerURL: ledgerURL,
+            dailyCounterURL: counterURL,
+            appLaunchInstant: date("2026-04-26T13:00:00Z"),
+            clock: InMemoryClock(date("2026-04-26T13:00:00Z")).dateProvider,
+            legacyDailyQuotaEstimate: 1_000_000
+        )
+        XCTAssertEqual(
+            reader2.restoredState?.entries["/tmp/fake.jsonl"]?.offset,
+            42,
+            "UsageMonitor must call reader.restore() with the persisted state on init"
+        )
+    }
+
+    func testLegacyV2Ledger_migratesAndDropsSeenUUIDs() throws {
+        let tmp = TempDirectory()
+        let ledgerURL = tmp.file("ledger.json")
+        // Write a legacy v2 file (no envelope, top-level UsageLedger shape).
+        // Field names match the existing legacy test fixture (snake_case keys
+        // per TokenBreakdown.CodingKeys).
+        let legacyJSON = """
+        {
+          "schemaVersion": 2,
+          "seenUUIDs": ["legacy-uuid"],
+          "dailyByDay": {
+            "2026-04-25": {
+              "input_tokens": 5,
+              "output_tokens": 5,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0
+            }
+          },
+          "lastUpdate": 770000000.0
+        }
+        """
+        try legacyJSON.write(to: ledgerURL, atomically: true, encoding: .utf8)
+
+        let reader = FakeJSONLogReader()
+        let monitor = UsageMonitor(
+            reader: reader,
+            ledgerURL: ledgerURL,
+            appLaunchInstant: date("2026-04-26T11:00:00Z"),
+            clock: InMemoryClock(date("2026-04-26T12:00:00Z")).dateProvider,
+            legacyDailyQuotaEstimate: 1_000_000
+        )
+
+        // (a) reader.restore is called even on legacy migration → contract holds.
+        XCTAssertNotNil(reader.restoredState, "UsageMonitor must always call reader.restore() on init, even on legacy migration")
+        XCTAssertEqual(reader.restoredState?.entries.count, 0)
+
+        // (b) Persisted seenUUIDs was dropped: feeding the same uuid the
+        // legacy file recorded must fire onNewEvents (treated as new).
+        var newCount = 0
+        monitor.onNewEvents = { events in newCount += events.count }
+        reader.queue = [[event("legacy-uuid", "2026-04-25T12:00:00Z", billable: 10)]]
+        monitor.ownership = .init(profileId: UUID(), boundary: .distantPast)
+        monitor.tick()
+        XCTAssertEqual(newCount, 1, "legacy seenUUIDs must be dropped on migration")
     }
 }

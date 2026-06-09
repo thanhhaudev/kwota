@@ -31,16 +31,20 @@ struct UsageLedger: Codable, Equatable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case seenUUIDs, dailyByDay, lastUpdate, schemaVersion
+        case dailyByDay, lastUpdate, schemaVersion
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.seenUUIDs = try c.decodeIfPresent(Set<String>.self, forKey: .seenUUIDs) ?? []
+        // seenUUIDs is in-memory only as of schemaVersion 3. Legacy v2 files
+        // contain the field as a top-level array; the new CodingKeys
+        // intentionally omit it, so any persisted set is silently dropped on
+        // load. Within-session dedup rebuilds the Set from the JSONL replay
+        // that occurs immediately after restoring reader offsets (which
+        // emits zero events for files unchanged since last persist).
+        self.seenUUIDs = []
         self.dailyByDay = try c.decodeIfPresent([String: TokenBreakdown].self, forKey: .dailyByDay) ?? [:]
         self.lastUpdate = try c.decodeIfPresent(Date.self, forKey: .lastUpdate) ?? .distantPast
-        // Pre-schemaVersion ledgers are treated as v1 (local-tz keys) so the
-        // loader can spot them and drop the cache.
         self.schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
     }
 
@@ -83,10 +87,11 @@ struct UsageLedger: Codable, Equatable {
         return f.string(from: date)
     }
 
-    /// Drops day-buckets older than `days`, but keeps `seenUUIDs` so re-reads of
-    /// rotated jsonl files cannot double-count. The cutoff is computed in
-    /// `calendar`'s timezone — defaults to UTC to match `dayKey`, so persisted
-    /// keys parse round-trip with the same anchor they were written under.
+    /// Drops day-buckets older than `days`. `seenUUIDs` is in-memory only
+    /// and never pruned here — it grows during the session and is dropped
+    /// on next launch. Reader offset persistence (in `UsageMonitor`) is the
+    /// cross-restart dedup mechanism. Cutoff is computed in `calendar`'s
+    /// timezone — defaults to UTC to match `dayKey`.
     mutating func prune(olderThan days: Int, now: Date, calendar: Calendar = UsageLedger.utcCalendarForKeys) {
         guard let cutoff = calendar.date(byAdding: .day, value: -days, to: now) else { return }
         let parser = DateFormatter()

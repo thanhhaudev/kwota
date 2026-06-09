@@ -9,6 +9,38 @@ import os
 protocol JSONLogReader: AnyObject, Sendable {
     func read() -> [UsageEvent]
     func lastSeenLine() -> String?
+    /// Snapshot of the reader's per-file offset/mtime table. Codable so
+    /// `UsageMonitor` can persist it as part of the ledger envelope.
+    /// Implementations should drop entries for files that no longer exist
+    /// to keep the snapshot bounded.
+    func state() -> ReaderState
+    /// Restore a previously-snapshotted state. Must be called before any
+    /// `read()` so the next read picks up at the saved offset rather than
+    /// re-emitting the entire history from offset 0.
+    func restore(_ state: ReaderState)
+}
+
+extension JSONLogReader {
+    /// Default no-op so test fakes that don't care about persistence stay
+    /// untouched. `FilesystemJSONLogReader` provides the real implementation.
+    func state() -> ReaderState { ReaderState() }
+    func restore(_ state: ReaderState) {}
+}
+
+/// Persistable per-file read cursor. Stored inside the ledger envelope on
+/// disk; replaces the previous reliance on `UsageLedger.seenUUIDs` for
+/// cross-restart dedup.
+struct ReaderState: Codable, Equatable, Sendable {
+    var entries: [String: Entry]
+
+    struct Entry: Codable, Equatable, Sendable {
+        var offset: UInt64
+        var mtime: Date
+    }
+
+    init(entries: [String: Entry] = [:]) {
+        self.entries = entries
+    }
 }
 
 /// `@unchecked Sendable`: `offsets`/`mtimes` are mutated only inside `read()`,
@@ -135,5 +167,30 @@ final class FilesystemJSONLogReader: JSONLogReader, @unchecked Sendable {
         let usageData = (try? JSONSerialization.data(withJSONObject: usageDict)) ?? Data()
         let tokens = (try? JSONDecoder().decode(TokenBreakdown.self, from: usageData)) ?? .zero
         return UsageEvent(uuid: uuid, sessionId: sessionId, timestamp: ts, tokens: tokens)
+    }
+
+    // `state()` / `restore(_:)` touch `offsets`/`mtimes`; callers must not
+    // invoke them concurrently with `read()`. `UsageMonitor` only calls
+    // `restore()` before its first `read()` and `state()` after a read
+    // completes, so they share the same single-task confinement.
+    func state() -> ReaderState {
+        var snapshot: [String: ReaderState.Entry] = [:]
+        for (url, offset) in offsets {
+            // Drop entries whose file no longer exists.
+            guard fm.fileExists(atPath: url.path) else { continue }
+            let mtime = mtimes[url] ?? .distantPast
+            snapshot[url.path] = .init(offset: offset, mtime: mtime)
+        }
+        return ReaderState(entries: snapshot)
+    }
+
+    func restore(_ state: ReaderState) {
+        offsets.removeAll(keepingCapacity: false)
+        mtimes.removeAll(keepingCapacity: false)
+        for (path, entry) in state.entries {
+            let url = URL(fileURLWithPath: path)
+            offsets[url] = entry.offset
+            mtimes[url] = entry.mtime
+        }
     }
 }
