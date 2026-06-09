@@ -48,8 +48,8 @@ final class UsageMonitorTests: XCTestCase {
         // the injected fileEvents stream.
         let tmp = TempDirectory()
         let reader = FakeJSONLogReader()
-        var cont: AsyncStream<Void>.Continuation!
-        let stream = AsyncStream<Void> { cont = $0 }
+        var cont: AsyncStream<Set<URL>>.Continuation!
+        let stream = AsyncStream<Set<URL>> { cont = $0 }
         let clock = InMemoryClock(date("2026-04-26T12:00:00Z"))
         let monitor = UsageMonitor(
             reader: reader,
@@ -72,7 +72,7 @@ final class UsageMonitorTests: XCTestCase {
         monitor.start()
         XCTAssertEqual(monitor.sessionTokens, 0, "immediate start() tick sees only the empty batch")
 
-        cont.yield(())   // simulate an FSEvents notification
+        cont.yield([])   // simulate an FSEvents notification
         await fulfillment(of: [ingested], timeout: 2)
         XCTAssertEqual(monitor.sessionTokens, 100, "a file event must trigger ingestion on its own")
         monitor.stop()
@@ -817,5 +817,101 @@ final class UsageMonitorTests: XCTestCase {
             10,
             "legacy v2 migration must not double-count dailyByDay"
         )
+    }
+
+    // MARK: - FSEvents path-aware (Phase 3)
+
+    func testFileSystemEvent_withPaths_invokesIncrementalRead() async {
+        // Production path: an FSEvents yield carrying a non-empty Set<URL>
+        // must reach the reader as a read(only:) call with that exact set.
+        let tmp = TempDirectory()
+        let reader = FakeJSONLogReader()
+        var cont: AsyncStream<Set<URL>>.Continuation!
+        let stream = AsyncStream<Set<URL>> { cont = $0 }
+        let clock = InMemoryClock(date("2026-04-26T12:00:00Z"))
+        let monitor = UsageMonitor(
+            reader: reader,
+            ledgerURL: tmp.file("ledger.json"),
+            appLaunchInstant: date("2026-04-26T11:00:00Z"),
+            clock: clock.dateProvider,
+            fileEvents: stream,
+            legacyDailyQuotaEstimate: 1_000
+        )
+        reader.queue = [
+            [],   // consumed by the initial startup tick
+            [event("a", "2026-04-26T11:30:00Z", billable: 100)]
+        ]
+        monitor.ownership = .init(profileId: UUID(), boundary: .distantPast)
+
+        let ingested = expectation(description: "incremental tick ingests")
+        monitor.onNewEvents = { _ in ingested.fulfill() }
+        monitor.start()
+
+        // Wait for the startup tick (full-walk; empty batch) to drain so the
+        // path-aware yield below isn't dequeued ahead of the startup tick
+        // and assigned the empty batch — leaving the startup full-walk to
+        // dequeue the event batch and clobber `lastReadOnlyPaths` to nil.
+        var spins = 0
+        while monitor.lastTickAt == nil && spins < 200 {
+            try? await Task.sleep(nanoseconds: 10_000_000)   // 10 ms
+            spins += 1
+        }
+        XCTAssertNotNil(monitor.lastTickAt, "startup tick must complete before yielding path")
+
+        let touched: Set<URL> = [URL(fileURLWithPath: "/tmp/fake.jsonl")]
+        cont.yield(touched)
+        await fulfillment(of: [ingested], timeout: 2)
+
+        XCTAssertEqual(reader.lastReadOnlyPaths, touched,
+                       "non-empty FSEvents yield must reach reader as read(only:) with the same set")
+        monitor.stop()
+    }
+
+    func testFileSystemEvent_withEmptySet_triggersFullWalk() async {
+        // Empty-set sentinel from the safety-poll backstop must reach the
+        // reader as the plain read() — full walk.
+        let tmp = TempDirectory()
+        let reader = FakeJSONLogReader()
+        var cont: AsyncStream<Set<URL>>.Continuation!
+        let stream = AsyncStream<Set<URL>> { cont = $0 }
+        let clock = InMemoryClock(date("2026-04-26T12:00:00Z"))
+        let monitor = UsageMonitor(
+            reader: reader,
+            ledgerURL: tmp.file("ledger.json"),
+            appLaunchInstant: date("2026-04-26T11:00:00Z"),
+            clock: clock.dateProvider,
+            fileEvents: stream,
+            legacyDailyQuotaEstimate: 1_000
+        )
+        reader.queue = [
+            [],
+            [event("a", "2026-04-26T11:30:00Z", billable: 100)]
+        ]
+        monitor.ownership = .init(profileId: UUID(), boundary: .distantPast)
+
+        let ingested = expectation(description: "full-walk tick ingests")
+        monitor.onNewEvents = { _ in ingested.fulfill() }
+        monitor.start()
+
+        cont.yield([])   // empty set = full-walk sentinel
+        await fulfillment(of: [ingested], timeout: 2)
+
+        XCTAssertNil(reader.lastReadOnlyPaths,
+                     "empty-set yield must invoke the full-walk read(), not read(only:)")
+        monitor.stop()
+    }
+
+    func testSafetyPollDefault_isFiveMinutes() {
+        // Default safety-poll cadence rose from 60s to 300s after FSEvents
+        // became path-aware. Lock that in so future edits don't silently
+        // halve the residual idle-CPU savings.
+        let tmp = TempDirectory()
+        let reader = FakeJSONLogReader()
+        let monitor = UsageMonitor(
+            reader: reader,
+            ledgerURL: tmp.file("ledger.json")
+        )
+        XCTAssertEqual(monitor.safetyPollIntervalForTesting, 300)
+        _ = monitor
     }
 }

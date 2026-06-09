@@ -18,8 +18,18 @@ final class FakeJSONLogReader: JSONLogReader, @unchecked Sendable {
     /// Captures whatever state `UsageMonitor.init` passes to `restore(_:)`,
     /// so tests can assert that the wiring is correct.
     private(set) var restoredState: ReaderState?
+    /// Captures the path filter that `UsageMonitor` last passed to
+    /// `read(only:)`. nil ⇒ the production code used the full-walk
+    /// `read()` instead. Cleared on every `read()` call.
+    private(set) var lastReadOnlyPaths: Set<URL>?
 
     func read() -> [UsageEvent] {
+        lastReadOnlyPaths = nil
+        guard !queue.isEmpty else { return [] }
+        return queue.removeFirst()
+    }
+    func read(only paths: Set<URL>) -> [UsageEvent] {
+        lastReadOnlyPaths = paths
         guard !queue.isEmpty else { return [] }
         return queue.removeFirst()
     }

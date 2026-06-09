@@ -143,17 +143,18 @@ final class UsageMonitor: ObservableObject {
     /// Used by tests to count writes; nil in production.
     private let persistDidWriteForTesting: (() -> Void)?
 
-    /// Yields once per batch of writes under `~/.claude/projects`. Production
-    /// gets a real FSEvents stream via `UsageMonitor.live()`; the default is
-    /// inert so unit tests (which inject a fake reader and drive `tick()`
-    /// directly) never spin up a real watcher on the host's `~/.claude`.
-    private let fileEvents: AsyncStream<Void>
+    /// Path-aware FSEvents stream. Non-empty set = the listed files changed;
+    /// empty set = "do full walk" (used by the safety-poll backstop and
+    /// `defaultFileEvents()` for safety-net wake-ups).
+    private let fileEvents: AsyncStream<Set<URL>>
     /// Backstop poll. FSEvents drives ingestion the instant Claude writes, but
     /// a slow timer still runs to (a) catch any coalesced/missed event and
     /// (b) roll the daily counter over at UTC midnight on a quiet day with no
     /// file writes. 60s, not the old 5s, because the event stream — not the
     /// timer — is now the primary trigger.
     private let safetyPollInterval: TimeInterval
+    /// Test seam — production code reads `safetyPollInterval` directly.
+    var safetyPollIntervalForTesting: TimeInterval { safetyPollInterval }
 
     init(
         reader: JSONLogReader = FilesystemJSONLogReader(),
@@ -161,8 +162,8 @@ final class UsageMonitor: ObservableObject {
         dailyCounterURL: URL = UsageMonitor.defaultDailyCounterURL(),
         appLaunchInstant: Date = Date(),
         clock: @escaping () -> Date = { Date() },
-        fileEvents: AsyncStream<Void> = AsyncStream { _ in },
-        safetyPollInterval: TimeInterval = 60,
+        fileEvents: AsyncStream<Set<URL>> = AsyncStream { _ in },
+        safetyPollInterval: TimeInterval = 300,
         legacyDailyQuotaEstimate: Int = 1_000_000,
         persistDebounce: TimeInterval = 1.0,
         persistDidWriteForTesting: (() -> Void)? = nil
@@ -197,7 +198,13 @@ final class UsageMonitor: ObservableObject {
         // thread (a synchronous `read()` here re-enumerated the whole
         // `~/.claude/projects` tree on main and stalled the UI).
         listenTask = Task { @MainActor [weak self, fileEvents] in
-            for await _ in fileEvents { await self?.tickAsync() }
+            for await paths in fileEvents {
+                if paths.isEmpty {
+                    await self?.tickAsync()
+                } else {
+                    await self?.tickAsync(only: paths)
+                }
+            }
         }
         // Backstop + daily-counter rollover, see `safetyPollInterval`.
         let t = Timer(timeInterval: safetyPollInterval, repeats: true) { [weak self] _ in
@@ -248,18 +255,29 @@ final class UsageMonitor: ObservableObject {
     /// `isReading` — `read()` mutates the reader's per-file offsets, so two
     /// concurrent walks would race; a tick that arrives mid-read sets
     /// `readAgain` so the in-flight read re-runs once to catch the new data.
-    func tickAsync() async {
+    func tickAsync(only paths: Set<URL>? = nil) async {
         if isReading { readAgain = true; return }
         isReading = true
         defer { isReading = false }
+        var currentPaths = paths
         repeat {
             readAgain = false
+            let p = currentPaths
             let events = await withCheckedContinuation { (cont: CheckedContinuation<[UsageEvent], Never>) in
                 readQueue.async { [reader] in
-                    cont.resume(returning: reader.read())
+                    if let p {
+                        cont.resume(returning: reader.read(only: p))
+                    } else {
+                        cont.resume(returning: reader.read())
+                    }
                 }
             }
             ingest(events)
+            // If a tick arrived while we were reading, escalate to full
+            // walk on the next iteration: we don't know which file changed
+            // during the gap, and missing it is worse than re-stat'ing
+            // the tree once.
+            currentPaths = nil
         } while readAgain
     }
 
@@ -310,27 +328,43 @@ final class UsageMonitor: ObservableObject {
         AppPaths.applicationSupportDirectory.appendingPathComponent("usage-monitor-daily.json")
     }
 
-    /// FSEvents stream over `~/.claude/projects`, file-level. Yields once per
-    /// batch of writes under the tree (0.5s coalescing). Same idiom as
-    /// `CodexActivitySource.defaultFileEvents`. Tests inject a synthetic
-    /// stream instead, so this only runs in the live app.
-    nonisolated static func defaultFileEvents() -> AsyncStream<Void> {
+    /// FSEvents stream over `~/.claude/projects`, file-level. Yields a
+    /// Set<URL> per callback containing the .jsonl paths the kernel
+    /// reported as changed. Empty yields are suppressed at the callback
+    /// (a coalesced batch of directory-only events produces no work).
+    /// Tests inject a synthetic stream instead, so this only runs in the
+    /// live app.
+    nonisolated static func defaultFileEvents() -> AsyncStream<Set<URL>> {
         AsyncStream { continuation in
             let dir = FilesystemJSONLogReader.defaultRoot().path
             guard FileManager.default.fileExists(atPath: dir) else {
                 continuation.finish(); return    // no projects yet → never emits
             }
-            final class Box { let cont: AsyncStream<Void>.Continuation
-                init(_ c: AsyncStream<Void>.Continuation) { cont = c } }
+            final class Box { let cont: AsyncStream<Set<URL>>.Continuation
+                init(_ c: AsyncStream<Set<URL>>.Continuation) { cont = c } }
             let box = Box(continuation)
             var ctx = FSEventStreamContext(
                 version: 0,
                 info: Unmanaged.passRetained(box).toOpaque(),
                 retain: nil, release: nil, copyDescription: nil
             )
-            let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
+            let callback: FSEventStreamCallback = { _, info, numEvents, eventPaths, _, _ in
                 guard let info else { return }
-                Unmanaged<Box>.fromOpaque(info).takeUnretainedValue().cont.yield(())
+                // eventPaths is a CFArrayRef of CFStringRef. We set
+                // kFSEventStreamCreateFlagUseCFTypes in the create call
+                // below so the kernel delivers CF types here instead of
+                // the default char** layout.
+                let cfPaths = Unmanaged<CFArray>.fromOpaque(eventPaths).takeUnretainedValue()
+                var changed = Set<URL>()
+                for i in 0..<numEvents {
+                    guard let raw = CFArrayGetValueAtIndex(cfPaths, i) else { continue }
+                    let cfString = Unmanaged<CFString>.fromOpaque(raw).takeUnretainedValue()
+                    let path = cfString as String
+                    guard path.hasSuffix(".jsonl") else { continue }
+                    changed.insert(URL(fileURLWithPath: path))
+                }
+                guard !changed.isEmpty else { return }
+                Unmanaged<Box>.fromOpaque(info).takeUnretainedValue().cont.yield(changed)
             }
             guard let stream = FSEventStreamCreate(
                 kCFAllocatorDefault, callback, &ctx,
@@ -338,13 +372,13 @@ final class UsageMonitor: ObservableObject {
                 FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
                 0.5,   // coalescing latency (s)
                 FSEventStreamCreateFlags(
-                    kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)
+                    kFSEventStreamCreateFlagFileEvents
+                    | kFSEventStreamCreateFlagNoDefer
+                    | kFSEventStreamCreateFlagUseCFTypes)
             ) else {
                 Unmanaged<Box>.fromOpaque(ctx.info!).release()
                 continuation.finish(); return
             }
-            // Wrap the non-Sendable FSEventStreamRef so the @Sendable
-            // onTermination closure is Swift-6 clean.
             final class StreamHolder: @unchecked Sendable {
                 let stream: FSEventStreamRef
                 let info: UnsafeMutableRawPointer
