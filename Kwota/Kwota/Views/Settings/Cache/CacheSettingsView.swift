@@ -176,21 +176,23 @@ struct CacheSettingsView: View {
             .labelsHidden()
             .toggleStyle(.switch)
         }
-        SettingsSectionDivider()
-        SettingsRow(
-            title: "Auto-empty Trash",
-            subtitle: "Permanently delete items Kwota moved to Trash after this many days. Other items in your Trash are never touched. Off by default — items linger until you empty Finder Trash manually."
-        ) {
-            CompactInlinePicker(
-                selection: Binding(
-                    get: { vm.cacheState.settings.autoEmptyTrashAfterDays },
-                    set: { vm.cacheUpdate(settings: vm.cacheState.settings.with(autoEmptyTrashAfterDays: $0)) }
-                ),
-                options: Self.autoEmptyTrashOptions,
-                title: Self.autoEmptyTrashLabel(_:)
-            )
-            // Moot when permanent-delete is on — nothing reaches the Trash.
-            .disabled(vm.cacheState.settings.deletePermanently)
+        // Moot when permanent-delete is on — nothing reaches the Trash, so
+        // hide the row entirely rather than show a disabled picker.
+        if !vm.cacheState.settings.deletePermanently {
+            SettingsSectionDivider()
+            SettingsRow(
+                title: "Auto-empty Trash",
+                subtitle: "Permanently delete items Kwota moved to Trash after this many days. Other items in your Trash are never touched. Off by default — items linger until you empty Finder Trash manually."
+            ) {
+                CompactInlinePicker(
+                    selection: Binding(
+                        get: { vm.cacheState.settings.autoEmptyTrashAfterDays },
+                        set: { vm.cacheUpdate(settings: vm.cacheState.settings.with(autoEmptyTrashAfterDays: $0)) }
+                    ),
+                    options: Self.autoEmptyTrashOptions,
+                    title: Self.autoEmptyTrashLabel(_:)
+                )
+            }
         }
     }
 
