@@ -463,10 +463,10 @@ final class UsageMonitor: ObservableObject {
                 return (UsageLedger(), ReaderState())
             }
             AppLog.shared.log(
-                "UsageMonitor: legacy v2 ledger migrated to envelope schema (readerState empty, will re-walk once)",
+                "UsageMonitor: legacy v2 ledger dropped; dailyByDay and seenUUIDs rebuild from JSONL re-walk",
                 level: .info
             )
-            return (legacyLedger, ReaderState())
+            return (UsageLedger(), ReaderState())
         } catch {
             AppLog.shared.log("UsageMonitor ledger load failed: \(error)", level: .warn)
             return (UsageLedger(), ReaderState())

@@ -754,4 +754,68 @@ final class UsageMonitorTests: XCTestCase {
         monitor.tick()
         XCTAssertEqual(newCount, 1, "legacy seenUUIDs must be dropped on migration")
     }
+
+    func testLegacyV2Migration_doesNotDoubleCountDailyByDay() throws {
+        // Regression: pre-fix, loadEnvelope kept the legacy dailyByDay totals
+        // AND the post-restart full-tree re-walk re-emitted every event with
+        // empty in-memory seenUUIDs, doubling each day's bucket. The fix
+        // drops dailyByDay on migration so the re-walk rebuilds cleanly.
+        let tmp = TempDirectory()
+        let ledgerURL = tmp.file("ledger.json")
+        // Legacy v2: pre-existing total for the day the test re-ingests into.
+        let legacyJSON = """
+        {
+          "schemaVersion": 2,
+          "seenUUIDs": ["legacy-uuid"],
+          "dailyByDay": {
+            "2026-04-25": {
+              "input_tokens": 10,
+              "output_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0
+            }
+          },
+          "lastUpdate": 770000000.0
+        }
+        """
+        try legacyJSON.write(to: ledgerURL, atomically: true, encoding: .utf8)
+
+        let reader = FakeJSONLogReader()
+        // Hold InMemoryClock in a local — `.dateProvider` only retains it
+        // weakly, so an inline `InMemoryClock(...).dateProvider` falls back to
+        // wall-clock `Date()` and `ledger.prune` would silently delete the
+        // 2026-04-25 bucket (today minus 7 days ≫ 2026-04-25).
+        let clock = InMemoryClock(date("2026-04-26T12:00:00Z"))
+        let monitor = UsageMonitor(
+            reader: reader,
+            ledgerURL: ledgerURL,
+            appLaunchInstant: date("2026-04-26T11:00:00Z"),
+            clock: clock.dateProvider,
+            legacyDailyQuotaEstimate: 1_000_000,
+            persistDebounce: 0.0
+        )
+        // Replay the same event the legacy bucket was built from.
+        reader.queue = [[event("legacy-uuid", "2026-04-25T12:00:00Z", billable: 10)]]
+        monitor.ownership = .init(profileId: UUID(), boundary: .distantPast)
+        monitor.tick()
+        monitor.flushPersistForTesting()
+
+        // After the fix: legacy dailyByDay is dropped on migration, so the
+        // re-walked event lands once → bucket is 10, not 20.
+        // Inspect via the persisted envelope on disk, since UsageMonitor does
+        // not expose ledger.dailyByDay directly to callers.
+        struct EnvelopeProbe: Decodable {
+            struct LedgerProbe: Decodable {
+                let dailyByDay: [String: TokenBreakdown]
+            }
+            let ledger: LedgerProbe
+        }
+        let data = try Data(contentsOf: ledgerURL)
+        let probe = try JSONDecoder().decode(EnvelopeProbe.self, from: data)
+        XCTAssertEqual(
+            probe.ledger.dailyByDay["2026-04-25"]?.billable,
+            10,
+            "legacy v2 migration must not double-count dailyByDay"
+        )
+    }
 }
