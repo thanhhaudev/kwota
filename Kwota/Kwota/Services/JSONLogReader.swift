@@ -74,54 +74,60 @@ final class FilesystemJSONLogReader: JSONLogReader, @unchecked Sendable {
 
     func read() -> [UsageEvent] {
         guard fm.fileExists(atPath: root.path) else { return [] }
-
         var emitted: [UsageEvent] = []
-
         for fileURL in discoverFiles() {
-            let attrs = (try? fm.attributesOfItem(atPath: fileURL.path)) ?? [:]
-            let size = (attrs[.size] as? UInt64) ?? 0
-            let mtime = attrs[.modificationDate] as? Date
-            let stored = offsets[fileURL] ?? 0
-            var startOffset = stored
-            // Reset on rotation: file size shrank OR mtime changed while offset >= size
-            // (atomic overwrite produces a new mtime even with same byte length)
-            let mtimeChanged = mtime != nil && mtime != mtimes[fileURL] && mtimes[fileURL] != nil
-            if size < startOffset || (mtimeChanged && size <= startOffset) {
-                startOffset = 0
-            }
-            if let m = mtime { mtimes[fileURL] = m }
-            if size == startOffset { continue }
-
-            guard let handle = try? FileHandle(forReadingFrom: fileURL) else { continue }
-            defer { try? handle.close() }
-
-            do {
-                try handle.seek(toOffset: startOffset)
-                let data = handle.readDataToEndOfFile()
-
-                // Only consume up to the last newline; defer any partial final line.
-                guard let lastNewline = data.lastIndex(of: 0x0A) else {
-                    continue   // no complete line yet; don't advance offset
-                }
-                let consumable = data.prefix(through: lastNewline)
-                let advanced = startOffset + UInt64(consumable.count)
-
-                if let text = String(data: consumable, encoding: .utf8) {
-                    for raw in text.split(separator: "\n", omittingEmptySubsequences: true) {
-                        let line = String(raw)
-                        lastLineLock.withLock { $0 = line }
-                        if let event = parse(line: line) {
-                            emitted.append(event)
-                        }
-                    }
-                }
-
-                offsets[fileURL] = advanced
-            } catch {
-                AppLog.shared.log("JSONLogReader read failed for \(fileURL.lastPathComponent): \(error)", level: .warn)
-            }
+            readOne(fileURL, into: &emitted)
         }
         return emitted
+    }
+
+    /// Per-file logic shared by `read()` (full walk) and `read(only:)`
+    /// (incremental, added in a follow-up commit). Advances
+    /// `offsets[fileURL]` and emits parsed events. Idempotent: a call
+    /// where `size == startOffset` is a no-op other than the mtime refresh.
+    private func readOne(_ fileURL: URL, into emitted: inout [UsageEvent]) {
+        let attrs = (try? fm.attributesOfItem(atPath: fileURL.path)) ?? [:]
+        let size = (attrs[.size] as? UInt64) ?? 0
+        let mtime = attrs[.modificationDate] as? Date
+        let stored = offsets[fileURL] ?? 0
+        var startOffset = stored
+        // Reset on rotation: file size shrank OR mtime changed while offset >= size
+        // (atomic overwrite produces a new mtime even with same byte length)
+        let mtimeChanged = mtime != nil && mtime != mtimes[fileURL] && mtimes[fileURL] != nil
+        if size < startOffset || (mtimeChanged && size <= startOffset) {
+            startOffset = 0
+        }
+        if let m = mtime { mtimes[fileURL] = m }
+        if size == startOffset { return }
+
+        guard let handle = try? FileHandle(forReadingFrom: fileURL) else { return }
+        defer { try? handle.close() }
+
+        do {
+            try handle.seek(toOffset: startOffset)
+            let data = handle.readDataToEndOfFile()
+
+            // Only consume up to the last newline; defer any partial final line.
+            guard let lastNewline = data.lastIndex(of: 0x0A) else {
+                return   // no complete line yet; don't advance offset
+            }
+            let consumable = data.prefix(through: lastNewline)
+            let advanced = startOffset + UInt64(consumable.count)
+
+            if let text = String(data: consumable, encoding: .utf8) {
+                for raw in text.split(separator: "\n", omittingEmptySubsequences: true) {
+                    let line = String(raw)
+                    lastLineLock.withLock { $0 = line }
+                    if let event = parse(line: line) {
+                        emitted.append(event)
+                    }
+                }
+            }
+
+            offsets[fileURL] = advanced
+        } catch {
+            AppLog.shared.log("JSONLogReader read failed for \(fileURL.lastPathComponent): \(error)", level: .warn)
+        }
     }
 
     private func discoverFiles() -> [URL] {
