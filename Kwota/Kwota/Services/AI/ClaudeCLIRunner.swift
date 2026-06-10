@@ -237,6 +237,13 @@ final class ClaudeCLIRunner: ClaudeCLIInvocation {
         let processLock = NSLock()
         var capturedProcess: Process?
 
+        // Cancellation flag — onCancel sets this so the termination handler
+        // (which races onCancel) emits `.cancelled` instead of `.success`
+        // with the SIGTERM exit code. Without it the caller sees
+        // `.nonZeroExit(status: -15)` for what should be a typed cancel.
+        let cancelLock = NSLock()
+        var wasCancelled = false
+
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { cont in
                 // Run the Process on a background queue so we never block the
@@ -305,7 +312,15 @@ final class ClaudeCLIRunner: ClaudeCLIInvocation {
                         let out = stdoutData
                         let err = stderrData
                         dataLock.unlock()
-                        resumeOnce(.success((out, err, proc.terminationStatus)))
+
+                        cancelLock.lock()
+                        let cancelled = wasCancelled
+                        cancelLock.unlock()
+                        if cancelled {
+                            resumeOnce(.failure(InvocationError.cancelled))
+                        } else {
+                            resumeOnce(.success((out, err, proc.terminationStatus)))
+                        }
                     }
 
                     do {
@@ -345,11 +360,13 @@ final class ClaudeCLIRunner: ClaudeCLIInvocation {
             }
         } onCancel: {
             // Called on any thread when the enclosing Task is cancelled.
-            // Terminate the child immediately; resumeOnce races the
-            // terminationHandler — whichever wins the resumeLock owns
-            // the continuation resume. We also fire .cancelled here so
-            // the caller gets a clear typed error rather than a SIGTERM
-            // exit code if the termination handler wins the race.
+            // Set the cancel flag BEFORE terminating so the terminationHandler
+            // (which will fire as a result of terminate()) sees it and
+            // resumes with `.cancelled` instead of treating SIGTERM as a
+            // plain non-zero exit.
+            cancelLock.lock()
+            wasCancelled = true
+            cancelLock.unlock()
             processLock.lock()
             let proc = capturedProcess
             processLock.unlock()
