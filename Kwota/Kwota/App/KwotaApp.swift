@@ -11,6 +11,7 @@ import Combine
 struct KwotaApp: App {
     @State private var vm: MenuBarViewModel
     @State private var dockMode: DockIconMode
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     init() {
         let runtimeContext = AppRuntimeContext.current
@@ -21,11 +22,14 @@ struct KwotaApp: App {
             let vm = MenuBarViewModel()
             vm.shortcutCoordinator.start()
             _vm = State(initialValue: vm)
+            AppDelegate.viewModel = vm
             let mode = DockIconModeStore().mode
             _dockMode = State(initialValue: mode)
             Self.applyInitialActivationPolicy(mode: mode)
         case .hostedTests:
-            _vm = State(initialValue: Self.makeHostedTestViewModel())
+            let vm = Self.makeHostedTestViewModel()
+            _vm = State(initialValue: vm)
+            AppDelegate.viewModel = vm
         }
     }
 
@@ -151,6 +155,21 @@ struct KwotaApp: App {
             ),
             startupMode: .hostedTests
         )
+    }
+}
+
+/// Bridges AppKit's `applicationWillTerminate` so the UsageMonitor's 1s
+/// trailing-debounce persist is flushed on clean quit. Without this hook,
+/// FSEvents-driven ledger updates that landed within the debounce window
+/// before the user quit Kwota are abandoned at process exit; the next
+/// launch's JSONL re-walk recovers the events but `readerState` and
+/// `lastUpdate` regress.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    static var viewModel: MenuBarViewModel?
+
+    func applicationWillTerminate(_ notification: Notification) {
+        AppDelegate.viewModel?.usage.stop()
     }
 }
 
