@@ -24,11 +24,18 @@ final class AppLog {
             buffer.append(line)
             if buffer.count > maxLines { buffer.removeFirst(buffer.count - maxLines) }
         }
+        // `.private` defaults the os_log path to redacted because callers
+        // pass an already-interpolated `String` — once it lands here we
+        // can't tell whether it carries a token, refresh token, email, or
+        // anything else sensitive. The in-app Debug tab reads `buffer`
+        // (unredacted) so developers still see full content there; only
+        // Console.app / sysdiagnose see `<private>`. To intentionally log
+        // a safe diagnostic string to Console, use `log(_:level:privacy:)`.
         switch level {
-        case .debug: osLog.debug("\(message, privacy: .public)")
-        case .info:  osLog.info("\(message, privacy: .public)")
-        case .warn:  osLog.warning("\(message, privacy: .public)")
-        case .error: osLog.error("\(message, privacy: .public)")
+        case .debug: osLog.debug("\(message, privacy: .private)")
+        case .info:  osLog.info("\(message, privacy: .private)")
+        case .warn:  osLog.warning("\(message, privacy: .private)")
+        case .error: osLog.error("\(message, privacy: .private)")
         }
     }
 
