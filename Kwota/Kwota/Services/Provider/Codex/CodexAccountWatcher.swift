@@ -143,23 +143,15 @@ final class CodexAccountWatcher {
     }
 
     /// Production FSEvents stream from `~/.codex/auth.json`. Tests inject a
-    /// synthetic stream instead.
+    /// synthetic stream instead. Delegates to `FileSystemEventStream` so the
+    /// re-arm-after-rename logic is shared with the Claude watcher; Codex
+    /// CLI rewrites this file atomically on every token rotation, which
+    /// would otherwise leave the kqueue fd pointing at a stale inode.
     nonisolated static func defaultFileEvents() -> AsyncStream<Void> {
-        AsyncStream { continuation in
-            let url = CodexAuthReader.defaultPath
-            let fd = open(url.path, O_EVTONLY)
-            guard fd != -1 else { continuation.finish(); return }
-            let queue = DispatchQueue(label: "codex-account-watcher")
-            let source = DispatchSource.makeFileSystemObjectSource(
-                fileDescriptor: fd,
-                eventMask: [.write, .rename, .delete],
-                queue: queue
-            )
-            source.setEventHandler { continuation.yield(()) }
-            source.setCancelHandler { close(fd) }
-            source.resume()
-            continuation.onTermination = { _ in source.cancel() }
-        }
+        FileSystemEventStream.observe(
+            path: CodexAuthReader.defaultPath.path,
+            queueLabel: "codex-account-watcher"
+        )
     }
 
     deinit {

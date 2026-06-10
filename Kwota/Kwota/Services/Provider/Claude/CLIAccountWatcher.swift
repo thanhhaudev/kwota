@@ -186,23 +186,15 @@ final class CLIAccountWatcher {
     }
 
     /// Production FSEvents stream from `~/.claude.json`. Tests inject a
-    /// synthetic stream instead.
+    /// synthetic stream instead. Delegates to `FileSystemEventStream` so the
+    /// re-arm-after-rename logic is shared with the Codex watcher; Claude CLI
+    /// rewrites this file via temp-then-rename on every login/token rotation,
+    /// which would otherwise leave the kqueue fd pointing at a stale inode.
     nonisolated static func defaultFileEvents() -> AsyncStream<Void> {
-        AsyncStream { continuation in
-            let url = OAuthAccountReader.defaultPath
-            let fd = open(url.path, O_EVTONLY)
-            guard fd != -1 else { continuation.finish(); return }
-            let queue = DispatchQueue(label: "cli-account-watcher")
-            let source = DispatchSource.makeFileSystemObjectSource(
-                fileDescriptor: fd,
-                eventMask: [.write, .rename, .delete],
-                queue: queue
-            )
-            source.setEventHandler { continuation.yield(()) }
-            source.setCancelHandler { close(fd) }
-            source.resume()
-            continuation.onTermination = { _ in source.cancel() }
-        }
+        FileSystemEventStream.observe(
+            path: OAuthAccountReader.defaultPath.path,
+            queueLabel: "cli-account-watcher"
+        )
     }
 
     deinit {
