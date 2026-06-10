@@ -48,7 +48,7 @@ final class DebugReportExporterTests: XCTestCase {
 
         XCTAssertTrue(s.contains("System\n------\n"))
         XCTAssertTrue(s.contains("Recent Events (1)\n------------------\n"))
-        XCTAssertTrue(s.contains("Raw Last JSONL Line\n-------------------\n"))
+        XCTAssertTrue(s.contains("Last JSONL Line\n---------------\n"))
         XCTAssertTrue(s.contains("Log (last 1 lines)\n--------------------\n"))
         XCTAssertTrue(s.contains("Kwota: 1.0"))
         XCTAssertFalse(s.contains("Kwota: 1.0 ("))
@@ -68,8 +68,29 @@ final class DebugReportExporterTests: XCTestCase {
 
         XCTAssertTrue(s.contains("System\n------\n(none)"))
         XCTAssertTrue(s.contains("Recent Events (0)\n------------------\n(none)"))
-        XCTAssertTrue(s.contains("Raw Last JSONL Line\n-------------------\n(none)"))
+        XCTAssertTrue(s.contains("Last JSONL Line\n---------------\n(none)"))
         XCTAssertTrue(s.contains("Log (last 0 lines)\n--------------------\n(none)"))
+    }
+
+    func test_buildPayload_rawJSONLLine_isRedactedNotEmitted() {
+        // Conversation lines from ~/.claude/projects/**/*.jsonl include
+        // assistant `message.content` (code, pasted secrets). Export goes
+        // to support tickets — assert content never reaches the payload
+        // and the fingerprint replaces it.
+        let secret = "{\"type\":\"assistant\",\"message\":{\"content\":\"BEGIN-SECRET-PASSWORD-12345\"}}"
+        let s = DebugReportExporter.shared.buildPayload(
+            events: [],
+            rawLine: secret,
+            logLines: [],
+            snapshot: nil,
+            appVersion: nil,
+            now: fixedDate()
+        )
+
+        XCTAssertFalse(s.contains("BEGIN-SECRET-PASSWORD-12345"))
+        XCTAssertFalse(s.contains("message"))
+        XCTAssertFalse(s.contains("content"))
+        XCTAssertTrue(s.contains("(redacted; \(secret.count) bytes; sha256:"))
     }
 
     func test_buildPayload_systemSection_omitsArchAndCliSuffix() {

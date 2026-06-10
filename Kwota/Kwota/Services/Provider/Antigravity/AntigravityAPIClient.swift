@@ -103,7 +103,7 @@ final class AntigravityAPIClient {
                         AntigravityUsageSnapshot.self, from: data)
                 } catch {
                     AppLog.shared.log(
-                        "AntigravityAPIClient.decode failed: raw=\(String(data: data, encoding: .utf8)?.prefix(400) ?? "<bin>")",
+                        "AntigravityAPIClient.decode failed: \(data.count) bytes (body redacted)",
                         level: .debug
                     )
                     throw ClaudeAPIClient.APIError.decode(String(describing: error))

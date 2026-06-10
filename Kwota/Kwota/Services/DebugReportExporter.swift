@@ -5,6 +5,7 @@
 
 import Foundation
 import AppKit
+import CryptoKit
 import UniformTypeIdentifiers
 
 @MainActor
@@ -110,10 +111,20 @@ final class DebugReportExporter {
         }
         out += "\n"
 
-        out += "Raw Last JSONL Line\n"
-        out += "-------------------\n"
+        // Conversation content from `~/.claude/projects/**/*.jsonl` includes
+        // assistant `message.content` (code, pasted secrets, customer data).
+        // The export goes to support tickets, so we ship a fingerprint that
+        // confirms "this is the line we last saw" without leaking content.
+        out += "Last JSONL Line\n"
+        out += "---------------\n"
         let trimmedRaw = (rawLine ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        out += trimmedRaw.isEmpty ? "(none)\n" : "\(trimmedRaw)\n"
+        if trimmedRaw.isEmpty {
+            out += "(none)\n"
+        } else {
+            let digest = SHA256.hash(data: Data(trimmedRaw.utf8))
+            let fingerprint = digest.compactMap { String(format: "%02x", $0) }.joined().prefix(8)
+            out += "(redacted; \(trimmedRaw.count) bytes; sha256:\(fingerprint))\n"
+        }
         out += "\n"
 
         let tail = logLines.suffix(200)
