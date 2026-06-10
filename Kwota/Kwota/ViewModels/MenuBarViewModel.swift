@@ -207,6 +207,12 @@ final class MenuBarViewModel {
     // `init`, then read once on deinit — single-writer, single-reader, safe.
     private nonisolated(unsafe) var sleepObserver: NSObjectProtocol?
     private nonisolated(unsafe) var wakeObserver: NSObjectProtocol?
+    /// Observer on `UserDefaults.didChangeNotification` so the live
+    /// `refreshCoordinator` picks up Battery Saver toggles without
+    /// requiring an app relaunch. Same single-writer/single-reader
+    /// pattern as `sleepObserver`.
+    private nonisolated(unsafe) var pollingModeObserver: NSObjectProtocol?
+    private var lastKnownPollingMode: PollingMode = .normal
     /// Long-running Task that drives the background cache scan + auto-clean
     /// loop. Written once during `init` (when `.live`) and may be replaced
     /// when the user changes `scanInterval` from Settings — at which point
@@ -816,6 +822,7 @@ final class MenuBarViewModel {
             let pollingMode = PollingMode.resolve(
                 UserDefaults.standard.string(forKey: AppStorageKeys.generalPollingMode)
             )
+            self.lastKnownPollingMode = pollingMode
             AppLog.shared.log(
                 "MenuBarViewModel: pollingMode=\(pollingMode.rawValue) " +
                 "(open=\(pollingMode.openInterval)s, closed=\(pollingMode.closedInterval)s)",
@@ -831,6 +838,19 @@ final class MenuBarViewModel {
             )
             self.refreshCoordinator = coord
             coord.start()
+
+            // Live-reload Battery Saver toggle. UserDefaults.didChangeNotification
+            // fires for every key, so re-read the polling key and skip when
+            // nothing changed; the comparison is also what keeps the rebuild
+            // from happening on unrelated AppStorage writes (chart settings,
+            // theme, etc.).
+            self.pollingModeObserver = NotificationCenter.default.addObserver(
+                forName: UserDefaults.didChangeNotification,
+                object: UserDefaults.standard,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.applyPollingModeFromDefaults() }
+            }
 
             // Pause polling while the Mac sleeps and resume on wake. Two reasons:
             // a) the timer is scheduled on the main runloop, which doesn't fire
@@ -865,6 +885,23 @@ final class MenuBarViewModel {
         bindAwakeStateToLog()
     }
 
+    private func applyPollingModeFromDefaults() {
+        let current = PollingMode.resolve(
+            UserDefaults.standard.string(forKey: AppStorageKeys.generalPollingMode)
+        )
+        guard current != lastKnownPollingMode else { return }
+        lastKnownPollingMode = current
+        refreshCoordinator?.setIntervals(
+            open: current.openInterval,
+            closed: current.closedInterval
+        )
+        AppLog.shared.log(
+            "MenuBarViewModel: pollingMode → \(current.rawValue) " +
+            "(open=\(current.openInterval)s, closed=\(current.closedInterval)s)",
+            level: .info
+        )
+    }
+
     private func bindAwakeStateToLog() {
         // Seed the current state once.
         awakeSessionLog.record(state: awake.state)
@@ -890,6 +927,9 @@ final class MenuBarViewModel {
         if let sleepObserver { center.removeObserver(sleepObserver) }
         if let wakeObserver { center.removeObserver(wakeObserver) }
         #endif
+        if let pollingModeObserver {
+            NotificationCenter.default.removeObserver(pollingModeObserver)
+        }
         cacheSchedulerTask?.cancel()
     }
 

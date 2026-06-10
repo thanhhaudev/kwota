@@ -21,8 +21,8 @@ import Foundation
 
 @MainActor
 final class UsageRefreshCoordinator {
-    let openInterval: TimeInterval
-    let closedInterval: TimeInterval
+    private(set) var openInterval: TimeInterval
+    private(set) var closedInterval: TimeInterval
     /// Fraction of `currentInterval` to randomize each scheduled delay by,
     /// symmetric around the base. 0.2 means delay ∈ [0.8·base, 1.2·base].
     /// Tests pass 0 to make scheduling deterministic.
@@ -99,6 +99,21 @@ final class UsageRefreshCoordinator {
 
     func popoverDidClose() {
         if cadence.setClosed() { scheduleNextTick() }
+    }
+
+    /// Swap the open/closed cadence at runtime. Used when the user toggles
+    /// "Battery Saver" in Settings — without this, the toggle would only
+    /// take effect on the next app launch because the cadence is captured
+    /// in `init`. Preserves the current popover open/closed state so a
+    /// switch made while the popover is up stays on the fast cadence.
+    func setIntervals(open: TimeInterval, closed: TimeInterval) {
+        let wasOpen = cadence.currentInterval == cadence.openInterval
+        self.openInterval = open
+        self.closedInterval = closed
+        var next = PopoverPollingCadence(openInterval: open, closedInterval: closed)
+        if wasOpen { _ = next.setOpen() }
+        self.cadence = next
+        if timer != nil { scheduleNextTick() }
     }
 
     /// Records a server-suggested back-off (typically from a 429 response's

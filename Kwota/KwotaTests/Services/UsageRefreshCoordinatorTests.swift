@@ -175,6 +175,39 @@ final class UsageRefreshCoordinatorTests: XCTestCase {
                      "Codex must not inherit Claude's 429 floor")
     }
 
+    // MARK: - setIntervals
+
+    func test_setIntervals_updatesOpenAndClosed() {
+        let coord = UsageRefreshCoordinator(
+            openInterval: 60, closedInterval: 600, jitterFraction: 0, onTick: {}
+        )
+        coord.setIntervals(open: 120, closed: 1800)
+        XCTAssertEqual(coord.openInterval, 120)
+        XCTAssertEqual(coord.closedInterval, 1800)
+    }
+
+    func test_setIntervals_preservesClosedCadenceState() {
+        let coord = UsageRefreshCoordinator(
+            openInterval: 60, closedInterval: 600, jitterFraction: 0, onTick: {}
+        )
+        // Popover is closed at launch — currentInterval starts at closed.
+        XCTAssertEqual(coord.currentInterval, 600)
+        coord.setIntervals(open: 120, closed: 1800)
+        // Still closed → currentInterval flips to the new closed value.
+        XCTAssertEqual(coord.currentInterval, 1800)
+    }
+
+    func test_setIntervals_preservesOpenCadenceState() {
+        let coord = UsageRefreshCoordinator(
+            openInterval: 60, closedInterval: 600, jitterFraction: 0, onTick: {}
+        )
+        coord.popoverDidOpen()
+        XCTAssertEqual(coord.currentInterval, 60)
+        coord.setIntervals(open: 120, closed: 1800)
+        // Was open → currentInterval flips to the new open value, not closed.
+        XCTAssertEqual(coord.currentInterval, 120)
+    }
+
     func test_perProviderFloor_eachProviderTracksIndependently() {
         let baseTime = Date(timeIntervalSince1970: 1_700_000_000)
         let coord = UsageRefreshCoordinator(
