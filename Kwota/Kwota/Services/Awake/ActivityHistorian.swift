@@ -62,6 +62,7 @@ final class ActivityHistorian {
         clock: @escaping () -> Date = { Date() },
         backfillRoot: URL? = nil,
         autoBackfill: Bool = true,
+        autoBackfillDelay: TimeInterval = 0,
         persistURL: URL? = nil
     ) {
         self.windowSeconds = windowSeconds
@@ -80,7 +81,19 @@ final class ActivityHistorian {
         }
 
         if autoBackfill {
-            Task { [weak self] in await self?.backfillAsync() }
+            // `autoBackfillDelay > 0` defers the launch-time `~/.claude/projects`
+            // scan so the first provider refresh (which bridges a URLRequest)
+            // completes before the scan's heavy CF/JSON traffic kicks in. Some
+            // hosts have been observed to crash `URLRequest._bridgeToObjectiveC`
+            // under sustained concurrent CF allocation pressure at launch.
+            // Tests default to zero so behavior is unchanged.
+            let delay = autoBackfillDelay
+            Task { [weak self] in
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+                await self?.backfillAsync()
+            }
         }
     }
 

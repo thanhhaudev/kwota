@@ -524,13 +524,23 @@ final class CodexActivitySource: ActivitySource {
                 retain: nil, release: nil, copyDescription: nil
             )
             // `kFSEventStreamCreateFlagUseCFTypes` makes `eventPaths` a
-            // CFArray of CFString, so it bridges cleanly to `[String]`.
-            let callback: FSEventStreamCallback = { _, info, _, eventPaths, _, _ in
+            // CFArray of CFString. Bridge through Unmanaged rather than
+            // `unsafeBitCast` + `as? [String]` — the latter goes through an
+            // NSArray bridge that allocates a transient Swift array on every
+            // callback (called from a non-MainActor FSEvents queue), which
+            // has been observed to corrupt adjacent Foundation objects in
+            // the bridged-NS heap under sustained concurrent CF traffic.
+            // CFArrayGetValueAtIndex + CFString→Swift String is the same
+            // pattern UsageMonitor uses.
+            let callback: FSEventStreamCallback = { _, info, numEvents, eventPaths, _, _ in
                 guard let info else { return }
                 let cont = Unmanaged<Box>.fromOpaque(info).takeUnretainedValue().cont
-                let cfArray = unsafeBitCast(eventPaths, to: CFArray.self)
-                guard let paths = cfArray as? [String] else { return }
-                for p in paths { cont.yield(p) }
+                let cfPaths = Unmanaged<CFArray>.fromOpaque(eventPaths).takeUnretainedValue()
+                for i in 0..<numEvents {
+                    guard let raw = CFArrayGetValueAtIndex(cfPaths, i) else { continue }
+                    let path = Unmanaged<CFString>.fromOpaque(raw).takeUnretainedValue() as String
+                    cont.yield(path)
+                }
             }
             guard let stream = FSEventStreamCreate(
                 kCFAllocatorDefault, callback, &ctx,

@@ -25,12 +25,13 @@ final class CodexAPIClient {
     }
 
     /// Production transport — uses URLSession.shared. Tests pass a stub
-    /// closure to init(transport:).
+    /// closure to init(transport:). See `ClaudeAPIClient.live` for why the
+    /// closure must be explicitly `@Sendable` (off-MainActor bridge).
     static func live(now: @escaping () -> Date = Date.init) -> CodexAPIClient {
-        CodexAPIClient(
-            transport: { try await URLSession.shared.data(for: $0) },
-            now: now
-        )
+        let transport: @Sendable (URLRequest) async throws -> (Data, URLResponse) = { req in
+            try await URLSession.shared.data(for: req)
+        }
+        return CodexAPIClient(transport: transport, now: now)
     }
 
     /// Fetches and decodes `wham/usage`. Stamps `snapshot.fetchedAt` with

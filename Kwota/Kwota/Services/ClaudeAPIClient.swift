@@ -52,11 +52,21 @@ final class ClaudeAPIClient {
 
     /// Production transport — uses `URLSession.shared`. Must NOT be used in
     /// tests; XCTest targets should pass a stub closure to `init(transport:)`.
+    ///
+    /// The closure is explicitly `@Sendable` so it runs off the MainActor.
+    /// The target builds `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, which
+    /// makes an unannotated closure implicitly @MainActor — meaning the
+    /// `URLRequest → NSURLRequest` bridge inside `URLSession.data(for:)`
+    /// happens in the MainActor heap context. A null-isa crash has been
+    /// observed in that bridge under sustained concurrent CF traffic from
+    /// FSEvents callbacks + JSONL backfill on some hosts. Forcing the
+    /// transport non-isolated takes the bridge off main and onto the
+    /// cooperative pool.
     static func live(now: @escaping () -> Date = Date.init) -> ClaudeAPIClient {
-        ClaudeAPIClient(
-            transport: { try await URLSession.shared.data(for: $0) },
-            now: now
-        )
+        let transport: @Sendable (URLRequest) async throws -> (Data, URLResponse) = { req in
+            try await URLSession.shared.data(for: req)
+        }
+        return ClaudeAPIClient(transport: transport, now: now)
     }
 
     // MARK: - Subscription plan probe (sessionKey only)

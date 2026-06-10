@@ -30,12 +30,14 @@ final class AntigravityAPIClient {
 
     /// Production transport — uses an ephemeral URLSession that accepts the
     /// language_server's self-signed certificate for the loopback host.
-    /// Tests inject a stub via init(transport:).
+    /// Tests inject a stub via init(transport:). See `ClaudeAPIClient.live`
+    /// for why the closure must be explicitly `@Sendable` (off-MainActor
+    /// bridge).
     static func live(now: @escaping () -> Date = Date.init) -> AntigravityAPIClient {
-        AntigravityAPIClient(
-            transport: { try await Self.permissiveSession.data(for: $0) },
-            now: now
-        )
+        let transport: @Sendable (URLRequest) async throws -> (Data, URLResponse) = { req in
+            try await Self.permissiveSession.data(for: req)
+        }
+        return AntigravityAPIClient(transport: transport, now: now)
     }
 
     /// URLSession that accepts ANY server certificate ONLY when the host is

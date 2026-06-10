@@ -697,6 +697,12 @@ final class MenuBarViewModel {
         self.activityHistorian = activityHistorian
             ?? ActivityHistorian(
                 autoBackfill: startupMode == .live,
+                // Defer launch-time `~/.claude/projects` backfill so the first
+                // provider refresh's URLRequest bridge completes before the
+                // scan's heavy CF/JSON traffic ramps up — workaround for a
+                // null-isa crash observed in `URLRequest._bridgeToObjectiveC`
+                // on some hosts under sustained concurrent CF allocation.
+                autoBackfillDelay: startupMode == .live ? 5 : 0,
                 persistURL: startupMode == .live ? ActivityHistorian.defaultPersistURL() : nil
             )
 
