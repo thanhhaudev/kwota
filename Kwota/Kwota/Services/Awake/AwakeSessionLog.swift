@@ -46,10 +46,11 @@ final class AwakeSessionLog {
     @ObservationIgnored private var bag: Set<AnyCancellable> = []
 
     /// Orphan sessions on load are capped at `start + maxOrphanAge`. The cap
-    /// matches the supervisor's default idle window so a process that died
-    /// without writing a `lastPersistedAt` (or whose `lastPersistedAt` got
-    /// bumped past the real assertion release) can't paint hours of phantom
-    /// awake time into the chart.
+    /// matches the supervisor's default idle window (`IdleWindow.m5` in
+    /// `AwakeConfig.swift`) so a process that died without writing a
+    /// `lastPersistedAt` (or whose `lastPersistedAt` got bumped past the
+    /// real assertion release) can't paint hours of phantom awake time into
+    /// the chart. Keep this in lockstep with `IdleWindow.default`.
     @ObservationIgnored private static let maxOrphanAge: TimeInterval = 5 * 60
 
     init(
@@ -243,8 +244,22 @@ final class AwakeSessionLog {
     /// every open session is closed at the current clock — fixing the
     /// orphan-amplification bug where `record(.idle)` only inspected the
     /// last session and left earlier orphans open indefinitely.
+    ///
+    /// Note: `record(.idle)` itself was not changed — it still inspects only
+    /// the tail. Safe today because the supervisor flips caffeine on every
+    /// state transition, so this caffeine-driven sweep always runs as the
+    /// final close path. If a future supervisor keeps caffeine active while
+    /// opening a new session over an old one, the old orphan would survive;
+    /// add a multi-open sweep to `record()` at that point.
     private func subscribeToCaffeine(_ caffeine: CaffeinateManager) {
         caffeine.$isActive
+            // `@Published` delivers the current value synchronously on
+            // subscribe; the runloop hop defers that initial emission until
+            // after `init` returns. Without it, a `false` snapshot at init
+            // time would try to close sessions before `loadSessions` (which
+            // capped them) has handed them over to `self.sessions`. Tests
+            // also depend on the hop so they can mutate the injected clock
+            // between subscribe and first delivery.
             .receive(on: RunLoop.main)
             .sink { [weak self] active in
                 guard let self else { return }

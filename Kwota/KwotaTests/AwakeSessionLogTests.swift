@@ -498,6 +498,8 @@ final class AwakeSessionLogTests: XCTestCase {
         let t0 = clock!
         try caffeine.enable()
         log.record(state: .autoActive(since: t0))
+        let mtimeAfterRecord = try FileManager.default
+            .attributesOfItem(atPath: url.path)[.modificationDate] as? Date
 
         let t1 = t0.addingTimeInterval(3600)
         clock = t1
@@ -506,8 +508,16 @@ final class AwakeSessionLogTests: XCTestCase {
         XCTAssertEqual(log.sessions.count, 1)
         XCTAssertNil(log.sessions[0].end, "session must remain open while caffeine is active")
 
-        // Reload at the heartbeat moment: open session should close at t1
-        // (lastPersistedAt advanced to t1, so reader caps the orphan at t1).
+        // The heartbeat must rewrite the file — otherwise the reader's
+        // orphan cap (start + 5 min) would close the session even if
+        // heartbeatPersist had been a no-op, masking a regression.
+        let mtimeAfterHeartbeat = try FileManager.default
+            .attributesOfItem(atPath: url.path)[.modificationDate] as? Date
+        XCTAssertNotEqual(mtimeAfterRecord, mtimeAfterHeartbeat,
+                          "heartbeat must rewrite the file while caffeine is active")
+
+        // Reload: cap = start + 5min, lastPersistedAt = t1 = start + 1h.
+        // min(t1, start+5min) = start+5min — the cap wins, exact match.
         let reader = AwakeSessionLog(
             windowSeconds: 8 * 3600,
             clock: { [unowned self] in self.now() },
@@ -515,10 +525,8 @@ final class AwakeSessionLogTests: XCTestCase {
             persistURL: url
         )
         XCTAssertEqual(reader.sessions.count, 1)
-        // Cap is start + 5min; lastPersistedAt is t1 = start + 1h, so the
-        // load-time cap wins. The reload assertion targets the persisted
-        // lastPersistedAt advancing rather than the cap behaviour.
-        XCTAssertNotNil(reader.sessions[0].end)
+        XCTAssertEqual(reader.sessions[0].end, t0.addingTimeInterval(5 * 60),
+                       "orphan must close at the load-time cap, not lastPersistedAt")
     }
 
     /// Loading an orphan session with a far-future `lastPersistedAt` (the bug:
@@ -578,8 +586,10 @@ final class AwakeSessionLogTests: XCTestCase {
     /// open sessions in memory, flipping caffeine off must close ALL of them,
     /// not just the last. The original `record(.idle)` path only inspected
     /// the tail, which is how the phantom 7h43m row survived in the first
-    /// place. Caffeine-driven close is the path that fixes it.
-    func test_recordIdleClosesAllOpenSessionsNotJustLast() async {
+    /// place. This test exercises the caffeine-driven close path — the one
+    /// that actually fixes it — not `record(.idle)` (which still only
+    /// inspects the tail and is exercised elsewhere).
+    func test_caffeineOffClosesAllOpenSessionsNotJustLast() async {
         let caffeine = CaffeinateManager(holder: MockSleepAssertionHolder())
         let log = AwakeSessionLog(
             windowSeconds: 8 * 3600,
