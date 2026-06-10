@@ -162,14 +162,14 @@ struct ProfileHistoryCard: View {
     }
 
     private func loadCount(profileId: UUID) async -> Int {
-        await Task.detached(priority: .utility) {
+        await OffMain.run {
             let url = AppPaths.usageHistoryFile(id: profileId)
             guard FileManager.default.fileExists(atPath: url.path) else { return 0 }
             guard let data = try? Data(contentsOf: url) else { return 0 }
             let dec = JSONDecoder()
             dec.dateDecodingStrategy = .secondsSince1970
             return (try? dec.decode([UsageHistoryEntry].self, from: data).count) ?? 0
-        }.value
+        }
     }
 
     private func clearHistory(for profile: Profile) {

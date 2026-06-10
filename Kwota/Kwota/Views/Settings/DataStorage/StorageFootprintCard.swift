@@ -116,14 +116,13 @@ struct StorageFootprintCard: View {
     }
 
     private static func directorySize(_ url: URL) async -> DirectorySize {
-        await Task.detached(priority: .utility) {
+        await OffMain.run {
             guard FileManager.default.fileExists(atPath: url.path) else { return DirectorySize.zero }
             var files = 0
             var bytes = 0
             let keys: [URLResourceKey] = [.fileSizeKey, .isRegularFileKey]
             if let it = FileManager.default.enumerator(at: url, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) {
                 for case let item as URL in it {
-                    if Task.isCancelled { return DirectorySize(files: files, bytes: bytes) }
                     let v = try? item.resourceValues(forKeys: Set(keys))
                     if v?.isRegularFile == true {
                         files += 1
@@ -132,11 +131,11 @@ struct StorageFootprintCard: View {
                 }
             }
             return DirectorySize(files: files, bytes: bytes)
-        }.value
+        }
     }
 
     private static func historyOnlySize(_ profilesDir: URL, profileIds: [UUID]) async -> DirectorySize {
-        await Task.detached(priority: .utility) {
+        await OffMain.run {
             var files = 0
             var bytes = 0
             for id in profileIds {
@@ -150,7 +149,7 @@ struct StorageFootprintCard: View {
                 }
             }
             return DirectorySize(files: files, bytes: bytes)
-        }.value
+        }
     }
 
     private func byteString(_ n: Int) -> String {
