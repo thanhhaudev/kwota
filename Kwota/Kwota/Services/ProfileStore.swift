@@ -47,6 +47,13 @@ final class ProfileStore {
     private let profilesFile: URL
     private let keychain: KeychainCredentialStore
     private let profileDirectoryProvider: (UUID) -> URL
+    /// False after `load()` quarantines a corrupt `profiles.json`. While
+    /// false, `save()` refuses to overwrite the empty in-memory state with
+    /// an empty on-disk file — background auto-coordinator emits would
+    /// otherwise destroy the user's recovery path. Cleared on the first
+    /// `save()` after profiles becomes non-empty (the user added a profile,
+    /// implicitly accepting the reset).
+    private var loadedSuccessfully = true
     private let encoder: JSONEncoder = {
         let e = JSONEncoder()
         e.dateEncodingStrategy = .secondsSince1970
@@ -427,10 +434,28 @@ final class ProfileStore {
         } catch {
             let backup = profilesFile.appendingPathExtension("corrupt-\(Int(Date().timeIntervalSince1970))")
             try? FileManager.default.moveItem(at: profilesFile, to: backup)
+            loadedSuccessfully = false
+            AppLog.shared.log(
+                "ProfileStore: profiles.json failed to decode (\(error)). Quarantined to \(backup.lastPathComponent). Refusing background saves until profiles is non-empty.",
+                level: .error
+            )
         }
     }
 
     private func save() throws {
+        // Quarantine guard: if load() failed and quarantined the file, refuse
+        // to overwrite the empty in-memory state with an empty on-disk file.
+        // Background auto-coordinator emits (CLIAccountWatcher → activate →
+        // setActive → save) would otherwise destroy the user's recovery path
+        // before they ever see the quarantine. The first `add()` populates
+        // profiles, lifting the guard.
+        if !loadedSuccessfully && profiles.isEmpty && activeProfileId == nil {
+            AppLog.shared.log(
+                "ProfileStore: refusing save() after corrupt-load quarantine (in-memory still empty)",
+                level: .warn
+            )
+            return
+        }
         let onDisk = OnDisk(profiles: profiles, activeProfileId: activeProfileId)
         let data = try encoder.encode(onDisk)
         try FileManager.default.createDirectory(
@@ -438,5 +463,6 @@ final class ProfileStore {
             withIntermediateDirectories: true
         )
         try data.write(to: profilesFile, options: .atomic)
+        loadedSuccessfully = true
     }
 }
