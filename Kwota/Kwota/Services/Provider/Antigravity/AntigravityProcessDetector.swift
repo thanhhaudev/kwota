@@ -107,8 +107,9 @@ nonisolated final class AntigravityProcessDetector {
         p.executableURL = URL(fileURLWithPath: command)
         p.arguments = args
         let pipe = Pipe()
+        let stderrPipe = Pipe()
         p.standardOutput = pipe
-        p.standardError = Pipe()
+        p.standardError = stderrPipe
         // Buffer via a class instance + NSLock so the readabilityHandler
         // closure (runs on a separate dispatch queue) can mutate without
         // triggering Swift 6's `Mutation of captured var in concurrently-
@@ -124,10 +125,25 @@ nonisolated final class AntigravityProcessDetector {
             }
             lock.lock(); buffer.data.append(chunk); lock.unlock()
         }
+        // Drain stderr too — `lsof`/`ps` can emit warnings (e.g. "no info on
+        // process N" floods on systems with many fds) that fill the kernel-
+        // side pipe buffer past 64KB and block the child on `write(2)`,
+        // wedging `waitUntilExit()`. We don't read the data, so just discard
+        // each chunk as it arrives.
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+            }
+        }
         try p.run()
         p.waitUntilExit()
         pipe.fileHandleForReading.readabilityHandler = nil
+        stderrPipe.fileHandleForReading.readabilityHandler = nil
         let tail = pipe.fileHandleForReading.availableData
+        // Discard any final stderr tail too so the pipe is fully drained
+        // before its fd closes.
+        _ = stderrPipe.fileHandleForReading.availableData
         lock.lock()
         if !tail.isEmpty { buffer.data.append(tail) }
         let out = buffer.data
