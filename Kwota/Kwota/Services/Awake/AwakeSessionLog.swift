@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import Combine
 import Observation
 
 struct AwakeSession: Identifiable, Equatable, Codable {
@@ -41,22 +42,36 @@ final class AwakeSessionLog {
     @ObservationIgnored private let clock: () -> Date
     @ObservationIgnored private let persistURL: URL?
     @ObservationIgnored nonisolated(unsafe) private var pruneTask: Task<Void, Never>?
+    @ObservationIgnored private weak var caffeine: CaffeinateManager?
+    @ObservationIgnored private var bag: Set<AnyCancellable> = []
+
+    /// Orphan sessions on load are capped at `start + maxOrphanAge`. The cap
+    /// matches the supervisor's default idle window so a process that died
+    /// without writing a `lastPersistedAt` (or whose `lastPersistedAt` got
+    /// bumped past the real assertion release) can't paint hours of phantom
+    /// awake time into the chart.
+    @ObservationIgnored private static let maxOrphanAge: TimeInterval = 5 * 60
 
     init(
         windowSeconds: TimeInterval = 24 * 3600,
         clock: @escaping () -> Date = { Date() },
         autoStart: Bool = true,
-        persistURL: URL? = nil
+        persistURL: URL? = nil,
+        caffeine: CaffeinateManager? = nil
     ) {
         self.windowSeconds = windowSeconds
         self.clock = clock
         self.persistURL = persistURL
+        self.caffeine = caffeine
         if let url = persistURL {
             self.sessions = Self.loadSessions(from: url)
             self.prune()
         }
         if autoStart {
             startPruneLoop()
+        }
+        if let caffeine {
+            subscribeToCaffeine(caffeine)
         }
     }
 
@@ -120,8 +135,18 @@ final class AwakeSessionLog {
     /// hours earlier than reality. Piggybacked on the 30s prune loop —
     /// worst-case crash staleness is one tick.
     func heartbeatPersist(now: Date? = nil) {
+        let t = now ?? clock()
+        // Ground truth is the IOKit assertion. If caffeine has gone inactive
+        // while we still carry an open session, that session is an orphan
+        // (e.g. crash-between-state-change). Close it at the current clock
+        // instead of bumping `lastPersistedAt` forward — bumping is what
+        // produced the 7h43m phantom awake session.
+        if let caffeine, !caffeine.isActive {
+            closeOpenSessions(at: t)
+            return
+        }
         guard sessions.contains(where: { $0.end == nil }) else { return }
-        persist(at: now ?? clock())
+        persist(at: t)
     }
 
     /// Closes any session whose `end` is still nil, setting it to `at`. Used
@@ -159,8 +184,15 @@ final class AwakeSessionLog {
             let data = try Data(contentsOf: url)
             let payload = try JSONDecoder.iso8601().decode(AwakeSessionLogPersisted.self, from: data)
             var restored = payload.sessions
+            // Cap orphan close at start + maxOrphanAge. Without the cap,
+            // a long-idle heartbeat (or worse, a heartbeat that ran while
+            // caffeine was already off) would persist a `lastPersistedAt`
+            // hours after the IOKit assertion was actually released, and
+            // this loop would close the orphan at that stale moment —
+            // painting a multi-hour phantom awake span into the chart.
             for i in restored.indices where restored[i].end == nil {
-                restored[i].end = payload.lastPersistedAt
+                let cap = restored[i].start.addingTimeInterval(maxOrphanAge)
+                restored[i].end = min(payload.lastPersistedAt, cap)
             }
             return restored
         } catch {
@@ -204,6 +236,23 @@ final class AwakeSessionLog {
             sessions[idx].end = now
         }
         sessions.append(AwakeSession(mode: mode, start: since))
+    }
+
+    /// Treats `caffeine.isActive` as ground truth for whether the IOKit
+    /// PreventUserIdleSystemSleep assertion is held. When it flips false,
+    /// every open session is closed at the current clock — fixing the
+    /// orphan-amplification bug where `record(.idle)` only inspected the
+    /// last session and left earlier orphans open indefinitely.
+    private func subscribeToCaffeine(_ caffeine: CaffeinateManager) {
+        caffeine.$isActive
+            .receive(on: RunLoop.main)
+            .sink { [weak self] active in
+                guard let self else { return }
+                if !active {
+                    self.closeOpenSessions(at: self.clock())
+                }
+            }
+            .store(in: &bag)
     }
 
     private func startPruneLoop() {

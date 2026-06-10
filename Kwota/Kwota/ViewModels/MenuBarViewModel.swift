@@ -645,7 +645,8 @@ final class MenuBarViewModel {
         // pattern used for activityHistorian's backfill scan. Constructed
         // before the supervisor so its sleep/wake callbacks can capture it.
         let resolvedSessionLog = awakeSessionLog ?? AwakeSessionLog(
-            persistURL: startupMode == .live ? AwakeSessionLog.defaultPersistURL() : nil
+            persistURL: startupMode == .live ? AwakeSessionLog.defaultPersistURL() : nil,
+            caffeine: self.caffeine
         )
         self.awakeSessionLog = resolvedSessionLog
 
