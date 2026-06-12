@@ -133,6 +133,11 @@ final class AwakeSupervisor {
     /// Nil on Macs with no battery hardware (desktops).
     var currentBatteryPercent: Int? { battery.reading.percent }
 
+    /// Read-only mirror of seconds since the user's last keyboard/mouse input,
+    /// for status UI (the standby gate countdown). Computed on demand — not
+    /// observable; callers poll it from a TimelineView tick.
+    var userIdleSeconds: TimeInterval { userInput.secondsSinceLastInput() }
+
     private var effectiveIdleWindow: TimeInterval {
         idleWindowOverride ?? config.idleWindow.seconds
     }

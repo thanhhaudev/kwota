@@ -73,8 +73,9 @@ final class AwakeCardCopyTests: XCTestCase {
         XCTAssertEqual(s, "Waiting for agent activity")
     }
 
-    func test_subtitle_idle_autoOn_gateEnabled_recentActivity_showsStepAway() {
-        // Gate enabled + recent activity → user-idle gate is the blocker, surface it.
+    func test_subtitle_idle_autoOn_gateEnabled_userActive_showsStaticGateCopy() {
+        // Gate enabled + recent activity, user still at the keyboard →
+        // static copy naming the gate duration.
         let now = Date(timeIntervalSince1970: 1_000_000)
         let recentActivity = now.addingTimeInterval(-60)     // 1 min ago — within 5-min window
         let s = AwakeCardCopy.subtitle(
@@ -84,9 +85,78 @@ final class AwakeCardCopyTests: XCTestCase {
             lastActivity: recentActivity,
             batteryPct: nil,
             batteryThreshold: nil,
-            userIdleGateEnabled: true
+            userIdleSeconds: 0,
+            gateSeconds: 60
         )
-        XCTAssertEqual(s, "Agent active — keeps your Mac awake once you step away")
+        XCTAssertEqual(s, "Agent active — keeps your Mac awake after 1 min away")
+    }
+
+    func test_subtitle_idle_autoOn_gateEnabled_userActive_subMinuteGateLabel() {
+        // 30-second gate renders in seconds, matching the Settings picker label.
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let recentActivity = now.addingTimeInterval(-60)
+        let s = AwakeCardCopy.subtitle(
+            state: .idle,
+            autoEnabled: true,
+            now: now,
+            lastActivity: recentActivity,
+            batteryPct: nil,
+            batteryThreshold: nil,
+            userIdleSeconds: 0,
+            gateSeconds: 30
+        )
+        XCTAssertEqual(s, "Agent active — keeps your Mac awake after 30 s away")
+    }
+
+    func test_subtitle_idle_autoOn_gateEnabled_idleBelowRevealThreshold_staysStatic() {
+        // A brief typing pause must not flip the line into a countdown.
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let recentActivity = now.addingTimeInterval(-60)
+        let s = AwakeCardCopy.subtitle(
+            state: .idle,
+            autoEnabled: true,
+            now: now,
+            lastActivity: recentActivity,
+            batteryPct: nil,
+            batteryThreshold: nil,
+            userIdleSeconds: AwakeCardCopy.countdownRevealThreshold - 1,
+            gateSeconds: 60
+        )
+        XCTAssertEqual(s, "Agent active — keeps your Mac awake after 1 min away")
+    }
+
+    func test_subtitle_idle_autoOn_gateEnabled_userAway_showsCountdown() {
+        // User idle past the reveal threshold → live countdown to gate-open.
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let recentActivity = now.addingTimeInterval(-60)
+        let s = AwakeCardCopy.subtitle(
+            state: .idle,
+            autoEnabled: true,
+            now: now,
+            lastActivity: recentActivity,
+            batteryPct: nil,
+            batteryThreshold: nil,
+            userIdleSeconds: 18,
+            gateSeconds: 60
+        )
+        XCTAssertEqual(s, "Agent active — awake in 0m 42s")
+    }
+
+    func test_subtitle_idle_autoOn_gateEnabled_idlePastGate_clampsAtZero() {
+        // Gate already open but no agent pulse yet → clamp at zero, don't go negative.
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let recentActivity = now.addingTimeInterval(-60)
+        let s = AwakeCardCopy.subtitle(
+            state: .idle,
+            autoEnabled: true,
+            now: now,
+            lastActivity: recentActivity,
+            batteryPct: nil,
+            batteryThreshold: nil,
+            userIdleSeconds: 75,
+            gateSeconds: 60
+        )
+        XCTAssertEqual(s, "Agent active — awake in 0m 00s")
     }
 
     func test_subtitle_idle_autoOn_gateOff_recentActivity_showsWaiting() {
@@ -100,7 +170,8 @@ final class AwakeCardCopyTests: XCTestCase {
             lastActivity: recentActivity,
             batteryPct: nil,
             batteryThreshold: nil,
-            userIdleGateEnabled: false
+            userIdleSeconds: 120,
+            gateSeconds: nil
         )
         XCTAssertEqual(s, "Waiting for agent activity")
     }
@@ -116,7 +187,8 @@ final class AwakeCardCopyTests: XCTestCase {
             lastActivity: staleActivity,
             batteryPct: nil,
             batteryThreshold: nil,
-            userIdleGateEnabled: true
+            userIdleSeconds: 0,
+            gateSeconds: 60
         )
         XCTAssertEqual(s, "Waiting for agent activity")
     }
@@ -130,9 +202,72 @@ final class AwakeCardCopyTests: XCTestCase {
             lastActivity: nil,
             batteryPct: nil,
             batteryThreshold: nil,
-            userIdleGateEnabled: true
+            userIdleSeconds: 0,
+            gateSeconds: 60
         )
         XCTAssertEqual(s, "Waiting for agent activity")
+    }
+
+    // MARK: - Gate countdown predicate (timer icon)
+
+    func test_showsGateCountdown_userAway_true() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertTrue(AwakeCardCopy.showsGateCountdown(
+            state: .idle,
+            autoEnabled: true,
+            now: now,
+            lastActivity: now.addingTimeInterval(-60),
+            userIdleSeconds: 18,
+            gateSeconds: 60
+        ))
+    }
+
+    func test_showsGateCountdown_userActive_false() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertFalse(AwakeCardCopy.showsGateCountdown(
+            state: .idle,
+            autoEnabled: true,
+            now: now,
+            lastActivity: now.addingTimeInterval(-60),
+            userIdleSeconds: AwakeCardCopy.countdownRevealThreshold - 1,
+            gateSeconds: 60
+        ))
+    }
+
+    func test_showsGateCountdown_gateOff_false() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertFalse(AwakeCardCopy.showsGateCountdown(
+            state: .idle,
+            autoEnabled: true,
+            now: now,
+            lastActivity: now.addingTimeInterval(-60),
+            userIdleSeconds: 120,
+            gateSeconds: nil
+        ))
+    }
+
+    func test_showsGateCountdown_staleActivity_false() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertFalse(AwakeCardCopy.showsGateCountdown(
+            state: .idle,
+            autoEnabled: true,
+            now: now,
+            lastActivity: now.addingTimeInterval(-400),
+            userIdleSeconds: 18,
+            gateSeconds: 60
+        ))
+    }
+
+    func test_showsGateCountdown_nonIdleState_false() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertFalse(AwakeCardCopy.showsGateCountdown(
+            state: .autoActive(since: now),
+            autoEnabled: true,
+            now: now,
+            lastActivity: now.addingTimeInterval(-60),
+            userIdleSeconds: 18,
+            gateSeconds: 60
+        ))
     }
 
     func test_subtitle_autoActive_withRecentActivity() {

@@ -28,6 +28,10 @@ enum AwakeCardCopy {
         }
     }
 
+    /// User idle must accrue this long before the static gate copy flips to a
+    /// live countdown — incidental typing pauses shouldn't reshape the line.
+    static let countdownRevealThreshold: TimeInterval = 5
+
     static func subtitle(
         state: AwakeState,
         autoEnabled: Bool,
@@ -36,7 +40,8 @@ enum AwakeCardCopy {
         batteryPct: Int?,
         batteryThreshold: Int?,
         activeProviderNames: [String] = [],
-        userIdleGateEnabled: Bool = false
+        userIdleSeconds: TimeInterval? = nil,
+        gateSeconds: TimeInterval? = nil
     ) -> String {
         switch state {
         case .idle:
@@ -44,10 +49,17 @@ enum AwakeCardCopy {
                 // When the gate is on and the agent is still active (pulsed
                 // within the keep-awake window), the real blocker is user
                 // presence — tell the user what to expect.
-                if userIdleGateEnabled,
+                if let gateSeconds,
                    let last = lastActivity,
                    now.timeIntervalSince(last) < 5 * 60 {
-                    return "Agent active — keeps your Mac awake once you step away"
+                    // Once the user has actually stepped away, count down to
+                    // the moment the gate opens. Clamp at zero: engagement is
+                    // pulse-driven, so the state flips on the next agent pulse.
+                    if let idle = userIdleSeconds, idle >= countdownRevealThreshold {
+                        let remaining = max(0, gateSeconds - idle)
+                        return "Agent active — awake in \(AwakeFormatters.formatHMS(Int(remaining)))"
+                    }
+                    return "Agent active — keeps your Mac awake after \(formatGateDuration(gateSeconds)) away"
                 }
                 return "Waiting for agent activity"
             }
@@ -97,7 +109,33 @@ enum AwakeCardCopy {
         }
     }
 
+    /// True when `subtitle` is rendering the live gate countdown — the view
+    /// shows the timer icon for exactly that phase.
+    static func showsGateCountdown(
+        state: AwakeState,
+        autoEnabled: Bool,
+        now: Date,
+        lastActivity: Date?,
+        userIdleSeconds: TimeInterval?,
+        gateSeconds: TimeInterval?
+    ) -> Bool {
+        guard case .idle = state, autoEnabled else { return false }
+        guard gateSeconds != nil,
+              let last = lastActivity,
+              now.timeIntervalSince(last) < 5 * 60 else { return false }
+        guard let idle = userIdleSeconds else { return false }
+        return idle >= countdownRevealThreshold
+    }
+
     // MARK: Formatters
+
+    /// "30 s" below a minute, otherwise whole minutes ("1 min") — mirrors
+    /// `UserIdleGate.label` so the copy matches the Settings picker.
+    private static func formatGateDuration(_ seconds: TimeInterval) -> String {
+        let s = Int(seconds)
+        if s < 60 { return "\(s) s" }
+        return "\(s / 60) min"
+    }
 
     /// Joins provider names with commas and a trailing "and":
     /// `[A]` → "A", `[A, B]` → "A and B", `[A, B, C]` → "A, B and C".
@@ -165,7 +203,7 @@ struct AwakeCard: View {
             let text = subtitle(now: ctx.date)
             if !text.isEmpty {
                 HStack(spacing: 4) {
-                    if showTimerIcon {
+                    if showTimerIcon(now: ctx.date) {
                         Image(systemName: "timer")
                             .font(.system(size: 9, weight: .medium))
                             .foregroundStyle(.secondary)
@@ -178,10 +216,21 @@ struct AwakeCard: View {
         }
     }
 
-    private var showTimerIcon: Bool {
+    private func showTimerIcon(now: Date) -> Bool {
         switch vm.awake.state {
-        case .manualActive, .autoActive: return true
-        default:                         return false
+        case .manualActive, .autoActive:
+            return true
+        case .idle:
+            return AwakeCardCopy.showsGateCountdown(
+                state: vm.awake.state,
+                autoEnabled: vm.awake.config.autoEnabled,
+                now: now,
+                lastActivity: vm.awake.lastJSONLActivity,
+                userIdleSeconds: vm.awake.userIdleSeconds,
+                gateSeconds: vm.awake.config.userIdleGate.seconds
+            )
+        case .batteryBlocked:
+            return false
         }
     }
 
@@ -364,7 +413,8 @@ struct AwakeCard: View {
             batteryPct: vm.awake.currentBatteryPercent,
             batteryThreshold: vm.awake.config.batteryThreshold.percent,
             activeProviderNames: activeProviderNames(now: now),
-            userIdleGateEnabled: vm.awake.config.userIdleGate != .off
+            userIdleSeconds: vm.awake.userIdleSeconds,
+            gateSeconds: vm.awake.config.userIdleGate.seconds
         )
     }
 
@@ -391,6 +441,15 @@ struct AwakeCard: View {
 
     private var subtitleTickInterval: TimeInterval {
         if case .manualActive(_, let timeout) = vm.awake.state, timeout != nil {
+            return 1
+        }
+        // Standby with the gate armed and a live agent: the subtitle is (or is
+        // about to become) the gate countdown — tick every second so it runs.
+        if case .idle = vm.awake.state,
+           vm.awake.config.autoEnabled,
+           vm.awake.config.userIdleGate.seconds != nil,
+           let last = vm.awake.lastJSONLActivity,
+           Date().timeIntervalSince(last) < 5 * 60 {
             return 1
         }
         return 30
