@@ -28,6 +28,8 @@ struct AwakeSession: Identifiable, Equatable, Codable {
 /// at that timestamp on the next launch — without it, an in-progress
 /// session would stretch from its old start across the entire offline
 /// period, painting a huge fake "awake" tint into the activity chart.
+/// `lastPersistedAt` only advances while the caffeine assertion is held
+/// (see `heartbeatPersist`), which is what makes it safe to trust on load.
 private struct AwakeSessionLogPersisted: Codable {
     let lastPersistedAt: Date
     let sessions: [AwakeSession]
@@ -44,14 +46,6 @@ final class AwakeSessionLog {
     @ObservationIgnored nonisolated(unsafe) private var pruneTask: Task<Void, Never>?
     @ObservationIgnored private weak var caffeine: CaffeinateManager?
     @ObservationIgnored private var bag: Set<AnyCancellable> = []
-
-    /// Orphan sessions on load are capped at `start + maxOrphanAge`. The cap
-    /// matches the supervisor's default idle window (`IdleWindow.m5` in
-    /// `AwakeConfig.swift`) so a process that died without writing a
-    /// `lastPersistedAt` (or whose `lastPersistedAt` got bumped past the
-    /// real assertion release) can't paint hours of phantom awake time into
-    /// the chart. Keep this in lockstep with `IdleWindow.default`.
-    @ObservationIgnored private static let maxOrphanAge: TimeInterval = 5 * 60
 
     init(
         windowSeconds: TimeInterval = 24 * 3600,
@@ -185,15 +179,18 @@ final class AwakeSessionLog {
             let data = try Data(contentsOf: url)
             let payload = try JSONDecoder.iso8601().decode(AwakeSessionLogPersisted.self, from: data)
             var restored = payload.sessions
-            // Cap orphan close at start + maxOrphanAge. Without the cap,
-            // a long-idle heartbeat (or worse, a heartbeat that ran while
-            // caffeine was already off) would persist a `lastPersistedAt`
-            // hours after the IOKit assertion was actually released, and
-            // this loop would close the orphan at that stale moment —
-            // painting a multi-hour phantom awake span into the chart.
+            // Close any session still open at the last persisted moment.
+            // `lastPersistedAt` is trustworthy ground truth: heartbeatPersist
+            // only advances it while `caffeine.isActive` (and sweeps orphans
+            // closed the moment the assertion drops), so the restored span is
+            // real awake time within one 30s heartbeat tick. The previous
+            // start+5min cap (e38ac4f belt-and-braces against the phantom-
+            // awake bug) truncated genuine multi-hour sessions to 5 minutes
+            // on every kill-and-relaunch — the dev-loop truncation bug.
+            // Clamp to `start` so a pathological payload can't yield
+            // end < start.
             for i in restored.indices where restored[i].end == nil {
-                let cap = restored[i].start.addingTimeInterval(maxOrphanAge)
-                restored[i].end = min(payload.lastPersistedAt, cap)
+                restored[i].end = max(restored[i].start, payload.lastPersistedAt)
             }
             return restored
         } catch {

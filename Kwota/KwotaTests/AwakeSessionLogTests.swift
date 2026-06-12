@@ -227,10 +227,10 @@ final class AwakeSessionLogTests: XCTestCase {
 
     /// With an open session, heartbeat persist must advance the file's
     /// `lastPersistedAt` so the persisted moment isn't stuck at the last
-    /// state change. On reload, the orphan-close cap (start + 5 min) wins
-    /// over a far-future `lastPersistedAt` — the cap is the whole point of
-    /// the phantom-awake fix. This test verifies the file was rewritten
-    /// (persist actually ran) while still asserting the cap holds.
+    /// state change. On reload, the orphan closes at that heartbeat moment —
+    /// with no caffeine handle injected there is no ground truth to override
+    /// it, and the writer-side guard (heartbeat closes orphans when caffeine
+    /// is inactive) is what protects against phantom spans.
     func test_heartbeatPersist_advancesLastPersistedAtForOpenSession() throws {
         let tmp = TempDirectory()
         let url = tmp.file("awake-sessions.json")
@@ -262,8 +262,8 @@ final class AwakeSessionLogTests: XCTestCase {
             persistURL: url
         )
         XCTAssertEqual(reader.sessions.count, 1)
-        XCTAssertEqual(reader.sessions[0].end, t0.addingTimeInterval(5 * 60),
-                       "orphan must cap at start + 5min, not stretch to the heartbeat moment")
+        XCTAssertEqual(reader.sessions[0].end, later,
+                       "orphan must close at the heartbeat moment — the full span is real awake time")
     }
 
     /// Heartbeat must not write when no session is open — the loop fires
@@ -508,16 +508,17 @@ final class AwakeSessionLogTests: XCTestCase {
         XCTAssertEqual(log.sessions.count, 1)
         XCTAssertNil(log.sessions[0].end, "session must remain open while caffeine is active")
 
-        // The heartbeat must rewrite the file — otherwise the reader's
-        // orphan cap (start + 5 min) would close the session even if
-        // heartbeatPersist had been a no-op, masking a regression.
+        // The heartbeat must rewrite the file — a no-op here would leave
+        // lastPersistedAt at t0 and silently shorten the restored span.
         let mtimeAfterHeartbeat = try FileManager.default
             .attributesOfItem(atPath: url.path)[.modificationDate] as? Date
         XCTAssertNotEqual(mtimeAfterRecord, mtimeAfterHeartbeat,
                           "heartbeat must rewrite the file while caffeine is active")
 
-        // Reload: cap = start + 5min, lastPersistedAt = t1 = start + 1h.
-        // min(t1, start+5min) = start+5min — the cap wins, exact match.
+        // Reload: lastPersistedAt = t1 = start + 1h, written while caffeine
+        // was genuinely active. The orphan must close there — this is the
+        // dev-loop fix: kill-between-heartbeats may no longer truncate a
+        // real 1h awake span down to 5 minutes.
         let reader = AwakeSessionLog(
             windowSeconds: 8 * 3600,
             clock: { [unowned self] in self.now() },
@@ -525,14 +526,17 @@ final class AwakeSessionLogTests: XCTestCase {
             persistURL: url
         )
         XCTAssertEqual(reader.sessions.count, 1)
-        XCTAssertEqual(reader.sessions[0].end, t0.addingTimeInterval(5 * 60),
-                       "orphan must close at the load-time cap, not lastPersistedAt")
+        XCTAssertEqual(reader.sessions[0].end, t1,
+                       "orphan must close at lastPersistedAt — the heartbeat only advances it while the assertion is held")
     }
 
-    /// Loading an orphan session with a far-future `lastPersistedAt` (the bug:
-    /// 7h after the real release) must cap the close at start + 5 minutes so
-    /// the chart can't tint hours of phantom awake time.
-    func test_loadSessions_capsOrphanAtStartPlusFiveMinutes() throws {
+    /// An orphan with a far-future `lastPersistedAt` closes there. Since
+    /// e38ac4f the writer only advances `lastPersistedAt` while the caffeine
+    /// assertion is genuinely held (heartbeat guard + $isActive sweep), so a
+    /// large gap between start and lastPersistedAt is real awake time, not
+    /// the old 7h43m phantom. Trusting it restores full spans across
+    /// kill-and-relaunch (the dev-loop truncation bug).
+    func test_loadSessions_trustsLastPersistedAtForOrphans() throws {
         let tmp = TempDirectory()
         let url = tmp.file("awake-sessions.json")
         let t0 = clock!
@@ -552,15 +556,15 @@ final class AwakeSessionLogTests: XCTestCase {
         XCTAssertEqual(reader.sessions.count, 1)
         XCTAssertEqual(
             reader.sessions[0].end,
-            t0.addingTimeInterval(5 * 60),
-            "orphan must cap at start + 5min, not stretch to lastPersistedAt"
+            t0.addingTimeInterval(8 * 3600),
+            "orphan must close at lastPersistedAt, not an arbitrary cap"
         )
     }
 
-    /// When the persisted `lastPersistedAt` is within the cap window, it wins
-    /// (more precise than the cap). This preserves the existing behaviour for
-    /// well-behaved shutdowns where the heartbeat ran shortly before quit.
-    func test_loadSessions_keepsLastPersistedAtWhenWithinCap() throws {
+    /// A `lastPersistedAt` shortly after start closes the orphan there —
+    /// the well-behaved-shutdown case where the heartbeat ran just before
+    /// quit.
+    func test_loadSessions_closesOrphanAtRecentLastPersistedAt() throws {
         let tmp = TempDirectory()
         let url = tmp.file("awake-sessions.json")
         let t0 = clock!
@@ -580,6 +584,33 @@ final class AwakeSessionLogTests: XCTestCase {
         )
         XCTAssertEqual(reader.sessions.count, 1)
         XCTAssertEqual(reader.sessions[0].end, lastPersistedAt)
+    }
+
+    /// A pathological payload where `lastPersistedAt` predates the orphan's
+    /// start must clamp the close to the start (zero-length session) rather
+    /// than producing end < start, which would corrupt interval math
+    /// downstream (chart clipping drops start >= end, but the invariant
+    /// belongs here).
+    func test_loadSessions_clampsOrphanEndToStart() throws {
+        let tmp = TempDirectory()
+        let url = tmp.file("awake-sessions.json")
+        let t0 = clock!
+        let orphan = AwakeSession(mode: .auto, start: t0, end: nil)
+        let payload = AwakeSessionLogPersistedTestProxy(
+            lastPersistedAt: t0.addingTimeInterval(-600),
+            sessions: [orphan]
+        )
+        try payload.write(to: url)
+
+        let reader = AwakeSessionLog(
+            windowSeconds: 24 * 3600,
+            clock: { [unowned self] in self.now() },
+            autoStart: false,
+            persistURL: url
+        )
+        XCTAssertEqual(reader.sessions.count, 1)
+        XCTAssertEqual(reader.sessions[0].end, t0,
+                       "end must clamp to start when lastPersistedAt predates it")
     }
 
     /// Regression guard for the orphan-amplification root cause: with multiple
