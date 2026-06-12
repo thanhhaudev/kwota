@@ -105,3 +105,32 @@ final class AgentProcessScanner {
         return base
     }
 }
+
+// MARK: - Kill seam
+
+enum AgentProcessKillResult: Equatable {
+    case terminated
+    case alreadyGone        // ESRCH — raced with natural exit; success for callers
+    case permissionDenied   // EPERM
+    case failed(errno: Int32)
+}
+
+protocol AgentProcessKilling {
+    func terminate(pid: Int32) -> AgentProcessKillResult
+}
+
+/// SIGTERM via kill(2). Syscall and errno read are injected so the errno
+/// mapping is unit-testable without real processes.
+struct SystemAgentProcessKiller: AgentProcessKilling {
+    var killSyscall: (Int32, Int32) -> Int32 = { Darwin.kill($0, $1) }
+    var currentErrno: () -> Int32 = { errno }
+
+    func terminate(pid: Int32) -> AgentProcessKillResult {
+        guard killSyscall(pid, SIGTERM) != 0 else { return .terminated }
+        switch currentErrno() {
+        case ESRCH: return .alreadyGone
+        case EPERM: return .permissionDenied
+        case let e: return .failed(errno: e)
+        }
+    }
+}

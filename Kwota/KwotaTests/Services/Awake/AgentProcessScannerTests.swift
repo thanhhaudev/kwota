@@ -136,4 +136,40 @@ final class AgentProcessScannerTests: XCTestCase {
         let rows = await scanner.scan()
         XCTAssertNil(rows)
     }
+
+    // MARK: - SystemAgentProcessKiller errno mapping
+
+    func test_killer_zeroReturn_terminated() {
+        let killer = SystemAgentProcessKiller(
+            killSyscall: { _, _ in 0 }, currentErrno: { 0 })
+        XCTAssertEqual(killer.terminate(pid: 123), .terminated)
+    }
+
+    func test_killer_esrch_alreadyGone() {
+        let killer = SystemAgentProcessKiller(
+            killSyscall: { _, _ in -1 }, currentErrno: { ESRCH })
+        XCTAssertEqual(killer.terminate(pid: 123), .alreadyGone)
+    }
+
+    func test_killer_eperm_permissionDenied() {
+        let killer = SystemAgentProcessKiller(
+            killSyscall: { _, _ in -1 }, currentErrno: { EPERM })
+        XCTAssertEqual(killer.terminate(pid: 123), .permissionDenied)
+    }
+
+    func test_killer_otherErrno_failed() {
+        let killer = SystemAgentProcessKiller(
+            killSyscall: { _, _ in -1 }, currentErrno: { EINVAL })
+        XCTAssertEqual(killer.terminate(pid: 123), .failed(errno: EINVAL))
+    }
+
+    func test_killer_sendsSIGTERM() {
+        var sent: (pid: Int32, sig: Int32)?
+        let killer = SystemAgentProcessKiller(
+            killSyscall: { pid, sig in sent = (pid, sig); return 0 },
+            currentErrno: { 0 })
+        _ = killer.terminate(pid: 4821)
+        XCTAssertEqual(sent?.pid, 4821)
+        XCTAssertEqual(sent?.sig, SIGTERM)
+    }
 }
