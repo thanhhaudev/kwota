@@ -44,7 +44,7 @@ struct CacheAIDetailSheet: View {
             if let eval = row.aiEvaluation {
                 verdictBlock(eval)
                 if let warning = eval.warning, !warning.isEmpty {
-                    warningBlock(warning)
+                    warningBlock(warning, tint: verdictColor(eval.safety))
                 }
                 purposeBlock(eval)
                 if let detail = eval.detail, !detail.isEmpty {
@@ -105,9 +105,38 @@ struct CacheAIDetailSheet: View {
         )
     }
 
-    private func warningBlock(_ text: String) -> some View {
-        sectionBlock(title: "Warning") {
+    /// Unlike Purpose/Detail, the warning is rendered in the verdict's
+    /// color — the row's ✨ annotation shows this same text tinted by
+    /// `aiTint(eval.safety)`, and a plain block here read as a mismatch
+    /// ("the list says orange, the popup says nothing"). Both derive from
+    /// `eval.safety`, so they can't disagree.
+    private func warningBlock(_ text: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Warning")
+                // SectionHeader's metrics, minus its forced `.secondary` —
+                // the title carries the tint so the block reads as one unit.
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(tint)
+                .tracking(1.5)
+                .textCase(.uppercase)
+                .padding(.leading, 4)
+                .padding(.bottom, 6)
             Text(text)
+                .font(.system(size: 13))
+                .foregroundStyle(tint.opacity(0.95))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(tint.opacity(0.08))
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(tint)
+                        .frame(width: 3)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                // Match the section bodies' 4pt offset under SectionHeader.
+                .padding(.leading, 4)
         }
     }
 
