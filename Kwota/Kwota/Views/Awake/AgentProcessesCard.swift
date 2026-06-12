@@ -3,8 +3,9 @@
 //  Kwota
 //
 //  "Agent Processes" section body for the Awake tab. Lists agent-related
-//  processes from the VM's poll snapshot; orphan rows (ppid == 1) carry an
-//  orange badge and the only Kill affordance. Live rows are informational.
+//  processes from the VM's poll snapshot; abandoned rows (per
+//  AgentProcessOrphanPolicy — ppid 1 minus detached-by-design codex helpers
+//  with a live host) carry an orange badge. Every row offers Kill.
 //
 
 import SwiftUI
@@ -172,11 +173,15 @@ struct AgentProcessesCard: View {
                         row(proc)
                     }
                 }
-                // Clear the macOS overlay scrollbar, which otherwise sits
-                // exactly on the trailing kill glyph.
+                // Keep rows at the collapsed-state width — the bleed below
+                // would otherwise stretch them into the card gutter.
                 .padding(.trailing, 12)
             }
             .frame(maxHeight: expandedMaxHeight)
+            // Bleed the scroll viewport into the card's trailing padding so
+            // the overlay scrollbar rides the card gutter near the edge
+            // instead of hovering over the kill glyphs.
+            .padding(.trailing, -12)
         } else {
             ForEach(visible) { proc in
                 row(proc)
@@ -209,7 +214,8 @@ struct AgentProcessesCard: View {
     }
 
     private func row(_ proc: AgentProcessInfo) -> some View {
-        HStack(spacing: 8) {
+        let abandoned = AgentProcessOrphanPolicy.isAbandoned(proc, in: vm.agentProcesses)
+        return HStack(spacing: 8) {
             ProviderIconView(assetName: iconAsset(for: proc.provider), size: 16)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 4) {
@@ -217,13 +223,15 @@ struct AgentProcessesCard: View {
                         .font(.callout)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    if proc.isOrphan {
-                        badge("Orphan", tint: .orange)
+                    if abandoned {
+                        // Lowercase matches the sibling "background" badge
+                        // and the subtitle's tier words.
+                        badge("orphan", tint: .orange)
                     } else if proc.tty == nil {
                         // No controlling terminal: editor-spawned agent
-                        // server (e.g. Zed Agent Panel) rather than an
-                        // interactive session. Orphan rows skip it — the
-                        // Orphan badge already implies detachment.
+                        // server (e.g. Zed Agent Panel) or a healthy
+                        // detached codex helper. Abandoned rows skip it —
+                        // the orphan badge already implies detachment.
                         badge("background", tint: nil)
                     }
                 }
@@ -271,9 +279,7 @@ struct AgentProcessesCard: View {
                 ) {
                     KwotaConfirmPopover(
                         title: "Kill \(proc.commandDisplay)?",
-                        message: proc.isOrphan
-                            ? "PID \(String(proc.pid)) lost its parent and was re-parented to launchd. SIGTERM will be sent, then SIGKILL if it is ignored."
-                            : "PID \(String(proc.pid)) is still attached to a running parent and may be in use. SIGTERM will be sent, then SIGKILL if it is ignored.",
+                        message: confirmMessage(for: proc, abandoned: abandoned),
                         destructiveTitle: "Kill",
                         onConfirm: {
                             confirmingKillPID = nil
@@ -284,6 +290,20 @@ struct AgentProcessesCard: View {
                 }
             }
         }
+    }
+
+    /// Three states, not two: abandoned (orphaned for real), detached-by-
+    /// design codex helper with a live host (ppid 1 but healthy), and an
+    /// ordinary row attached to a living parent.
+    private func confirmMessage(for proc: AgentProcessInfo, abandoned: Bool) -> String {
+        let suffix = "SIGTERM will be sent, then SIGKILL if it is ignored."
+        if abandoned {
+            return "PID \(String(proc.pid)) lost its parent and was re-parented to launchd. \(suffix)"
+        }
+        if proc.isOrphan {
+            return "PID \(String(proc.pid)) is a detached helper that appears to be serving a live session in this project. \(suffix)"
+        }
+        return "PID \(String(proc.pid)) is still attached to a running parent and may be in use. \(suffix)"
     }
 
     /// Tiny inline status capsule sitting beside the process name. nil tint
