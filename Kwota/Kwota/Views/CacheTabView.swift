@@ -282,6 +282,13 @@ struct CacheTabView: View {
         // is stable even when the colliding partner row is hidden by the
         // "Show All" toggle.
         let scopeCollisions = CachePathRow.scopeCollisionNames(in: vm.cacheState.rows)
+        // Mirrors the `cacheCleanRow` guard so "Clean now" disables with a
+        // reason instead of silently dropping the tap mid-scan/clean.
+        let cleanBlock = CacheRowMenu.CleanBlock.current(
+            isScanning: vm.cacheState.isScanning,
+            isCleaningGlobal: vm.cacheState.isCleaning,
+            hasRowCleans: !vm.cacheState.cleaningRowIDs.isEmpty
+        )
         // Card chrome is inlined here (instead of `.kwotaCard()`) so the tail
         // toggle can sit as a non-scrolling footer row inside the rounded
         // card, separated from the scrolling rows by a hairline divider —
@@ -308,6 +315,7 @@ struct CacheTabView: View {
                                     && scopeCollisions.contains(row.displayName),
                                 isReEvaluating: vm.cacheState.evaluatingRowIDs.contains(row.id),
                                 isCleaning: vm.cacheState.cleaningRowIDs.contains(row.id),
+                                cleanBlock: cleanBlock,
                                 onCleanNow: {
                                     if vm.cacheDeleteIsPermanent {
                                         confirmingDeleteRowID = row.id

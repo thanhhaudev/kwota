@@ -35,9 +35,13 @@ struct CacheRowView: View {
     let showsUserScopePill: Bool
     let isReEvaluating: Bool
     /// True while THIS row's per-row Clean is in flight (trash-move plus
-    /// the forced rescan). Dims the row, floats a "Removing…" overlay,
-    /// blocks interaction, and disables the ⋯ menu's "Clean now".
+    /// the forced rescan). Dims the row, blocks interaction, and swaps the
+    /// ⋯ menu for a spinner in the same slot — the size/path line stays
+    /// readable throughout.
     let isCleaning: Bool
+    /// Non-nil while a scan or clean elsewhere owns the VM — passed through
+    /// to the ⋯ menu so "Clean now" disables with a visible reason.
+    let cleanBlock: CacheRowMenu.CleanBlock?
     let onCleanNow: () -> Void
     let onReEvaluate: () -> Void
     let onToggleAuto: () -> Void
@@ -51,8 +55,8 @@ struct CacheRowView: View {
             // While the row's clean is in flight: dim it and block
             // interaction so a half-deleted row can't be re-triggered or
             // have its toggles flipped. The in-progress status itself is
-            // inline (the size badge swaps to a spinner + "Removing…") —
-            // no full-row overlay, so the path/info stays readable.
+            // the spinner sitting in the ⋯ menu's slot — no full-row
+            // overlay, so the size/path info stays readable.
             .opacity(isCleaning ? 0.55 : 1)
             .allowsHitTesting(!isCleaning)
             .animation(.easeInOut(duration: 0.2), value: isCleaning)
@@ -73,18 +77,29 @@ struct CacheRowView: View {
                         .foregroundStyle(row.exists ? .primary : .secondary)
                     chips
                     Spacer(minLength: 8)
-                    CacheRowMenu(
-                        row: row,
-                        isReEvaluating: isReEvaluating,
-                        isCleaning: isCleaning,
-                        onCleanNow: onCleanNow,
-                        onReEvaluate: onReEvaluate,
-                        onToggleAuto: onToggleAuto,
-                        onReveal: onReveal,
-                        onCopyPath: onCopyPath,
-                        onRemove: onRemove,
-                        onShowDetail: onShowAIDetail
-                    )
+                    // The clean-in-flight spinner takes over the ⋯ menu's
+                    // 20×20 slot: the menu is unusable while the row is
+                    // locked anyway, and the swap keeps the title line from
+                    // reflowing. The size/path line stays untouched.
+                    if isCleaning {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 20, height: 20)
+                            .accessibilityLabel(Text("Removing \(row.displayName)"))
+                    } else {
+                        CacheRowMenu(
+                            row: row,
+                            isReEvaluating: isReEvaluating,
+                            cleanBlock: cleanBlock,
+                            onCleanNow: onCleanNow,
+                            onReEvaluate: onReEvaluate,
+                            onToggleAuto: onToggleAuto,
+                            onReveal: onReveal,
+                            onCopyPath: onCopyPath,
+                            onRemove: onRemove,
+                            onShowDetail: onShowAIDetail
+                        )
+                    }
                 }
 
                 infoLine
@@ -103,27 +118,16 @@ struct CacheRowView: View {
     /// Middle info line: "💾 1.2 GB · 👤/Library/Caches/Claude". Size leads
     /// the line (left-anchored, monospaced) so sizes still scan vertically
     /// across rows after moving off the top line; the path truncates in the
-    /// middle independently so the size never gets cut. While the row's
-    /// clean is in flight the size segment swaps in place to a mini spinner
-    /// + "Removing…" — same inline feedback as the old trailing capsule.
+    /// middle independently so the size never gets cut. Stays intact during
+    /// a clean — the in-flight feedback lives in the ⋯ menu's slot instead
+    /// of displacing the size.
     @ViewBuilder
     private var infoLine: some View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
-            if isCleaning {
-                HStack(spacing: 4) {
-                    ProgressView()
-                        .controlSize(.mini)
-                    Text("Removing…")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
-                .accessibilityLabel(Text("Removing \(row.displayName)"))
-            } else {
-                (inlineIcon("internaldrive")
-                    + Text(row.exists ? formatBytes(row.sizeBytes) : "—"))
-                    .font(.system(size: 11, weight: .medium).monospacedDigit())
-                    .foregroundStyle(row.exists ? .primary : .secondary)
-            }
+            (inlineIcon("internaldrive")
+                + Text(row.exists ? formatBytes(row.sizeBytes) : "—"))
+                .font(.system(size: 11, weight: .medium).monospacedDigit())
+                .foregroundStyle(row.exists ? .primary : .secondary)
             pathText
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -265,6 +269,7 @@ struct CacheRowView: View {
         if row.isCustom { parts.append("custom path") }
         if showsUserScopePill { parts.append("user copy") }
         if row.isSystem { parts.append("system cache") }
+        if isCleaning { parts.append("removing") }
         parts.append(row.autoCleanEnabled ? "auto-clean on" : "auto-clean off")
         if let eval = row.aiEvaluation {
             parts.append(annotationText(eval))
