@@ -134,11 +134,11 @@ final class AgentProcessScanner {
         let first = args.split(separator: " ").first.map(String.init) ?? ""
         let base = first.components(separatedBy: "/").last ?? ""
         if base == "claude" { return .claude }
-        if base == "codex" || codexScriptMarkers.contains(where: args.contains) { return .codex }
+        if base == "codex" || matchedCodexScript(in: args) != nil { return .codex }
         if base == "agy" { return .antigravity }
         // Dual condition: Windsurf/Codeium ship the same language_server
-        // binary name; require an Antigravity.app path in the args.
-        if base.hasPrefix("language_server"), args.contains("Antigravity") { return .antigravity }
+        // binary name; require the Antigravity.app bundle path in the args.
+        if base.hasPrefix("language_server"), args.contains("Antigravity.app") { return .antigravity }
         return nil
     }
 
@@ -150,11 +150,21 @@ final class AgentProcessScanner {
         "app-server-broker.mjs",
     ]
 
+    /// Marker must match a whole token's basename — substring matching would
+    /// also hit e.g. "codex-companion.mjs-backup".
+    nonisolated private static func matchedCodexScript(in args: String) -> String? {
+        for token in args.split(separator: " ") {
+            let base = token.split(separator: "/").last.map(String.init) ?? ""
+            if codexScriptMarkers.contains(base) { return base }
+        }
+        return nil
+    }
+
     /// Row label: executable basename plus first non-flag argument
     /// ("codex app-server"), flags dropped ("claude"). Node-hosted codex
     /// scripts show the script name, not "node".
     nonisolated static func displayName(args: String, provider: ProviderID) -> String {
-        if let marker = codexScriptMarkers.first(where: args.contains) { return marker }
+        if let marker = matchedCodexScript(in: args) { return marker }
         let tokens = args.split(separator: " ")
         let base = (tokens.first.map(String.init) ?? "").components(separatedBy: "/").last ?? ""
         if tokens.count > 1, !tokens[1].hasPrefix("-") {

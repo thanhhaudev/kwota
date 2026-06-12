@@ -113,6 +113,19 @@ final class AgentProcessScannerTests: XCTestCase {
             args: "node /Users/hau/.codex/plugins/codex-companion.mjs --port 1234"), .codex)
     }
 
+    func test_classify_markerNameWithSuffix_notMatched() {
+        // Substring matching would hit "codex-companion.mjs-backup"; the
+        // marker must match a whole token basename.
+        XCTAssertNil(AgentProcessScanner.classify(
+            args: "node /Users/x/my-codex-tool/codex-companion.mjs-backup --watch"))
+    }
+
+    func test_classify_antigravityWordWithoutAppBundle_notMatched() {
+        // The anchor is the .app bundle path, not the bare word.
+        XCTAssertNil(AgentProcessScanner.classify(
+            args: "/tmp/Antigravity-research/bin/language_server_macos_arm --serve"))
+    }
+
     func test_classify_codexBrokerViaArgs() {
         // The plugin broker detaches by design (ppid 1) and runs under node,
         // so the codex basename rule never sees it — args marker must match.

@@ -415,6 +415,10 @@ final class MenuBarViewModel {
     /// Inline-alert text for a failed kill; nil hides the alert.
     private(set) var agentProcessKillNotice: String?
     private var agentProcessPollTask: Task<Void, Never>?
+    /// Bumped by stopAgentProcessPolling; an in-flight scan that started
+    /// under an older generation discards its result instead of clobbering
+    /// newer state (stop/start tab flap).
+    private var agentProcessScanGeneration = 0
     var isAgentProcessPollingActive: Bool { agentProcessPollTask != nil }
     /// 5 s while the Awake tab is visible. Internal so tests can shrink it.
     var agentProcessPollIntervalNanos: UInt64 = 5_000_000_000
@@ -1020,8 +1024,11 @@ final class MenuBarViewModel {
         guard agentProcessPollTask == nil else { return }
         agentProcessPollTask = Task { [weak self] in
             while !Task.isCancelled {
-                await self?.scanAgentProcessesNow()
-                let interval = self?.agentProcessPollIntervalNanos ?? 5_000_000_000
+                // Per-iteration upgrade: if the VM deallocates, the loop
+                // exits on the next pass instead of sleeping forever.
+                guard let self else { return }
+                await self.scanAgentProcessesNow()
+                let interval = self.agentProcessPollIntervalNanos
                 try? await Task.sleep(nanoseconds: interval)
             }
         }
@@ -1030,12 +1037,18 @@ final class MenuBarViewModel {
     func stopAgentProcessPolling() {
         agentProcessPollTask?.cancel()
         agentProcessPollTask = nil
+        // Invalidate any scan currently awaiting its ps result: a stale
+        // snapshot landing after stop (or after a stop/start flap) must not
+        // clobber what a newer scan wrote.
+        agentProcessScanGeneration &+= 1
     }
 
     /// nil scan (ps failure) keeps the previous snapshot — a transient ps
     /// hiccup must not blank the section.
     func scanAgentProcessesNow() async {
+        let generation = agentProcessScanGeneration
         guard let scanned = await agentProcessScanner.scan() else { return }
+        guard generation == agentProcessScanGeneration else { return }
         agentProcesses = scanned.sorted {
             if $0.isOrphan != $1.isOrphan { return $0.isOrphan }
             return $0.pid < $1.pid

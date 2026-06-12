@@ -24,6 +24,22 @@ final class StubPSRunner: @unchecked Sendable {
     }
 }
 
+/// Blocks its 2nd call on a semaphore — forces a scan to land late so the
+/// stale-scan fence can be exercised deterministically.
+final class GatedPSRunner: @unchecked Sendable {
+    let gate = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var calls = 0
+    private let outputs: [String]
+    init(_ outputs: [String]) { self.outputs = outputs }
+    func next() throws -> ProcessResult {
+        lock.lock(); let n = calls; calls += 1; lock.unlock()
+        if n == 1 { gate.wait() }
+        let out = outputs[min(n, outputs.count - 1)]
+        return ProcessResult(stdout: out, stderr: "", exitCode: 0)
+    }
+}
+
 @MainActor
 final class RecordingKiller: AgentProcessKilling {
     var result: AgentProcessKillResult = .terminated
@@ -70,6 +86,10 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
     }
 
     private func makeVM(ps: StubPSRunner, killer: RecordingKiller) -> MenuBarViewModel {
+        makeVM(runPS: { try ps.next() }, killer: killer)
+    }
+
+    private func makeVM(runPS: @escaping @Sendable () throws -> ProcessResult, killer: RecordingKiller) -> MenuBarViewModel {
         let vmWatcher = CLIAccountWatcher(oauthRead: { nil }, fileEvents: AsyncStream { _ in })
         let coordWatcher = CLIAccountWatcher(oauthRead: { nil }, fileEvents: AsyncStream { _ in })
         let permissiveCoord = AutoProfileCoordinator(
@@ -128,7 +148,7 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
             autoProfileMigrator: inertMigrator,
             activityHistorian: ActivityHistorian(autoBackfill: false),
             agentProcessScanner: AgentProcessScanner(
-                runPS: { try ps.next() },
+                runPS: runPS,
                 // Stubbed so the test never spawns a real lsof.
                 runCWD: { _ in ProcessResult(stdout: "", stderr: "", exitCode: 1) },
                 selfPID: 99999),
@@ -172,6 +192,24 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
         XCTAssertEqual(vm.agentProcesses.count, 2)
         vm.stopAgentProcessPolling()
         XCTAssertFalse(vm.isAgentProcessPollingActive)
+    }
+
+    func test_staleScanDiscardedAfterStop() async {
+        // A scan in flight when polling stops must not clobber state when it
+        // lands late: stop bumps the scan generation and the late result is
+        // discarded. The gated runner blocks its 2nd call (which would
+        // return a DIFFERENT, 1-row snapshot) to force the interleave.
+        let runner = GatedPSRunner([psOrphanAndLive, psLiveOnly])
+        let vm = makeVM(runPS: { try runner.next() }, killer: RecordingKiller())
+        await vm.scanAgentProcessesNow() // call 0: 2 rows, completes immediately
+        XCTAssertEqual(vm.agentProcesses.count, 2)
+        let inFlight = Task { await vm.scanAgentProcessesNow() } // call 1: blocks
+        try? await Task.sleep(nanoseconds: 50_000_000) // let it reach the gate off-main
+        vm.stopAgentProcessPolling() // bumps generation, invalidating call 1
+        runner.gate.signal()
+        await inFlight.value
+        XCTAssertEqual(vm.agentProcesses.count, 2,
+                       "late 1-row scan landed after stop; it must be discarded")
     }
 
     // MARK: - Kill flow
