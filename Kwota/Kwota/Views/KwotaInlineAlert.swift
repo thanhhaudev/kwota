@@ -22,6 +22,10 @@ struct KwotaInlineAlert<Detail: View>: View {
     let detail: Detail
     let actionTitle: String?
     let onAction: (() -> Void)?
+    /// When true the action slot renders a small spinner instead of the
+    /// button — the action is in flight and a second click would be
+    /// meaningless. Keeps the banner's height stable while it works.
+    let isActionBusy: Bool
 
     init(
         tint: Color,
@@ -29,7 +33,8 @@ struct KwotaInlineAlert<Detail: View>: View {
         title: String,
         @ViewBuilder detail: () -> Detail,
         actionTitle: String? = nil,
-        onAction: (() -> Void)? = nil
+        onAction: (() -> Void)? = nil,
+        isActionBusy: Bool = false
     ) {
         self.tint = tint
         self.icon = icon
@@ -37,6 +42,7 @@ struct KwotaInlineAlert<Detail: View>: View {
         self.detail = detail()
         self.actionTitle = actionTitle
         self.onAction = onAction
+        self.isActionBusy = isActionBusy
     }
 
     var body: some View {
@@ -47,7 +53,11 @@ struct KwotaInlineAlert<Detail: View>: View {
                     Text(title)
                         .font(.callout)
                         .fontWeight(.medium)
-                    if let actionTitle, let onAction {
+                    if isActionBusy {
+                        Spacer(minLength: 8)
+                        ProgressView()
+                            .controlSize(.small)
+                    } else if let actionTitle, let onAction {
                         Spacer(minLength: 8)
                         Button(actionTitle, action: onAction)
                             .buttonStyle(.bordered)
@@ -92,7 +102,8 @@ extension KwotaInlineAlert where Detail == Text {
         title: String,
         detail: String,
         actionTitle: String? = nil,
-        onAction: (() -> Void)? = nil
+        onAction: (() -> Void)? = nil,
+        isActionBusy: Bool = false
     ) {
         self.init(
             tint: tint,
@@ -100,7 +111,8 @@ extension KwotaInlineAlert where Detail == Text {
             title: title,
             detail: { Text(detail) },
             actionTitle: actionTitle,
-            onAction: onAction
+            onAction: onAction,
+            isActionBusy: isActionBusy
         )
     }
 }

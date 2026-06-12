@@ -134,6 +134,15 @@ final class UsageRefreshCoordinator {
         scheduleNextTick()
     }
 
+    /// Drops the back-off floor for `providerID`. Called when a fetch for
+    /// that provider succeeds — a 200 proves the throttle has cleared, so
+    /// waiting out the rest of a long Retry-After (the server can send
+    /// 2000s+) would just delay the auto cadence for nothing. Other
+    /// providers' floors are untouched.
+    func clearBackoff(for providerID: ProviderID) {
+        backoffByProvider[providerID] = nil
+    }
+
     /// Computes the next delay as `currentInterval` ± jitter.
     ///
     /// Note: the global `backoffUntil` (= max of per-provider floors) is

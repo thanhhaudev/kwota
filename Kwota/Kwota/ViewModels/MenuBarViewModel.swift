@@ -133,7 +133,26 @@ final class MenuBarViewModel {
     /// tab so the user understands why a manual Refresh appeared to do
     /// nothing — the snapshot stays as-is by design while we honor the
     /// server-driven back-off.
+    ///
+    /// Capped at `manualRetryCap` regardless of the server's Retry-After:
+    /// the coordinator floor (auto cadence) honors the verbatim hint, but
+    /// the UI never locks the user out for more than 5 minutes — observed
+    /// Retry-After values reach ~2400s, and a 40-minute dead Refresh
+    /// button reads as a broken app, not a polite back-off.
     private(set) var rateLimitedUntil: Date?
+
+    /// Provider whose 429 armed `rateLimitedUntil`. The banner and the
+    /// manual gate only honor the window while the active profile belongs
+    /// to this provider — switching from a throttled Claude profile to a
+    /// Codex one must not carry an "Anthropic rate limited" banner along.
+    private var rateLimitedProviderID: ProviderID?
+
+    /// Ceiling on the UI-facing rate-limit window (banner countdown +
+    /// manual Refresh gate). Matches the silent-429 fallback cap so both
+    /// regimes settle at the same worst case. The coordinator's
+    /// per-provider floor is intentionally NOT capped — auto ticks keep
+    /// honoring the server's verbatim Retry-After.
+    nonisolated static let manualRetryCap: TimeInterval = 300
 
     /// Number of consecutive 429s where the server did NOT supply a usable
     /// Retry-After. Drives the exponential fallback schedule (60s, 120s,
@@ -1119,9 +1138,24 @@ final class MenuBarViewModel {
         return current
     }
 
+    /// Who is asking for the refresh. Each tier trades off back-off
+    /// politeness against user agency:
+    ///  - `automatic` (coordinator tick, popover open, profile switch):
+    ///    honors the coordinator's verbatim per-provider floor — the
+    ///    server's Retry-After is respected in full, even when it's 2400s.
+    ///  - `manual` (Refresh button, stale-data banner): gated by the
+    ///    capped `rateLimitedUntil` window (≤ `manualRetryCap`) so the
+    ///    user is locked out for minutes at most.
+    ///  - `probe` (RateLimitBanner "Try now"): bypasses both floors —
+    ///    probing while throttled is the button's entire purpose. Only
+    ///    the burst throttle applies.
+    enum RefreshTrigger {
+        case automatic, manual, probe
+    }
+
     /// Single source of truth for "is it safe to issue a usage fetch right
-    /// now?". `false` means we would either contradict the server's
-    /// Retry-After hint (back-off window open) or pile a request on top of
+    /// now?". `false` means we would either contradict the active gate for
+    /// this trigger tier (see `RefreshTrigger`) or pile a request on top of
     /// a very recent attempt (throttle floor). Used by `refreshUsageNow`
     /// internally and by the UI for affordance (the Refresh button
     /// disables when this returns false).
@@ -1130,18 +1164,29 @@ final class MenuBarViewModel {
     /// context date so the button's disabled state re-evaluates each
     /// second without the VM needing to publish a clock-driven update.
     /// Tests pass an explicit date to assert each branch deterministically.
-    func canRefreshNow(now nowOverride: Date? = nil) -> Bool {
+    func canRefreshNow(now nowOverride: Date? = nil, trigger: RefreshTrigger = .automatic) -> Bool {
         let n = nowOverride ?? self.now()
-        // Per-provider back-off: a Claude 429 must not gate Antigravity
-        // (loopback, no rate limit) or Codex (separate gateway). The
-        // active provider's floor is what governs whether the refresh
-        // button is enabled. When no active profile, fall back to the
-        // global max — there's nothing meaningful to gate anyway.
-        if let providerID = profileStore.activeProfile?.providerID {
-            if let until = refreshCoordinator?.backoffUntil(for: providerID),
-               until > n { return false }
-        } else if let until = refreshCoordinator?.backoffUntil, until > n {
-            return false
+        switch trigger {
+        case .automatic:
+            // Per-provider back-off: a Claude 429 must not gate Antigravity
+            // (loopback, no rate limit) or Codex (separate gateway). The
+            // active provider's floor is what governs whether a background
+            // refresh may fire. When no active profile, fall back to the
+            // global max — there's nothing meaningful to gate anyway.
+            if let providerID = profileStore.activeProfile?.providerID {
+                if let until = refreshCoordinator?.backoffUntil(for: providerID),
+                   until > n { return false }
+            } else if let until = refreshCoordinator?.backoffUntil, until > n {
+                return false
+            }
+        case .manual:
+            // Capped window only — after `manualRetryCap` the user may
+            // retry even though the verbatim server floor is still open.
+            // A premature retry costs one free GET and, on a repeat 429,
+            // re-arms the banner with fresh state.
+            if let until = rateLimitedUntil, until > n { return false }
+        case .probe:
+            break
         }
         if let last = lastFetchAttemptAt,
            n.timeIntervalSince(last) < refreshThrottle { return false }
@@ -1332,6 +1377,11 @@ final class MenuBarViewModel {
             history = []
             snapshot = nil
             lastFetchedAt = nil
+            // Signed out — no provider on screen, so no rate-limit banner.
+            // The coordinator floor survives (it's keyed to the provider's
+            // API, not the profile identity).
+            rateLimitedUntil = nil
+            rateLimitedProviderID = nil
             // No profile bound → not refreshing, not switching. Empty state.
             authState = .authenticated
             isSwitchingProfile = false
@@ -1355,6 +1405,16 @@ final class MenuBarViewModel {
             authState = .authenticated
             isSwitchingProfile = false
             return
+        }
+        // The rate-limit banner is provider-scoped: switching to a profile
+        // on a different provider must not carry an "Anthropic rate
+        // limited" banner (or its capped manual lockout) onto a Codex /
+        // Antigravity view. Same-provider switches keep it — the floor
+        // belongs to the API, not the profile.
+        if let limitedProvider = rateLimitedProviderID,
+           limitedProvider != profile.providerID {
+            rateLimitedUntil = nil
+            rateLimitedProviderID = nil
         }
         authState = .refreshing
         let store = UsageHistoryStore(historyFile: historyFileProvider(id))
@@ -1450,17 +1510,18 @@ final class MenuBarViewModel {
         )
     }
 
-    func refreshUsageNow() {
+    func refreshUsageNow(trigger: RefreshTrigger = .automatic) {
         guard let activeId = profileStore.activeProfileId,
               let profile = profileStore.profiles.first(where: { $0.id == activeId }) else { return }
-        refreshUsageNow(profile: profile)
+        refreshUsageNow(profile: profile, trigger: trigger)
     }
 
-    private func refreshUsageNow(profile: Profile) {
-        guard canRefreshNow() else {
+    private func refreshUsageNow(profile: Profile, trigger: RefreshTrigger = .automatic) {
+        guard canRefreshNow(trigger: trigger) else {
             AppLog.shared.log(
                 "refreshUsageNow skipped: gate closed "
-                + "(backoffUntil=\(String(describing: refreshCoordinator?.backoffUntil)), "
+                + "(trigger=\(trigger), "
+                + "backoffUntil=\(String(describing: refreshCoordinator?.backoffUntil)), "
                 + "lastAttempt=\(String(describing: lastFetchAttemptAt)))",
                 level: .debug
             )
@@ -1602,6 +1663,9 @@ final class MenuBarViewModel {
             if let retryAfter = summary.retryAfter, retryAfter > 0 {
                 refreshCoordinator?.applyRetryAfter(retryAfter, for: summary.providerID)
             }
+            // True when this success carried its own back-off hint — the
+            // commit paths below must then leave the just-armed floor alone.
+            let summaryCarriedRetryAfter = (summary.retryAfter ?? 0) > 0
 
             // Degraded-but-successful guard. A provider can return HTTP 200
             // with an empty body — Codex's `wham/usage` intermittently sends
@@ -1621,8 +1685,10 @@ final class MenuBarViewModel {
                 )
                 if canCommitToUI() {
                     authState = .authenticated
-                    rateLimitedUntil = nil
-                    consecutive429Count = 0
+                    clearRateLimitState(
+                        for: summary.providerID,
+                        includingCoordinatorFloor: !summaryCarriedRetryAfter
+                    )
                     isSwitchingProfile = false
                 }
                 return
@@ -1660,8 +1726,10 @@ final class MenuBarViewModel {
                     rememberSummary(summary, for: profile.id)
                     self.lastFetchedAt = snap.fetchedAt
                     self.authState = .authenticated
-                    self.rateLimitedUntil = nil
-                    self.consecutive429Count = 0
+                    self.clearRateLimitState(
+                        for: summary.providerID,
+                        includingCoordinatorFloor: !summaryCarriedRetryAfter
+                    )
                     self.history.append(entry)
                     self.isSwitchingProfile = false
 
@@ -1696,8 +1764,10 @@ final class MenuBarViewModel {
                     rememberSummary(summary, for: profile.id)
                     self.lastFetchedAt = summary.fetchedAt
                     self.authState = .authenticated
-                    self.rateLimitedUntil = nil
-                    self.consecutive429Count = 0
+                    self.clearRateLimitState(
+                        for: summary.providerID,
+                        includingCoordinatorFloor: !summaryCarriedRetryAfter
+                    )
                     self.isSwitchingProfile = false
 
                     // Patch the profile's subscriptionPlan from the typed
@@ -1809,7 +1879,19 @@ final class MenuBarViewModel {
             // regardless of which generation produced it, so the matching
             // banner must surface too — otherwise a stale-generation 429
             // disables the Refresh button silently with no explanation.
-            rateLimitedUntil = now().addingTimeInterval(backoff)
+            //
+            // Capped at manualRetryCap: the coordinator keeps the verbatim
+            // hint above (auto cadence stays polite), but the UI window —
+            // banner countdown + manual gate — never exceeds 5 minutes.
+            //
+            // Provider-scoped: only arm the banner when the 429 belongs to
+            // the provider the user is currently looking at. A stale
+            // cross-provider Task (switched away mid-fetch) must not hang
+            // an "Anthropic rate limited" banner over a Codex profile.
+            if profileStore.activeProfile?.providerID == profile.providerID {
+                rateLimitedUntil = now().addingTimeInterval(min(backoff, Self.manualRetryCap))
+                rateLimitedProviderID = profile.providerID
+            }
             AppLog.shared.log(
                 "MenuBarViewModel: 429 on \(profile.authMethod) path, backing off \(Int(backoff))s (consecutive=\(consecutive429Count))",
                 level: .info
@@ -1834,6 +1916,30 @@ final class MenuBarViewModel {
                 authState = .authenticated
                 isSwitchingProfile = false
             }
+        }
+    }
+
+    /// A successful fetch proves the provider's throttle has cleared —
+    /// drop every piece of rate-limit state in lockstep: the banner
+    /// window, the silent-429 counter, AND the coordinator's verbatim
+    /// floor. Without the floor drop, a "Try now" probe that lands a 200
+    /// would clear the banner but leave auto ticks (and the automatic
+    /// gate) waiting out the rest of a stale 2400s Retry-After.
+    ///
+    /// `includingCoordinatorFloor: false` is for the rare success that
+    /// arrives WITH a Retry-After hint (a "usable 429" summary): the
+    /// data committed, so the banner state clears, but the floor the
+    /// hint just armed must survive — clearing it would contradict the
+    /// server in the same breath as honoring it.
+    private func clearRateLimitState(
+        for providerID: ProviderID,
+        includingCoordinatorFloor: Bool = true
+    ) {
+        rateLimitedUntil = nil
+        rateLimitedProviderID = nil
+        consecutive429Count = 0
+        if includingCoordinatorFloor {
+            refreshCoordinator?.clearBackoff(for: providerID)
         }
     }
 

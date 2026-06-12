@@ -6,13 +6,20 @@
 //  this banner a manual Refresh click looks like a no-op — the snapshot
 //  is intentionally preserved while we honor the server's Retry-After,
 //  but the user has no way to know that. Banner displays a live countdown
-//  and offers a "Try now" probe in case the throttle has cleared.
+//  (capped at MenuBarViewModel.manualRetryCap even when the server asks
+//  for much longer) and offers a "Try now" probe that bypasses the
+//  back-off floor — probing while throttled is the button's purpose.
+//
+//  `isProbing` keeps the banner on screen with a spinner while the probe
+//  is in flight, so a repeat 429 reads as "tried, still throttled" with a
+//  fresh countdown instead of the button silently doing nothing.
 //
 
 import SwiftUI
 
 struct RateLimitBanner: View {
     let retryAt: Date
+    var isProbing: Bool = false
     let onRetry: () -> Void
 
     var body: some View {
@@ -26,11 +33,15 @@ struct RateLimitBanner: View {
                 }
             },
             actionTitle: "Try now",
-            onAction: onRetry
+            onAction: onRetry,
+            isActionBusy: isProbing
         )
     }
 
     private func detail(for now: Date) -> String {
+        if isProbing {
+            return "Checking whether the throttle has cleared…"
+        }
         let remaining = retryAt.timeIntervalSince(now)
         if remaining <= 0 {
             return "Back-off elapsed — try refreshing again."

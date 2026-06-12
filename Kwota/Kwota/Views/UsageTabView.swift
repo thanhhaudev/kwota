@@ -61,15 +61,19 @@ struct UsageTabView: View {
                             updatedLabel
                             Spacer()
                             Button {
-                                vm.refreshUsageNow()
+                                vm.refreshUsageNow(trigger: .manual)
                             } label: {
                                 Label("Refresh", systemImage: "arrow.clockwise")
                             }
                             .buttonStyle(.plain)
                             .font(.caption)
+                            // Manual tier: gated by the capped rate-limit
+                            // window (≤5 min), not the verbatim server
+                            // floor — the user regains the button in
+                            // minutes even when Anthropic asks for 2400s.
                             .disabled(
                                 vm.authState == .refreshing
-                                || !vm.canRefreshNow(now: context.date)
+                                || !vm.canRefreshNow(now: context.date, trigger: .manual)
                             )
                         }
                     }
@@ -92,13 +96,29 @@ struct UsageTabView: View {
             )
         case .authenticated:
             if let until = vm.rateLimitedUntil, until > Date() {
-                RateLimitBanner(retryAt: until, onRetry: { vm.refreshUsageNow() })
+                // "Try now" is the probe tier: it bypasses the back-off
+                // floor entirely (that's its purpose — the floor is the
+                // reason this banner exists). Only the burst throttle
+                // applies.
+                RateLimitBanner(
+                    retryAt: until,
+                    onRetry: { vm.refreshUsageNow(trigger: .probe) }
+                )
             } else if let last = vm.lastFetchedAt,
                       Date().timeIntervalSince(last) > StaleDataBanner.threshold {
-                StaleDataBanner(lastFetchedAt: last, onRefresh: { vm.refreshUsageNow() })
+                StaleDataBanner(lastFetchedAt: last, onRefresh: { vm.refreshUsageNow(trigger: .manual) })
             }
         case .refreshing:
-            EmptyView()
+            // Keep the rate-limit banner mounted (with a spinner in the
+            // action slot) while a probe is in flight. Dropping it here
+            // made "Try now" look like the banner blinked away and came
+            // back — or, before the probe tier existed, like nothing
+            // happened at all.
+            if let until = vm.rateLimitedUntil, until > Date() {
+                RateLimitBanner(retryAt: until, isProbing: true, onRetry: {})
+            } else {
+                EmptyView()
+            }
         }
     }
 

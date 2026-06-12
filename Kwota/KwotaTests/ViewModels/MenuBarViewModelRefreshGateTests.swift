@@ -319,6 +319,150 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         )
     }
 
+    // MARK: - 429 long Retry-After: UI cap vs coordinator verbatim
+    //
+    // Anthropic's /api/oauth/usage can send Retry-After in the thousands of
+    // seconds (observed: ~2400s → a "retry in 40m" banner). The coordinator
+    // floor honors the server verbatim so the auto cadence doesn't spam a
+    // throttled endpoint, but the *UI* lockout (banner countdown + manual
+    // Refresh gate) caps at manualRetryCap so the user regains agency in
+    // minutes, not most of an hour.
+
+    func test_429withLongRetryAfter_capsBannerWindow_whileCoordinatorHonorsVerbatim() async throws {
+        try seedActiveProfile()
+        let vm = makeVM(apiClient: stubAPIClient(status: 429, retryAfter: "2400"))
+
+        let deadline = Date().addingTimeInterval(5.0)
+        while Date() < deadline {
+            if vm.rateLimitedUntil != nil { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        let until = try XCTUnwrap(vm.rateLimitedUntil)
+        XCTAssertEqual(
+            until.timeIntervalSince(clock), MenuBarViewModel.manualRetryCap, accuracy: 0.001,
+            "banner window must cap at manualRetryCap even when the server asks for 2400s"
+        )
+        XCTAssertEqual(
+            vm.refreshCoordinator?.backoffUntil(for: .claude)?.timeIntervalSince(clock),
+            2400,
+            "coordinator floor must keep the server's verbatim hint so auto ticks don't spam the API"
+        )
+    }
+
+    func test_manualGate_opensAfterCap_whileAutomaticStaysFloored() async throws {
+        try seedActiveProfile()
+        let vm = makeVM(apiClient: stubAPIClient(status: 429, retryAfter: "2400"))
+
+        let deadline = Date().addingTimeInterval(5.0)
+        while Date() < deadline {
+            if vm.rateLimitedUntil != nil { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertNotNil(vm.rateLimitedUntil, "precondition: 429 must arm the banner window")
+
+        let afterCap = clock.addingTimeInterval(MenuBarViewModel.manualRetryCap + 1)
+        XCTAssertTrue(
+            vm.canRefreshNow(now: afterCap, trigger: .manual),
+            "manual Refresh must unlock once the capped window elapses"
+        )
+        XCTAssertFalse(
+            vm.canRefreshNow(now: afterCap),
+            "automatic ticks must stay gated by the verbatim 2400s floor"
+        )
+    }
+
+    // MARK: - Probe trigger (RateLimitBanner "Try now")
+    //
+    // The banner exists to offer a probe while the back-off window is open —
+    // so the probe must bypass the very floor that raised the banner.
+    // Before this trigger existed, "Try now" routed through the automatic
+    // gate and silently no-opped for the entire countdown.
+
+    func test_probe_bypassesBackoffFloor_andStampsAttempt() throws {
+        let p = try seedActiveProfile()
+        let vm = makeVM()
+        try profileStore.setActive(id: p.id)
+        vm.refreshCoordinator?.applyRetryAfter(2400, for: .claude)
+        vm.lastFetchAttemptAt = nil
+
+        vm.refreshUsageNow(trigger: .probe)
+
+        XCTAssertEqual(
+            vm.lastFetchAttemptAt, clock,
+            "probe must fire despite the open back-off floor — that is its purpose"
+        )
+    }
+
+    func test_probe_respectsBurstThrottle() throws {
+        try seedActiveProfile()
+        let vm = makeVM()
+        vm.lastFetchAttemptAt = clock.addingTimeInterval(-3) // 3s ago, floor = 10s
+
+        let before = vm.lastFetchAttemptAt
+        vm.refreshUsageNow(trigger: .probe)
+
+        XCTAssertEqual(
+            vm.lastFetchAttemptAt, before,
+            "probe keeps the 10s burst throttle — hammering Try now must not spam the API"
+        )
+    }
+
+    // MARK: - Successful fetch clears rate-limit state
+
+    func test_successfulFetch_clearsCoordinatorFloor() async throws {
+        let p = try seedActiveProfile()
+        let okJSON = #"""
+        {"five_hour":{"utilization":10,"resets_at":"2026-06-13T00:00:00Z"},
+         "seven_day":{"utilization":20,"resets_at":"2026-06-18T00:00:00Z"}}
+        """#.data(using: .utf8)!
+        let okClient = ClaudeAPIClient(transport: { req in
+            let resp = HTTPURLResponse(
+                url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+            )!
+            return (okJSON, resp)
+        }, now: { [unowned self] in self.clock })
+        let vm = makeVM(apiClient: okClient)
+        try profileStore.setActive(id: p.id)
+        vm.refreshCoordinator?.applyRetryAfter(2400, for: .claude)
+        vm.lastFetchAttemptAt = nil
+
+        vm.refreshUsageNow(trigger: .probe)
+
+        let deadline = Date().addingTimeInterval(5.0)
+        while Date() < deadline {
+            if vm.refreshCoordinator?.backoffUntil(for: .claude) == nil { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        XCTAssertNil(
+            vm.refreshCoordinator?.backoffUntil(for: .claude),
+            "a 200 proves the throttle cleared — the stale floor must drop so auto cadence resumes"
+        )
+        XCTAssertNil(vm.rateLimitedUntil, "banner state clears alongside the floor")
+    }
+
+    // MARK: - rateLimitedUntil is provider-scoped across rebinds
+
+    func test_signOut_clearsRateLimitBannerState() async throws {
+        try seedActiveProfile()
+        let vm = makeVM(apiClient: stubAPIClient(status: 429, retryAfter: "60"))
+
+        let deadline = Date().addingTimeInterval(5.0)
+        while Date() < deadline {
+            if vm.rateLimitedUntil != nil { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertNotNil(vm.rateLimitedUntil, "precondition: 429 armed the banner")
+
+        try profileStore.clearActive()
+
+        XCTAssertNil(
+            vm.rateLimitedUntil,
+            "sign-out rebinds to no profile — an Anthropic banner must not survive it"
+        )
+    }
+
     // MARK: - replaceCredentials resets throttle
 
     func test_replaceCredentials_resetsThrottle_soReauthFetchesImmediately() throws {

@@ -208,6 +208,39 @@ final class UsageRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(coord.currentInterval, 120)
     }
 
+    // MARK: - clearBackoff
+
+    func test_clearBackoff_dropsOnlyThatProvidersFloor() {
+        // A successful fetch (e.g. the RateLimitBanner's "Try now" probe
+        // landing a 200) proves the server is serving us again — the floor
+        // recorded from the earlier 429 must be droppable so the auto
+        // cadence resumes instead of waiting out a stale Retry-After.
+        let baseTime = Date(timeIntervalSince1970: 1_700_000_000)
+        let coord = UsageRefreshCoordinator(
+            openInterval: 60, closedInterval: 600, jitterFraction: 0,
+            now: { baseTime }, randomUnit: { 0.5 }, onTick: {}
+        )
+        coord.applyRetryAfter(2400, for: .claude)
+        coord.applyRetryAfter(120, for: .codex)
+
+        coord.clearBackoff(for: .claude)
+
+        XCTAssertNil(coord.backoffUntil(for: .claude),
+                     "clearBackoff must drop the Claude floor")
+        XCTAssertEqual(coord.backoffUntil(for: .codex),
+                       baseTime.addingTimeInterval(120),
+                       "other providers' floors must survive")
+    }
+
+    func test_clearBackoff_isNoOp_whenNoFloorRecorded() {
+        let coord = UsageRefreshCoordinator(
+            openInterval: 60, closedInterval: 600, jitterFraction: 0, onTick: {}
+        )
+        coord.clearBackoff(for: .claude)
+        XCTAssertNil(coord.backoffUntil(for: .claude))
+        XCTAssertNil(coord.backoffUntil)
+    }
+
     func test_perProviderFloor_eachProviderTracksIndependently() {
         let baseTime = Date(timeIntervalSince1970: 1_700_000_000)
         let coord = UsageRefreshCoordinator(
