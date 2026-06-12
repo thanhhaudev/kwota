@@ -29,6 +29,63 @@ enum AgentProcessListModel {
     }
 }
 
+/// Nontech-friendly wording for the row subtitle. Raw `ps` values (PID,
+/// CPU%) move to the hover tooltip; the visible line reads
+/// "Running 2h 13m · idle" instead of "PID 4821 · 0.2% · 02:13:45".
+enum AgentProcessRowFormat {
+    /// CPU% mapped to a plain-English activity tier. Thresholds are
+    /// hand-picked: agent CLIs idle near 0%, sit well under 30% while
+    /// streaming, and only pass it on heavy tool runs — tune the constants
+    /// if real-world readings drift, the tiers themselves are stable.
+    static func activityText(cpuPercent: Double) -> String {
+        if cpuPercent < 2 { return "idle" }
+        if cpuPercent < 30 { return "active" }
+        return "busy"
+    }
+
+    /// `ps` etime ("MM:SS", "HH:MM:SS", or "D-HH:MM:SS") rendered as a
+    /// human duration — "Running 2h 13m", zero components dropped, under a
+    /// minute collapses to "Just started". Unparseable input passes through
+    /// unchanged so a surprise `ps` format degrades to the old raw display.
+    static func runningText(etime: String) -> String {
+        guard let seconds = parseETime(etime) else { return etime }
+        if seconds < 60 { return "Just started" }
+        let days = seconds / 86_400
+        let hours = (seconds % 86_400) / 3_600
+        let minutes = (seconds % 3_600) / 60
+        if days > 0 {
+            return hours > 0 ? "Running \(days)d \(hours)h" : "Running \(days)d"
+        }
+        if hours > 0 {
+            return minutes > 0 ? "Running \(hours)h \(minutes)m" : "Running \(hours)h"
+        }
+        return "Running \(minutes)m"
+    }
+
+    private static func parseETime(_ etime: String) -> Int? {
+        let dayParts = etime.split(separator: "-", maxSplits: 1)
+        let days: Int
+        let clock: Substring
+        if dayParts.count == 2 {
+            guard let parsed = Int(dayParts[0]) else { return nil }
+            days = parsed
+            clock = dayParts[1]
+        } else {
+            days = 0
+            clock = etime[...]
+        }
+        let fields = clock.split(separator: ":", omittingEmptySubsequences: false)
+            .map { Int($0) }
+        guard (2...3).contains(fields.count) else { return nil }
+        let nums = fields.compactMap { $0 }
+        guard nums.count == fields.count else { return nil }
+        let (h, m, s) = nums.count == 3
+            ? (nums[0], nums[1], nums[2])
+            : (0, nums[0], nums[1])
+        return days * 86_400 + h * 3_600 + m * 60 + s
+    }
+}
+
 struct AgentProcessesCard: View {
     let vm: MenuBarViewModel
 
@@ -156,7 +213,7 @@ struct AgentProcessesCard: View {
                     .monospacedDigit()
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .help(proc.workingDirectory ?? "")
+                    .help(tooltip(for: proc))
             }
             Spacer(minLength: 8)
             if vm.killingAgentPIDs.contains(proc.pid) {
@@ -222,18 +279,32 @@ struct AgentProcessesCard: View {
             .fixedSize()
     }
 
-    /// "PID 4821 · 0.2% · 02:13:45 · kwota" — the trailing project name (cwd
-    /// basename) is what tells 14 look-alike claude sessions apart.
+    /// "Running 2h 13m · idle · kwota" — the trailing project name (cwd
+    /// basename) is what tells 14 look-alike claude sessions apart. Raw
+    /// PID/CPU% moved to the hover tooltip (`tooltip(for:)`); PID also
+    /// survives in the kill confirm and the accessibility label.
     private func subtitle(for proc: AgentProcessInfo) -> String {
         var parts = [
-            "PID \(String(proc.pid))",
-            "\(String(format: "%.1f", proc.cpuPercent))%",
-            proc.elapsed,
+            AgentProcessRowFormat.runningText(etime: proc.elapsed),
+            AgentProcessRowFormat.activityText(cpuPercent: proc.cpuPercent),
         ]
         if let project = proc.projectName {
             parts.append(project)
         }
         return parts.joined(separator: " · ")
+    }
+
+    /// Technical detail relocated off the visible line: PID + raw CPU%,
+    /// plus the full working directory (the subtitle only shows its
+    /// basename).
+    private func tooltip(for proc: AgentProcessInfo) -> String {
+        var lines = [
+            "PID \(String(proc.pid)) · CPU \(String(format: "%.1f", proc.cpuPercent))%"
+        ]
+        if let dir = proc.workingDirectory {
+            lines.append(dir)
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func iconAsset(for provider: ProviderID) -> String {

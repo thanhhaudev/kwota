@@ -56,6 +56,48 @@ final class AgentProcessesCardTests: XCTestCase {
         XCTAssertEqual(AgentProcessListModel.hiddenCount(all, showAll: false), 0)
     }
 
+    // MARK: - AgentProcessRowFormat.runningText
+
+    func test_runningText_minutesSeconds() {
+        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "05:30"), "Running 5m")
+    }
+
+    func test_runningText_hoursMinutesSeconds() {
+        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "02:13:45"), "Running 2h 13m")
+    }
+
+    func test_runningText_daysForm() {
+        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "1-03:00:00"), "Running 1d 3h")
+    }
+
+    func test_runningText_dropsZeroSecondaryComponent() {
+        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "2-00:10:00"), "Running 2d")
+        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "01:00:59"), "Running 1h")
+    }
+
+    func test_runningText_underAMinute() {
+        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "00:45"), "Just started")
+    }
+
+    func test_runningText_unparseable_passesThrough() {
+        // Surprise ps format degrades to the old raw display, not garbage.
+        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "weird"), "weird")
+        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: ""), "")
+        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "x-01:00:00"), "x-01:00:00")
+        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "01:02:03:04"), "01:02:03:04")
+    }
+
+    // MARK: - AgentProcessRowFormat.activityText
+
+    func test_activityText_tierBoundaries() {
+        XCTAssertEqual(AgentProcessRowFormat.activityText(cpuPercent: 0.0), "idle")
+        XCTAssertEqual(AgentProcessRowFormat.activityText(cpuPercent: 1.9), "idle")
+        XCTAssertEqual(AgentProcessRowFormat.activityText(cpuPercent: 2.0), "active")
+        XCTAssertEqual(AgentProcessRowFormat.activityText(cpuPercent: 29.9), "active")
+        XCTAssertEqual(AgentProcessRowFormat.activityText(cpuPercent: 30.0), "busy")
+        XCTAssertEqual(AgentProcessRowFormat.activityText(cpuPercent: 312.5), "busy")
+    }
+
     func test_visible_allOrphans_stillCapped_toggleAppears() {
         // Regression guard: when a parent editor quits, EVERY session
         // reparents to launchd at once (11 real claude rows observed). An
