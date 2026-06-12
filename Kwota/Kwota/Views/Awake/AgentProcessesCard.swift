@@ -298,24 +298,40 @@ struct AgentProcessesCard: View {
             .fixedSize()
     }
 
-    /// "PID 4821 · ⏱ 2h 13m · ● idle · kwota" — the trailing project name
-    /// (cwd basename) is what tells 14 look-alike claude sessions apart.
+    /// "# 4821 · ⏱ 2h 13m · ● idle · 📁 kwota" — every field carries a
+    /// glyph (number = PID, timer = uptime, folder = project basename, the
+    /// project being what tells 14 look-alike claude sessions apart).
     /// Returns concatenated `Text` so the activity dot can carry its tier
     /// color inline. Raw CPU% is intentionally not shown — the colored dot
     /// plus tier word replaces it for non-technical readability.
     private func subtitle(for proc: AgentProcessInfo) -> Text {
         let tier = AgentProcessRowFormat.tier(cpuPercent: proc.cpuPercent)
-        var text = Text("PID \(String(proc.pid)) · ")
-            + Text(Image(systemName: "timer"))
-            + Text(" \(AgentProcessRowFormat.durationText(etime: proc.elapsed)) · ")
+        var text = inlineIcon("number")
+            + Text("\(String(proc.pid)) · ")
+            + inlineIcon("timer")
+            + Text("\(AgentProcessRowFormat.durationText(etime: proc.elapsed)) · ")
             + Text(Image(systemName: "circle.fill"))
+                // Optically center the dot on the lowercase x-height —
+                // baseline-aligned it sits visibly low next to "idle".
                 .font(.system(size: 6))
+                .baselineOffset(1)
                 .foregroundStyle(tier.color)
             + Text(" \(tier.label)")
         if let project = proc.projectName {
-            text = text + Text(" · \(project)")
+            text = text + Text(" · ") + inlineIcon("folder") + Text(project)
         }
         return text
+    }
+
+    /// Field glyph inside the subtitle line. Slightly under the caption2
+    /// text size and nudged up half a point: full-size symbols read too
+    /// heavy inline and ride high against digits (the timer glyph's crown
+    /// makes it look raised at its natural baseline).
+    private func inlineIcon(_ systemName: String) -> Text {
+        Text(Image(systemName: systemName))
+            .font(.system(size: 8.5))
+            .baselineOffset(0.5)
+            + Text(" ")
     }
 
     private func iconAsset(for provider: ProviderID) -> String {
