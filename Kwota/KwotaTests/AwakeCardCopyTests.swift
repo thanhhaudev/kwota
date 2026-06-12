@@ -88,7 +88,7 @@ final class AwakeCardCopyTests: XCTestCase {
             userIdleSeconds: 0,
             gateSeconds: 60
         )
-        XCTAssertEqual(s, "Agent active — keeps your Mac awake after 1 min away")
+        XCTAssertEqual(s, "Agent active — starts auto-awake after 1 min away")
     }
 
     func test_subtitle_idle_autoOn_gateEnabled_userActive_subMinuteGateLabel() {
@@ -105,7 +105,7 @@ final class AwakeCardCopyTests: XCTestCase {
             userIdleSeconds: 0,
             gateSeconds: 30
         )
-        XCTAssertEqual(s, "Agent active — keeps your Mac awake after 30 s away")
+        XCTAssertEqual(s, "Agent active — starts auto-awake after 30 s away")
     }
 
     func test_subtitle_idle_autoOn_gateEnabled_idleBelowRevealThreshold_staysStatic() {
@@ -122,7 +122,7 @@ final class AwakeCardCopyTests: XCTestCase {
             userIdleSeconds: AwakeCardCopy.countdownRevealThreshold - 1,
             gateSeconds: 60
         )
-        XCTAssertEqual(s, "Agent active — keeps your Mac awake after 1 min away")
+        XCTAssertEqual(s, "Agent active — starts auto-awake after 1 min away")
     }
 
     func test_subtitle_idle_autoOn_gateEnabled_userAway_showsCountdown() {
@@ -139,7 +139,7 @@ final class AwakeCardCopyTests: XCTestCase {
             userIdleSeconds: 18,
             gateSeconds: 60
         )
-        XCTAssertEqual(s, "Agent active — awake in 0m 42s")
+        XCTAssertEqual(s, "Agent active — auto-awake in 0m 42s")
     }
 
     func test_subtitle_idle_autoOn_gateEnabled_idlePastGate_clampsAtZero() {
@@ -156,7 +156,7 @@ final class AwakeCardCopyTests: XCTestCase {
             userIdleSeconds: 75,
             gateSeconds: 60
         )
-        XCTAssertEqual(s, "Agent active — awake in 0m 00s")
+        XCTAssertEqual(s, "Agent active — auto-awake in 0m 00s")
     }
 
     func test_subtitle_idle_autoOn_gateOff_recentActivity_showsWaiting() {

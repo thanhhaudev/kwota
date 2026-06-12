@@ -57,9 +57,9 @@ enum AwakeCardCopy {
                     // pulse-driven, so the state flips on the next agent pulse.
                     if let idle = userIdleSeconds, idle >= countdownRevealThreshold {
                         let remaining = max(0, gateSeconds - idle)
-                        return "Agent active — awake in \(AwakeFormatters.formatHMS(Int(remaining)))"
+                        return "Agent active — auto-awake in \(AwakeFormatters.formatHMS(Int(remaining)))"
                     }
-                    return "Agent active — keeps your Mac awake after \(formatGateDuration(gateSeconds)) away"
+                    return "Agent active — starts auto-awake after \(formatGateDuration(gateSeconds)) away"
                 }
                 return "Waiting for agent activity"
             }
