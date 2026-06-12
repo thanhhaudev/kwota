@@ -84,7 +84,7 @@ final class AgentProcessScanner {
         let first = args.split(separator: " ").first.map(String.init) ?? ""
         let base = first.components(separatedBy: "/").last ?? ""
         if base == "claude" { return .claude }
-        if base == "codex" || args.contains("codex-companion.mjs") { return .codex }
+        if base == "codex" || codexScriptMarkers.contains(where: args.contains) { return .codex }
         if base == "agy" { return .antigravity }
         // Dual condition: Windsurf/Codeium ship the same language_server
         // binary name; require an Antigravity.app path in the args.
@@ -92,11 +92,19 @@ final class AgentProcessScanner {
         return nil
     }
 
+    /// Node-hosted codex tooling — argv[0] is "node", so these only match by
+    /// an args marker. The app-server broker detaches to ppid 1 by design;
+    /// matching it makes genuine orphan brokers visible in the list.
+    nonisolated private static let codexScriptMarkers = [
+        "codex-companion.mjs",
+        "app-server-broker.mjs",
+    ]
+
     /// Row label: executable basename plus first non-flag argument
-    /// ("codex app-server"), flags dropped ("claude"). Node-hosted
-    /// codex-companion shows the script name, not "node".
+    /// ("codex app-server"), flags dropped ("claude"). Node-hosted codex
+    /// scripts show the script name, not "node".
     nonisolated static func displayName(args: String, provider: ProviderID) -> String {
-        if args.contains("codex-companion.mjs") { return "codex-companion.mjs" }
+        if let marker = codexScriptMarkers.first(where: args.contains) { return marker }
         let tokens = args.split(separator: " ")
         let base = (tokens.first.map(String.init) ?? "").components(separatedBy: "/").last ?? ""
         if tokens.count > 1, !tokens[1].hasPrefix("-") {

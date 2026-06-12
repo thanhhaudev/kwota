@@ -88,6 +88,13 @@ final class AgentProcessScannerTests: XCTestCase {
             args: "node /Users/hau/.codex/plugins/codex-companion.mjs --port 1234"), .codex)
     }
 
+    func test_classify_codexBrokerViaArgs() {
+        // The plugin broker detaches by design (ppid 1) and runs under node,
+        // so the codex basename rule never sees it — args marker must match.
+        XCTAssertEqual(AgentProcessScanner.classify(
+            args: "/opt/homebrew/Cellar/node/26.0.0/bin/node /Users/hau/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts/app-server-broker.mjs serve"), .codex)
+    }
+
     // MARK: - displayName
 
     func test_displayName_codexKeepsSubcommand() {
@@ -106,6 +113,12 @@ final class AgentProcessScannerTests: XCTestCase {
         XCTAssertEqual(AgentProcessScanner.displayName(
             args: "node /Users/hau/.codex/plugins/codex-companion.mjs --port 1234", provider: .codex),
             "codex-companion.mjs")
+    }
+
+    func test_displayName_brokerShowsScriptName() {
+        XCTAssertEqual(AgentProcessScanner.displayName(
+            args: "node /Users/hau/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts/app-server-broker.mjs serve", provider: .codex),
+            "app-server-broker.mjs")
     }
 
     // MARK: - scan() async path
