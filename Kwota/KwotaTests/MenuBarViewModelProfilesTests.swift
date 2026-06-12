@@ -57,16 +57,42 @@ final class MenuBarViewModelProfilesTests: XCTestCase {
             ledgerURL: temp.file("ledger-\(UUID().uuidString).json"),
             dailyCounterURL: temp.file("daily-counter-\(UUID().uuidString).json")
         )
+        // Inert migrator: sandboxed defaults pre-marked complete so the live
+        // startup path neither reads real UserDefaults.standard nor probes
+        // the real ~/.claude.json.
+        let sandboxedDefaults = UserDefaults(suiteName: "kwota-profiles-test-\(UUID())")!
+        sandboxedDefaults.set(true, forKey: "autoDetectMigrationCompleted")
+        let inertMigrator = AutoProfileMigrator(
+            profileStore: store,
+            oauthRead: { nil },
+            defaults: sandboxedDefaults
+        )
+        // Stub refresher: reader points at a missing temp file with a nil
+        // keychain probe so forceRefresh never touches Claude Code's real
+        // Keychain item (cross-app consent prompt) or ~/.claude/.credentials.json.
+        let stubRefresher = CLITokenRefresher(
+            reader: CLICredentialReader(
+                credentialsFile: temp.file("missing-credentials.json"),
+                keychainProbe: { nil }
+            ),
+            store: keychain
+        )
         return MenuBarViewModel(
             usage: usage,
+            cachePersistence: CachePersistenceStore(url: temp.file("cache-state-\(UUID().uuidString).json")),
             profileStore: store,
             credentialStore: keychain,
             apiClient: api,
+            cliRefresher: stubRefresher,
             activitySource: CompositeActivitySource(sources: []),
+            awakeSessionLog: AwakeSessionLog(autoStart: false),
+            cliAccountWatcher: CLIAccountWatcher(oauthRead: { nil }, fileEvents: AsyncStream { _ in }),
             codexAccountWatcher: codexWatcherStub,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: coordinator,
-            codexAutoProfileCoordinator: codexCoordStub
+            codexAutoProfileCoordinator: codexCoordStub,
+            autoProfileMigrator: inertMigrator,
+            activityHistorian: ActivityHistorian(autoBackfill: false)
         )
     }
 

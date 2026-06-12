@@ -97,15 +97,28 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
                                        httpVersion: nil, headerFields: nil)!
             return (Data(), resp)
         })
+        // Stub refresher: reader points at a missing temp file with a nil
+        // keychain probe so forceRefresh never touches Claude Code's real
+        // Keychain item or ~/.claude/.credentials.json.
+        let stubRefresher = CLITokenRefresher(
+            reader: CLICredentialReader(
+                credentialsFile: temp.file("missing-credentials.json"),
+                keychainProbe: { nil }
+            ),
+            store: keychain
+        )
         let vm = MenuBarViewModel(
             usage: usage,
+            cachePersistence: CachePersistenceStore(url: temp.file("cache-state-\(UUID().uuidString).json")),
             profileStore: profileStore,
             credentialStore: keychain,
             apiClient: stubClient,
+            cliRefresher: stubRefresher,
             // Reuses ControllableActivitySource from
             // MenuBarViewModelActivityForwardingTests.swift (same test module) —
             // keeps the fixture hermetic; the live default would watch real dirs.
             activitySource: ControllableActivitySource(),
+            awakeSessionLog: AwakeSessionLog(autoStart: false),
             cliAccountWatcher: vmWatcher,
             codexAccountWatcher: codexVMWatcher,
             antigravityProcessWatcher: antigravityWatcherVM,
@@ -113,6 +126,7 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
             codexAutoProfileCoordinator: codexCoordStub,
             antigravityAutoProfileCoordinator: antigravityCoordStub,
             autoProfileMigrator: inertMigrator,
+            activityHistorian: ActivityHistorian(autoBackfill: false),
             agentProcessScanner: AgentProcessScanner(
                 runPS: { try ps.next() },
                 // Stubbed so the test never spawns a real lsof.

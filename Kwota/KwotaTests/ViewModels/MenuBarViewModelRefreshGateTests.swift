@@ -114,18 +114,32 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
             ledgerURL: temp.file("ledger-\(UUID().uuidString).json"),
             dailyCounterURL: temp.file("daily-counter-\(UUID().uuidString).json")
         )
+        // Stub refresher: reader points at a missing temp file with a nil
+        // keychain probe so forceRefresh never touches Claude Code's real
+        // Keychain item or ~/.claude/.credentials.json.
+        let stubRefresher = CLITokenRefresher(
+            reader: CLICredentialReader(
+                credentialsFile: temp.file("missing-credentials.json"),
+                keychainProbe: { nil }
+            ),
+            store: keychain
+        )
         return MenuBarViewModel(
             usage: usage,
+            cachePersistence: CachePersistenceStore(url: temp.file("cache-state-\(UUID().uuidString).json")),
             profileStore: profileStore,
             credentialStore: keychain,
             apiClient: apiClient ?? stubAPIClient(),
+            cliRefresher: stubRefresher,
             activitySource: CompositeActivitySource(sources: []),
+            awakeSessionLog: AwakeSessionLog(autoStart: false),
             cliAccountWatcher: vmWatcher,
             codexAccountWatcher: codexWatcherStub,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: permissiveCoord,
             codexAutoProfileCoordinator: codexCoordStub,
             autoProfileMigrator: inertMigrator,
+            activityHistorian: ActivityHistorian(autoBackfill: false),
             now: { [unowned self] in self.clock }
         )
     }

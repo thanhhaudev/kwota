@@ -173,6 +173,26 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         return { id in temp.file("history-\(id.uuidString).json") }
     }
 
+    /// Hermetic cache-persistence store rooted in the per-test TempDirectory
+    /// so VM init never loads (or later saves) the user's real
+    /// cache-state.json in Application Support.
+    private func makeHermeticCachePersistence() -> CachePersistenceStore {
+        CachePersistenceStore(url: temp.file("cache-state-\(UUID().uuidString).json"))
+    }
+
+    /// Inert migrator: sandboxed defaults pre-marked complete so the live
+    /// startup path neither reads real UserDefaults.standard nor probes the
+    /// real ~/.claude.json.
+    private func makeInertMigrator() -> AutoProfileMigrator {
+        let defaults = UserDefaults(suiteName: "kwota-cli-refresh-test-\(UUID())")!
+        defaults.set(true, forKey: "autoDetectMigrationCompleted")
+        return AutoProfileMigrator(
+            profileStore: profileStore,
+            oauthRead: { nil },
+            defaults: defaults
+        )
+    }
+
     private func seedCLIProfile(accessToken: String) throws -> Profile {
         let profile = Profile(name: "CLI", authMethod: .cliSync)
         let cred = Credential.cliToken(
@@ -211,15 +231,20 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         let (codexWatcher1, codexCoord1) = makeCodexStubs()
         let vm = MenuBarViewModel(
             usage: makeHermeticUsage(),
+            cachePersistence: makeHermeticCachePersistence(),
             profileStore: profileStore,
             credentialStore: keychain,
             apiClient: api,
             cliRefresher: refresher,
             activitySource: CompositeActivitySource(sources: []),
+            awakeSessionLog: AwakeSessionLog(autoStart: false),
+            cliAccountWatcher: CLIAccountWatcher(oauthRead: { nil }, fileEvents: AsyncStream { _ in }),
             codexAccountWatcher: codexWatcher1,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(),
             codexAutoProfileCoordinator: codexCoord1,
+            autoProfileMigrator: makeInertMigrator(),
+            activityHistorian: ActivityHistorian(autoBackfill: false),
             historyFileProvider: makeHistoryFileProvider()
         )
 
@@ -263,15 +288,20 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         let (codexWatcher2, codexCoord2) = makeCodexStubs()
         let vm = MenuBarViewModel(
             usage: makeHermeticUsage(),
+            cachePersistence: makeHermeticCachePersistence(),
             profileStore: profileStore,
             credentialStore: keychain,
             apiClient: api,
             cliRefresher: refresher,
             activitySource: CompositeActivitySource(sources: []),
+            awakeSessionLog: AwakeSessionLog(autoStart: false),
+            cliAccountWatcher: CLIAccountWatcher(oauthRead: { nil }, fileEvents: AsyncStream { _ in }),
             codexAccountWatcher: codexWatcher2,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(),
             codexAutoProfileCoordinator: codexCoord2,
+            autoProfileMigrator: makeInertMigrator(),
+            activityHistorian: ActivityHistorian(autoBackfill: false),
             historyFileProvider: makeHistoryFileProvider()
         )
 
@@ -313,15 +343,20 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         let (codexWatcher3, codexCoord3) = makeCodexStubs()
         let vm = MenuBarViewModel(
             usage: makeHermeticUsage(),
+            cachePersistence: makeHermeticCachePersistence(),
             profileStore: profileStore,
             credentialStore: keychain,
             apiClient: api,
             cliRefresher: refresher,
             activitySource: CompositeActivitySource(sources: []),
+            awakeSessionLog: AwakeSessionLog(autoStart: false),
+            cliAccountWatcher: CLIAccountWatcher(oauthRead: { nil }, fileEvents: AsyncStream { _ in }),
             codexAccountWatcher: codexWatcher3,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(),
             codexAutoProfileCoordinator: codexCoord3,
+            autoProfileMigrator: makeInertMigrator(),
+            activityHistorian: ActivityHistorian(autoBackfill: false),
             historyFileProvider: makeHistoryFileProvider()
         )
 
@@ -350,15 +385,20 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         let (codexWatcher4, codexCoord4) = makeCodexStubs()
         let vm = MenuBarViewModel(
             usage: makeHermeticUsage(),
+            cachePersistence: makeHermeticCachePersistence(),
             profileStore: profileStore,
             credentialStore: keychain,
             apiClient: api,
             cliRefresher: refresher,
             activitySource: CompositeActivitySource(sources: []),
+            awakeSessionLog: AwakeSessionLog(autoStart: false),
+            cliAccountWatcher: CLIAccountWatcher(oauthRead: { nil }, fileEvents: AsyncStream { _ in }),
             codexAccountWatcher: codexWatcher4,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(),
             codexAutoProfileCoordinator: codexCoord4,
+            autoProfileMigrator: makeInertMigrator(),
+            activityHistorian: ActivityHistorian(autoBackfill: false),
             historyFileProvider: makeHistoryFileProvider()
         )
 
@@ -403,15 +443,20 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         let (codexWatcher5, codexCoord5) = makeCodexStubs()
         let vm = MenuBarViewModel(
             usage: makeHermeticUsage(),
+            cachePersistence: makeHermeticCachePersistence(),
             profileStore: profileStore,
             credentialStore: keychain,
             apiClient: api,
             cliRefresher: refresher,
             activitySource: CompositeActivitySource(sources: []),
+            awakeSessionLog: AwakeSessionLog(autoStart: false),
+            cliAccountWatcher: CLIAccountWatcher(oauthRead: { nil }, fileEvents: AsyncStream { _ in }),
             codexAccountWatcher: codexWatcher5,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(),
             codexAutoProfileCoordinator: codexCoord5,
+            autoProfileMigrator: makeInertMigrator(),
+            activityHistorian: ActivityHistorian(autoBackfill: false),
             historyFileProvider: makeHistoryFileProvider()
         )
         XCTAssertTrue(vm.hasNoProfiles)
@@ -472,15 +517,20 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         let (codexWatcher6, codexCoord6) = makeCodexStubs()
         let vm = MenuBarViewModel(
             usage: makeHermeticUsage(),
+            cachePersistence: makeHermeticCachePersistence(),
             profileStore: profileStore,
             credentialStore: keychain,
             apiClient: api,
             cliRefresher: refresher,
             activitySource: CompositeActivitySource(sources: []),
+            awakeSessionLog: AwakeSessionLog(autoStart: false),
+            cliAccountWatcher: CLIAccountWatcher(oauthRead: { nil }, fileEvents: AsyncStream { _ in }),
             codexAccountWatcher: codexWatcher6,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(),
             codexAutoProfileCoordinator: codexCoord6,
+            autoProfileMigrator: makeInertMigrator(),
+            activityHistorian: ActivityHistorian(autoBackfill: false),
             historyFileProvider: makeHistoryFileProvider()
         )
 
@@ -509,15 +559,20 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         let (codexWatcher7, codexCoord7) = makeCodexStubs()
         let vm = MenuBarViewModel(
             usage: makeHermeticUsage(),
+            cachePersistence: makeHermeticCachePersistence(),
             profileStore: profileStore,
             credentialStore: keychain,
             apiClient: api,
             cliRefresher: refresher,
             activitySource: CompositeActivitySource(sources: []),
+            awakeSessionLog: AwakeSessionLog(autoStart: false),
+            cliAccountWatcher: CLIAccountWatcher(oauthRead: { nil }, fileEvents: AsyncStream { _ in }),
             codexAccountWatcher: codexWatcher7,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(),
             codexAutoProfileCoordinator: codexCoord7,
+            autoProfileMigrator: makeInertMigrator(),
+            activityHistorian: ActivityHistorian(autoBackfill: false),
             historyFileProvider: makeHistoryFileProvider()
         )
 
@@ -541,15 +596,20 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         let (codexWatcher8, codexCoord8) = makeCodexStubs()
         let vm = MenuBarViewModel(
             usage: makeHermeticUsage(),
+            cachePersistence: makeHermeticCachePersistence(),
             profileStore: profileStore,
             credentialStore: keychain,
             apiClient: api,
             cliRefresher: refresher,
             activitySource: CompositeActivitySource(sources: []),
+            awakeSessionLog: AwakeSessionLog(autoStart: false),
+            cliAccountWatcher: CLIAccountWatcher(oauthRead: { nil }, fileEvents: AsyncStream { _ in }),
             codexAccountWatcher: codexWatcher8,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(),
             codexAutoProfileCoordinator: codexCoord8,
+            autoProfileMigrator: makeInertMigrator(),
+            activityHistorian: ActivityHistorian(autoBackfill: false),
             historyFileProvider: makeHistoryFileProvider()
         )
 

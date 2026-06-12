@@ -77,16 +77,42 @@ final class MenuBarViewModelWebSessionTests: XCTestCase {
             keychain: keychain,
             clock: { Date() }
         )
+        // Inert migrator: sandboxed defaults pre-marked complete so the live
+        // startup path neither reads real UserDefaults.standard nor probes
+        // the real ~/.claude.json.
+        let sandboxedDefaults = UserDefaults(suiteName: "kwota-websession-test-\(UUID())")!
+        sandboxedDefaults.set(true, forKey: "autoDetectMigrationCompleted")
+        let inertMigrator = AutoProfileMigrator(
+            profileStore: store,
+            oauthRead: { nil },
+            defaults: sandboxedDefaults
+        )
+        // Stub refresher: reader points at a missing temp file with a nil
+        // keychain probe so forceRefresh never touches Claude Code's real
+        // Keychain item or ~/.claude/.credentials.json.
+        let stubRefresher = CLITokenRefresher(
+            reader: CLICredentialReader(
+                credentialsFile: temp.file("missing-credentials.json"),
+                keychainProbe: { nil }
+            ),
+            store: keychain
+        )
         return MenuBarViewModel(
             usage: usage,
+            cachePersistence: CachePersistenceStore(url: temp.file("cache-state-\(UUID().uuidString).json")),
             profileStore: store,
             credentialStore: keychain,
             apiClient: api,
+            cliRefresher: stubRefresher,
             activitySource: CompositeActivitySource(sources: []),
+            awakeSessionLog: AwakeSessionLog(autoStart: false),
+            cliAccountWatcher: CLIAccountWatcher(oauthRead: { nil }, fileEvents: AsyncStream { _ in }),
             codexAccountWatcher: codexWatcherStub,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(profileStore: store),
-            codexAutoProfileCoordinator: codexCoordStub
+            codexAutoProfileCoordinator: codexCoordStub,
+            autoProfileMigrator: inertMigrator,
+            activityHistorian: ActivityHistorian(autoBackfill: false)
         )
     }
 
@@ -361,16 +387,28 @@ final class MenuBarViewModelWebSessionTests: XCTestCase {
             keychain: keychain,
             clock: { Date() }
         )
+        let sandboxedDefaults2 = UserDefaults(suiteName: "kwota-websession-test-\(UUID())")!
+        sandboxedDefaults2.set(true, forKey: "autoDetectMigrationCompleted")
+        let inertMigrator2 = AutoProfileMigrator(
+            profileStore: store,
+            oauthRead: { nil },
+            defaults: sandboxedDefaults2
+        )
         let vm = MenuBarViewModel(
+            cachePersistence: CachePersistenceStore(url: temp.file("cache-state-\(UUID().uuidString).json")),
             profileStore: store,
             credentialStore: keychain,
             apiClient: api,
             cliRefresher: refresher,
             activitySource: CompositeActivitySource(sources: []),
+            awakeSessionLog: AwakeSessionLog(autoStart: false),
+            cliAccountWatcher: CLIAccountWatcher(oauthRead: { nil }, fileEvents: AsyncStream { _ in }),
             codexAccountWatcher: codexWatcherStub2,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(profileStore: store),
-            codexAutoProfileCoordinator: codexCoordStub2
+            codexAutoProfileCoordinator: codexCoordStub2,
+            autoProfileMigrator: inertMigrator2,
+            activityHistorian: ActivityHistorian(autoBackfill: false)
         )
 
         // Seed: CLI profile with the OLD token, already active.

@@ -95,12 +95,34 @@ final class MenuBarViewModelActivityForwardingTests: XCTestCase {
                                        httpVersion: nil, headerFields: nil)!
             return (Data(), resp)
         })
+        // Stub refresher: reader points at a missing temp file with a nil
+        // keychain probe so forceRefresh never touches Claude Code's real
+        // Keychain item or ~/.claude/.credentials.json.
+        let stubRefresher = CLITokenRefresher(
+            reader: CLICredentialReader(
+                credentialsFile: temp.file("missing-credentials.json"),
+                keychainProbe: { nil }
+            ),
+            store: keychain
+        )
+        // These tests emit .fileWrite events that reach AwakeSupervisor, so
+        // the whole awake stack is stubbed: a unit test must never raise a
+        // REAL IOKit power assertion, post a real notification, or read the
+        // real awake config from UserDefaults.standard.
+        let awakeDefaults = UserDefaults(suiteName: "kwota-activity-fwd-awake-\(UUID())")!
         return MenuBarViewModel(
             usage: usage,
+            caffeine: CaffeinateManager(holder: MockSleepAssertionHolder()),
+            cachePersistence: CachePersistenceStore(url: temp.file("cache-state-\(UUID().uuidString).json")),
             profileStore: profileStore,
             credentialStore: keychain,
             apiClient: stubClient,
+            cliRefresher: stubRefresher,
             activitySource: source,
+            battery: FakeBatteryMonitor(),
+            awakeNotifier: FakeAwakeNotifier(),
+            awakeConfigStore: AwakeConfigStore(defaults: awakeDefaults),
+            awakeSessionLog: AwakeSessionLog(autoStart: false),
             cliAccountWatcher: vmWatcher,
             codexAccountWatcher: codexVMWatcher,
             antigravityProcessWatcher: antigravityWatcherVM,
