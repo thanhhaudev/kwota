@@ -726,6 +726,10 @@ final class MenuBarViewModel {
                     // raw `.fileWrite` pulse is for keep-awake (AwakeSupervisor
                     // subscribes to the composite separately).
                     guard event.kind == .agentResponse else { return }
+                    let delta = Date().timeIntervalSince(event.date)
+                    AppLog.shared.log(
+                        "ACTIVITY_TRACE sink provider=\(event.provider.rawValue) date=\(event.date) deltaFromNow=\(String(format: "%.1f", delta))s",
+                        level: .info)
                     self?.activityHistorian.record(provider: event.provider, at: event.date)
                 }
                 .store(in: &cancellables)

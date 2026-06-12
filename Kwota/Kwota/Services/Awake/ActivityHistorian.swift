@@ -157,6 +157,9 @@ final class ActivityHistorian {
     func applyProviderBackfill(_ results: [(provider: ProviderID, dates: [Date])]) {
         var changed = false
         for r in results where r.provider != .claude && !r.dates.isEmpty {
+            AppLog.shared.log(
+                "ACTIVITY_TRACE backfill provider=\(r.provider.rawValue) count=\(r.dates.count)",
+                level: .info)
             var seen = seenOtherDates[r.provider] ?? []
             var arr = otherEvents[r.provider] ?? []
             for d in r.dates where !seen.contains(d) {

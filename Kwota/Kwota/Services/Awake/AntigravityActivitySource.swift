@@ -110,6 +110,7 @@ final class AntigravityActivitySource: ActivitySource {
                 guard path.contains("/brain/"), path.hasSuffix("/transcript.jsonl")
                 else { continue }
                 guard self.isLive() else { continue }
+                AppLog.shared.log("ACTIVITY_TRACE AG.consume path=\(path)", level: .info)
                 self.subject.send(ActivityEvent(date: self.clock(), provider: .antigravity, kind: .fileWrite))
                 self.emitAgentResponses(at: path)
             }
@@ -130,6 +131,7 @@ final class AntigravityActivitySource: ActivitySource {
         for path in Array(offsets.keys) {
             let lines = newLines(at: path)
             guard !lines.isEmpty else { continue }
+            AppLog.shared.log("ACTIVITY_TRACE AG.poll path=\(path) lines=\(lines.count)", level: .info)
             subject.send(ActivityEvent(date: clock(), provider: .antigravity, kind: .fileWrite))
             for line in lines where !line.isEmpty {
                 if let date = scanner.timestamp(line) {
@@ -167,6 +169,9 @@ final class AntigravityActivitySource: ActivitySource {
         // while the scan ran, so an append is never counted on both paths.
         for file in found where offsets[file.path] == nil {
             offsets[file.path] = file.endOffset
+            if !file.dates.isEmpty {
+                AppLog.shared.log("ACTIVITY_TRACE AG.discover path=\(file.path) dates=\(file.dates.count)", level: .info)
+            }
             for date in file.dates {
                 subject.send(ActivityEvent(date: date, provider: .antigravity, kind: .agentResponse))
             }
