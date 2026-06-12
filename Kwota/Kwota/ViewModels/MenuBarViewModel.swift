@@ -1034,12 +1034,13 @@ final class MenuBarViewModel {
         }
     }
 
-    /// SIGTERM + delayed rescan. Orphan-only by design: the guard is the
-    /// last line of defense even though the UI never shows Kill on live rows.
-    func killOrphanAgentProcess(pid: Int32) async {
+    /// SIGTERM + delayed rescan. Any listed row is killable — editors like
+    /// Zed keep agent-panel sessions alive (live ppid, no terminal) long
+    /// after their window closes, so "not an orphan" doesn't mean "in use".
+    /// The confirmation alert is the safety gate.
+    func killAgentProcess(pid: Int32) async {
         agentProcessKillNotice = nil
-        guard let proc = agentProcesses.first(where: { $0.pid == pid }),
-              proc.isOrphan else { return }
+        guard let proc = agentProcesses.first(where: { $0.pid == pid }) else { return }
         switch agentProcessKiller.terminate(pid: pid) {
         case .terminated, .alreadyGone:
             try? await Task.sleep(nanoseconds: agentProcessRescanDelayNanos)
@@ -1052,7 +1053,7 @@ final class MenuBarViewModel {
         case .failed(let code):
             agentProcessKillNotice = "Failed to kill \(proc.commandDisplay) (PID \(pid)) — errno \(code)."
         }
-        AppLog.shared.log("killOrphanAgentProcess pid=\(pid) notice=\(agentProcessKillNotice ?? "ok")", level: .info)
+        AppLog.shared.log("killAgentProcess pid=\(pid) notice=\(agentProcessKillNotice ?? "ok")", level: .info)
     }
 
     /// Single source of truth for "is it safe to issue a usage fetch right

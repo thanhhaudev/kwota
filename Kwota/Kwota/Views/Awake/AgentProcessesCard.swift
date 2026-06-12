@@ -37,6 +37,7 @@ struct AgentProcessesCard: View {
     @State private var killTarget: AgentProcessInfo?
     @State private var showKillAlert = false
     @State private var showAllProcesses = false
+    @State private var hoveredKillPID: Int32?
 
     /// Expanded-list bound: keeps the popover under screen height even with
     /// dozens of rows; the list scrolls internally past this.
@@ -67,13 +68,17 @@ struct AgentProcessesCard: View {
                 )
             }
         }
-        .alert("Kill orphan process?", isPresented: $showKillAlert, presenting: killTarget) { proc in
+        .alert("Kill \(killTarget?.commandDisplay ?? "process")?", isPresented: $showKillAlert, presenting: killTarget) { proc in
             Button("Kill", role: .destructive) {
-                Task { await vm.killOrphanAgentProcess(pid: proc.pid) }
+                Task { await vm.killAgentProcess(pid: proc.pid) }
             }
             Button("Cancel", role: .cancel) {}
         } message: { proc in
-            Text("\(proc.commandDisplay) (PID \(String(proc.pid))) lost its parent and was re-parented to launchd. SIGTERM will be sent.")
+            if proc.isOrphan {
+                Text("PID \(String(proc.pid)) lost its parent and was re-parented to launchd. SIGTERM will be sent.")
+            } else {
+                Text("PID \(String(proc.pid)) is still attached to a running parent and may be in use. SIGTERM will be sent.")
+            }
         }
     }
 
@@ -127,10 +132,21 @@ struct AgentProcessesCard: View {
         HStack(spacing: 8) {
             ProviderIconView(assetName: iconAsset(for: proc.provider), size: 16)
             VStack(alignment: .leading, spacing: 1) {
-                Text(proc.commandDisplay)
-                    .font(.callout)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                HStack(spacing: 4) {
+                    Text(proc.commandDisplay)
+                        .font(.callout)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if proc.isOrphan {
+                        badge("Orphan", tint: .orange)
+                    } else if proc.tty == nil {
+                        // No controlling terminal: editor-spawned agent
+                        // server (e.g. Zed Agent Panel) rather than an
+                        // interactive session. Orphan rows skip it — the
+                        // Orphan badge already implies detachment.
+                        badge("background", tint: nil)
+                    }
+                }
                 Text(subtitle(for: proc))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -140,34 +156,38 @@ struct AgentProcessesCard: View {
                     .help(proc.workingDirectory ?? "")
             }
             Spacer(minLength: 8)
-            if proc.tty == nil && !proc.isOrphan {
-                // No controlling terminal: editor-spawned agent server (e.g.
-                // Zed Agent Panel) rather than an interactive session.
-                // Orphan rows skip it — the Orphan badge already implies
-                // detachment and row width is tight with the Kill button.
-                Text("background")
-                    .font(.system(size: 10, weight: .medium))
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(Color.secondary.opacity(0.12)))
-                    .foregroundStyle(.secondary)
+            // Native inline-remove affordance (Safari downloads style):
+            // quiet gray glyph, red on hover, confirmation alert as the
+            // destructive gate. Available on every row — editors keep
+            // agent sessions alive after their window closes, so live
+            // rows can be abandoned too.
+            Button {
+                killTarget = proc
+                showKillAlert = true
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(hoveredKillPID == proc.pid ? Color.red : Color.secondary.opacity(0.6))
             }
-            if proc.isOrphan {
-                Text("Orphan")
-                    .font(.system(size: 10, weight: .semibold))
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(Color.orange.opacity(0.18)))
-                    .foregroundStyle(.orange)
-                Button("Kill") {
-                    killTarget = proc
-                    showKillAlert = true
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .tint(.red)
+            .buttonStyle(.plain)
+            .onHover { hovering in
+                hoveredKillPID = hovering ? proc.pid : nil
             }
+            .help("Kill process (SIGTERM)")
+            .accessibilityLabel("Kill \(proc.commandDisplay), PID \(String(proc.pid))")
         }
+    }
+
+    /// Tiny inline status capsule sitting beside the process name. nil tint
+    /// renders the quiet secondary variant ("background").
+    private func badge(_ text: String, tint: Color?) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .medium))
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(Capsule().fill((tint ?? Color.secondary).opacity(tint == nil ? 0.12 : 0.18)))
+            .foregroundStyle(tint ?? Color.secondary)
+            .fixedSize()
     }
 
     /// "PID 4821 · 0.2% · 02:13:45 · kwota" — the trailing project name (cwd

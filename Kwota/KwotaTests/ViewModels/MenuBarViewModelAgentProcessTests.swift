@@ -44,6 +44,9 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
       4821     1   0.2 02:13:45 ??       /opt/homebrew/bin/codex app-server
       9210   812   1.4    22:11 ttys016  /Users/hau/.claude/local/claude --resume abc
     """
+    private let psOrphanOnly = """
+      4821     1   0.2 02:13:45 ??       /opt/homebrew/bin/codex app-server
+    """
     private let psLiveOnly = """
       9210   812   1.4    22:11 ttys016  /Users/hau/.claude/local/claude --resume abc
     """
@@ -164,7 +167,7 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
         let killer = RecordingKiller()
         let vm = makeVM(ps: ps, killer: killer)
         await vm.scanAgentProcessesNow()
-        await vm.killOrphanAgentProcess(pid: 4821)
+        await vm.killAgentProcess(pid: 4821)
         XCTAssertEqual(killer.killedPIDs, [4821])
         XCTAssertEqual(vm.agentProcesses.map(\.pid), [9210], "rescan removed the killed row")
         XCTAssertNil(vm.agentProcessKillNotice)
@@ -175,7 +178,7 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
         let ps = StubPSRunner([StubPSRunner.ok(psOrphanAndLive)])
         let vm = makeVM(ps: ps, killer: RecordingKiller())
         await vm.scanAgentProcessesNow()
-        await vm.killOrphanAgentProcess(pid: 4821)
+        await vm.killAgentProcess(pid: 4821)
         XCTAssertNotNil(vm.agentProcessKillNotice)
         XCTAssertTrue(vm.agentProcessKillNotice?.contains("did not exit") == true)
     }
@@ -185,15 +188,20 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
         killer.result = .permissionDenied
         let vm = makeVM(ps: StubPSRunner([StubPSRunner.ok(psOrphanAndLive)]), killer: killer)
         await vm.scanAgentProcessesNow()
-        await vm.killOrphanAgentProcess(pid: 4821)
+        await vm.killAgentProcess(pid: 4821)
         XCTAssertTrue(vm.agentProcessKillNotice?.contains("Permission denied") == true)
     }
 
-    func test_killOrphan_refusesNonOrphan() async {
+    func test_kill_liveProcessAllowed() async {
+        // Editors (e.g. Zed Agent Panel) keep live-ppid sessions running
+        // after their window closes, so any listed row is killable; the
+        // UI confirmation alert is the safety gate, not an isOrphan guard.
+        let ps = StubPSRunner([StubPSRunner.ok(psOrphanAndLive), StubPSRunner.ok(psOrphanOnly)])
         let killer = RecordingKiller()
-        let vm = makeVM(ps: StubPSRunner([StubPSRunner.ok(psOrphanAndLive)]), killer: killer)
+        let vm = makeVM(ps: ps, killer: killer)
         await vm.scanAgentProcessesNow()
-        await vm.killOrphanAgentProcess(pid: 9210) // live claude, ppid 812
-        XCTAssertTrue(killer.killedPIDs.isEmpty, "kill must be orphan-only")
+        await vm.killAgentProcess(pid: 9210) // live claude, ppid 812
+        XCTAssertEqual(killer.killedPIDs, [9210])
+        XCTAssertEqual(vm.agentProcesses.map(\.pid), [4821])
     }
 }
