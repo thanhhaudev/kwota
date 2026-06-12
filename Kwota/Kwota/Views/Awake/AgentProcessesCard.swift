@@ -32,8 +32,11 @@ enum AgentProcessListModel {
 struct AgentProcessesCard: View {
     let vm: MenuBarViewModel
 
-    @State private var killTarget: AgentProcessInfo?
-    @State private var showKillAlert = false
+    /// Inline two-step confirm. A SwiftUI `.alert` cannot be used here: the
+    /// alert window takes key status, the MenuBarExtra popover resigns key
+    /// and auto-closes, and the confirmation dies with it. The confirm step
+    /// therefore lives inside the row.
+    @State private var confirmingKillPID: Int32?
     @State private var showAllProcesses = false
     @State private var hoveredKillPID: Int32?
 
@@ -66,16 +69,12 @@ struct AgentProcessesCard: View {
                 )
             }
         }
-        .alert("Kill \(killTarget?.commandDisplay ?? "process")?", isPresented: $showKillAlert, presenting: killTarget) { proc in
-            Button("Kill", role: .destructive) {
-                Task { await vm.killAgentProcess(proc) }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: { proc in
-            if proc.isOrphan {
-                Text("PID \(String(proc.pid)) lost its parent and was re-parented to launchd. SIGTERM will be sent.")
-            } else {
-                Text("PID \(String(proc.pid)) is still attached to a running parent and may be in use. SIGTERM will be sent.")
+        .onChange(of: vm.agentProcesses) { _, newValue in
+            // The row being confirmed vanished (process exited / new scan):
+            // drop the pending confirm so it can't target a reused pid.
+            if let pid = confirmingKillPID,
+               !newValue.contains(where: { $0.pid == pid }) {
+                confirmingKillPID = nil
             }
         }
     }
@@ -96,6 +95,9 @@ struct AgentProcessesCard: View {
                         row(proc)
                     }
                 }
+                // Clear the macOS overlay scrollbar, which otherwise sits
+                // exactly on the trailing kill glyph.
+                .padding(.trailing, 12)
             }
             .frame(maxHeight: expandedMaxHeight)
         } else {
@@ -157,25 +159,44 @@ struct AgentProcessesCard: View {
                     .help(proc.workingDirectory ?? "")
             }
             Spacer(minLength: 8)
-            // Native inline-remove affordance (Safari downloads style):
-            // quiet gray glyph, red on hover, confirmation alert as the
-            // destructive gate. Available on every row — editors keep
-            // agent sessions alive after their window closes, so live
-            // rows can be abandoned too.
-            Button {
-                killTarget = proc
-                showKillAlert = true
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 13))
-                    .foregroundStyle(hoveredKillPID == proc.pid ? Color.red : Color.secondary.opacity(0.6))
+            if confirmingKillPID == proc.pid {
+                // Step 2 of the inline confirm — replaces the glyph with an
+                // explicit destructive choice. Stays inside the popover
+                // (an alert would steal key status and close it).
+                Button("Kill") {
+                    confirmingKillPID = nil
+                    Task { await vm.killAgentProcess(proc) }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .tint(.red)
+                .help(proc.isOrphan
+                    ? "Re-parented to launchd; SIGTERM will be sent"
+                    : "Still attached to a running parent and may be in use; SIGTERM will be sent")
+                Button("Cancel") {
+                    confirmingKillPID = nil
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            } else {
+                // Native inline-remove affordance (Safari downloads style):
+                // quiet gray glyph, red on hover. Available on every row —
+                // editors keep agent sessions alive after their window
+                // closes, so live rows can be abandoned too.
+                Button {
+                    confirmingKillPID = proc.pid
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 13))
+                        .foregroundStyle(hoveredKillPID == proc.pid ? Color.red : Color.secondary.opacity(0.6))
+                }
+                .buttonStyle(.plain)
+                .onHover { hovering in
+                    hoveredKillPID = hovering ? proc.pid : nil
+                }
+                .help("Kill process (SIGTERM)")
+                .accessibilityLabel("Kill \(proc.commandDisplay), PID \(String(proc.pid))")
             }
-            .buttonStyle(.plain)
-            .onHover { hovering in
-                hoveredKillPID = hovering ? proc.pid : nil
-            }
-            .help("Kill process (SIGTERM)")
-            .accessibilityLabel("Kill \(proc.commandDisplay), PID \(String(proc.pid))")
         }
     }
 
