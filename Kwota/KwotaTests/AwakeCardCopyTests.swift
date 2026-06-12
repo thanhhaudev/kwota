@@ -73,6 +73,68 @@ final class AwakeCardCopyTests: XCTestCase {
         XCTAssertEqual(s, "Waiting for agent activity")
     }
 
+    func test_subtitle_idle_autoOn_gateEnabled_recentActivity_showsStepAway() {
+        // Gate enabled + recent activity → user-idle gate is the blocker, surface it.
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let recentActivity = now.addingTimeInterval(-60)     // 1 min ago — within 5-min window
+        let s = AwakeCardCopy.subtitle(
+            state: .idle,
+            autoEnabled: true,
+            now: now,
+            lastActivity: recentActivity,
+            batteryPct: nil,
+            batteryThreshold: nil,
+            userIdleGateEnabled: true
+        )
+        XCTAssertEqual(s, "Agent active — engages when you step away")
+    }
+
+    func test_subtitle_idle_autoOn_gateOff_recentActivity_showsWaiting() {
+        // Gate disabled → always show the generic "Waiting" copy even with recent activity.
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let recentActivity = now.addingTimeInterval(-60)
+        let s = AwakeCardCopy.subtitle(
+            state: .idle,
+            autoEnabled: true,
+            now: now,
+            lastActivity: recentActivity,
+            batteryPct: nil,
+            batteryThreshold: nil,
+            userIdleGateEnabled: false
+        )
+        XCTAssertEqual(s, "Waiting for agent activity")
+    }
+
+    func test_subtitle_idle_autoOn_gateEnabled_staleActivity_showsWaiting() {
+        // Gate enabled but last activity was too long ago → "Waiting" (no agent to wait for).
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let staleActivity = now.addingTimeInterval(-400)     // > 5-min window
+        let s = AwakeCardCopy.subtitle(
+            state: .idle,
+            autoEnabled: true,
+            now: now,
+            lastActivity: staleActivity,
+            batteryPct: nil,
+            batteryThreshold: nil,
+            userIdleGateEnabled: true
+        )
+        XCTAssertEqual(s, "Waiting for agent activity")
+    }
+
+    func test_subtitle_idle_autoOn_gateEnabled_nilActivity_showsWaiting() {
+        // Gate enabled but no activity at all → "Waiting".
+        let s = AwakeCardCopy.subtitle(
+            state: .idle,
+            autoEnabled: true,
+            now: Date(timeIntervalSince1970: 1_000_000),
+            lastActivity: nil,
+            batteryPct: nil,
+            batteryThreshold: nil,
+            userIdleGateEnabled: true
+        )
+        XCTAssertEqual(s, "Waiting for agent activity")
+    }
+
     func test_subtitle_autoActive_withRecentActivity() {
         let since = Date(timeIntervalSince1970: 1_000_000)        // 14:46:40 UTC
         let now   = since.addingTimeInterval(120)                 // 2 minutes later

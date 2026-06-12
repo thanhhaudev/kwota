@@ -148,6 +148,13 @@ final class AwakeSupervisor {
             // macOS can't idle-sleep, so raising the assertion is pointless
             // noise. Only caffeinate once they've been away long enough.
             // Manual mode (forceStart) is intentionally not gated.
+            //
+            // Accepted race: re-engagement is pulse-driven, so with an
+            // aggressively short system-sleep timer (pmset sleep 1-3) and an
+            // agent that goes silent across the moment the gate opens, the
+            // Mac can sleep before the next pulse re-arms us. Realistic sleep
+            // timers (>= 5 min) and active agents (pulses every few seconds)
+            // make this window irrelevant in practice.
             if let gateSeconds = config.userIdleGate.seconds,
                userInput.secondsSinceLastInput() < gateSeconds {
                 return

@@ -35,11 +35,23 @@ enum AwakeCardCopy {
         lastActivity: Date?,
         batteryPct: Int?,
         batteryThreshold: Int?,
-        activeProviderNames: [String] = []
+        activeProviderNames: [String] = [],
+        userIdleGateEnabled: Bool = false
     ) -> String {
         switch state {
         case .idle:
-            return autoEnabled ? "Waiting for agent activity" : ""
+            if autoEnabled {
+                // When the gate is on and the agent is still active (pulsed
+                // within the keep-awake window), the real blocker is user
+                // presence — tell the user what to expect.
+                if userIdleGateEnabled,
+                   let last = lastActivity,
+                   now.timeIntervalSince(last) < 5 * 60 {
+                    return "Agent active — engages when you step away"
+                }
+                return "Waiting for agent activity"
+            }
+            return ""
 
         case .autoActive(let since):
             let suffix: String
@@ -219,7 +231,7 @@ struct AwakeCard: View {
         VStack(alignment: .leading, spacing: 0) {
             infoSection(
                 heading: "Auto mode",
-                body: "Tails your AI agents' logs and keeps your Mac awake while an agent is working. Stops after 5 minutes of no activity."
+                body: "Tails your AI agents' logs and keeps your Mac awake while an agent is working. Starts once you've been away from the keyboard, and stops after the agent goes idle or when you return — configure both in Settings → Awake."
             )
             Divider()
             infoSection(
@@ -229,7 +241,7 @@ struct AwakeCard: View {
             Divider()
             infoSection(
                 heading: nil,
-                body: "Battery threshold and idle window live in Settings → Awake."
+                body: "Battery threshold, idle window, and away threshold live in Settings → Awake."
             )
         }
         .padding(14)
@@ -351,7 +363,8 @@ struct AwakeCard: View {
             lastActivity: vm.awake.lastJSONLActivity,
             batteryPct: vm.awake.currentBatteryPercent,
             batteryThreshold: vm.awake.config.batteryThreshold.percent,
-            activeProviderNames: activeProviderNames(now: now)
+            activeProviderNames: activeProviderNames(now: now),
+            userIdleGateEnabled: vm.awake.config.userIdleGate != .off
         )
     }
 

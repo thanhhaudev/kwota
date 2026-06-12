@@ -47,6 +47,11 @@ final class AwakeSessionLog {
     @ObservationIgnored private weak var caffeine: CaffeinateManager?
     @ObservationIgnored private var bag: Set<AnyCancellable> = []
 
+    /// - Note: Trust-on-load of `lastPersistedAt` assumes a non-nil `caffeine`
+    ///   was wired at write time (the heartbeat guard). Constructing with a
+    ///   non-nil `persistURL` but a nil `caffeine` re-exposes phantom-awake
+    ///   spans: heartbeat never advances `lastPersistedAt` while the assertion
+    ///   is held, so a crash mid-session restores with a stale end timestamp.
     init(
         windowSeconds: TimeInterval = 24 * 3600,
         clock: @escaping () -> Date = { Date() },
