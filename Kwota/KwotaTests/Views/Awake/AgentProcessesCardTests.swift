@@ -31,13 +31,13 @@ final class AgentProcessesCardTests: XCTestCase {
         XCTAssertEqual(AgentProcessListModel.visible(all, showAll: false), all)
     }
 
-    func test_visible_overCap_capsLiveRowsOnly() {
+    func test_visible_overCap_capsTotalRows_orphansFirst() {
         let all = fixture(orphans: 2, live: 14)
         let visible = AgentProcessListModel.visible(all, showAll: false)
-        XCTAssertEqual(visible.filter(\.isOrphan).count, 2, "orphans are never hidden")
-        XCTAssertEqual(visible.filter { !$0.isOrphan }.count, AgentProcessListModel.liveCap)
-        // Order preserved: orphans first, then the first capped live rows.
-        XCTAssertEqual(visible.map(\.pid), [100, 101, 200, 201, 202, 203, 204])
+        // Total cap: input is orphans-first sorted, so orphans get priority
+        // within the cap; the rest is reachable behind Show all.
+        XCTAssertEqual(visible.map(\.pid), [100, 101, 200, 201, 202])
+        XCTAssertEqual(visible.count, AgentProcessListModel.collapsedCap)
     }
 
     func test_visible_showAll_returnsEverything() {
@@ -45,9 +45,9 @@ final class AgentProcessesCardTests: XCTestCase {
         XCTAssertEqual(AgentProcessListModel.visible(all, showAll: true), all)
     }
 
-    func test_hiddenCount_countsOnlyLiveBeyondCap() {
+    func test_hiddenCount_countsEverythingBeyondCap() {
         let all = fixture(orphans: 2, live: 14)
-        XCTAssertEqual(AgentProcessListModel.hiddenCount(all, showAll: false), 9)
+        XCTAssertEqual(AgentProcessListModel.hiddenCount(all, showAll: false), 11)
         XCTAssertEqual(AgentProcessListModel.hiddenCount(all, showAll: true), 0)
     }
 
@@ -56,10 +56,15 @@ final class AgentProcessesCardTests: XCTestCase {
         XCTAssertEqual(AgentProcessListModel.hiddenCount(all, showAll: false), 0)
     }
 
-    func test_visible_manyOrphans_allShownEvenBeyondCap() {
-        // Orphans are the actionable rows; the cap must never swallow them.
-        let all = fixture(orphans: 8, live: 2)
+    func test_visible_allOrphans_stillCapped_toggleAppears() {
+        // Regression guard: when a parent editor quits, EVERY session
+        // reparents to launchd at once (11 real claude rows observed). An
+        // uncapped all-orphans list re-creates the popover crop this model
+        // exists to prevent — cap applies regardless of orphan status, and
+        // hiddenCount > 0 guarantees the Show-all toggle appears.
+        let all = fixture(orphans: 11, live: 0)
         let visible = AgentProcessListModel.visible(all, showAll: false)
-        XCTAssertEqual(visible.filter(\.isOrphan).count, 8)
+        XCTAssertEqual(visible.count, AgentProcessListModel.collapsedCap)
+        XCTAssertEqual(AgentProcessListModel.hiddenCount(all, showAll: false), 6)
     }
 }

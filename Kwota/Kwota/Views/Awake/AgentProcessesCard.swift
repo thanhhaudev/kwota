@@ -12,22 +12,20 @@ import SwiftUI
 /// Row-visibility policy for the Agent Processes card. The popover sizes
 /// itself to content (`fixedSize` in KeepAwakeTabView), so an unbounded list
 /// — 14 live claude sessions is a real-world snapshot — crops the whole
-/// window. Orphans are the actionable rows and are never hidden; live rows
-/// are capped behind a Show-all toggle, mirroring CacheTabView's tail toggle.
+/// window. The cap is TOTAL, not live-only: when a parent editor quits,
+/// every session reparents to launchd at once and an orphan-exempt cap
+/// would re-create the crop. Input is the VM's orphans-first sorted
+/// snapshot, so orphans get priority within the cap; the rest sits behind
+/// the Show-all toggle (mirroring CacheTabView's tail toggle).
 enum AgentProcessListModel {
-    static let liveCap = 5
+    static let collapsedCap = 5
 
-    /// Input is the VM's orphans-first sorted snapshot; the cap therefore
-    /// only ever trims the live tail.
     static func visible(_ all: [AgentProcessInfo], showAll: Bool) -> [AgentProcessInfo] {
-        if showAll { return all }
-        let orphans = all.filter(\.isOrphan)
-        let live = all.filter { !$0.isOrphan }
-        return orphans + live.prefix(liveCap)
+        showAll ? all : Array(all.prefix(collapsedCap))
     }
 
     static func hiddenCount(_ all: [AgentProcessInfo], showAll: Bool) -> Int {
-        showAll ? 0 : max(0, all.filter { !$0.isOrphan }.count - liveCap)
+        showAll ? 0 : max(0, all.count - collapsedCap)
     }
 }
 
@@ -82,13 +80,16 @@ struct AgentProcessesCard: View {
         }
     }
 
-    /// Collapsed: plain stack (orphans + first capped live rows — short).
+    /// Collapsed: plain stack of the first `collapsedCap` rows — short.
     /// Expanded: bounded internal scroll so the popover never outgrows the
-    /// screen no matter how many sessions are alive.
+    /// screen no matter how many sessions are alive. The scroll wrapper is
+    /// keyed on "actually overflowing", not the raw toggle flag, so a list
+    /// that shrinks below the cap while expanded drops the extra chrome.
     @ViewBuilder
     private var rowList: some View {
+        let overflowing = AgentProcessListModel.hiddenCount(vm.agentProcesses, showAll: false) > 0
         let visible = AgentProcessListModel.visible(vm.agentProcesses, showAll: showAllProcesses)
-        if showAllProcesses {
+        if showAllProcesses && overflowing {
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(visible) { proc in
