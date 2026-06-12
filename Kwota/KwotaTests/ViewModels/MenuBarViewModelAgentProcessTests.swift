@@ -177,14 +177,52 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
     // MARK: - Kill flow
 
     func test_killOrphan_killsAndRescans() async {
-        let ps = StubPSRunner([StubPSRunner.ok(psOrphanAndLive), StubPSRunner.ok(psLiveOnly)])
+        // Queue: initial scan, pre-kill identity rescan, post-kill rescan.
+        let ps = StubPSRunner([StubPSRunner.ok(psOrphanAndLive),
+                               StubPSRunner.ok(psOrphanAndLive),
+                               StubPSRunner.ok(psLiveOnly)])
         let killer = RecordingKiller()
         let vm = makeVM(ps: ps, killer: killer)
         await vm.scanAgentProcessesNow()
-        await vm.killAgentProcess(pid: 4821)
+        let target = vm.agentProcesses.first { $0.pid == 4821 }!
+        await vm.killAgentProcess(target)
         XCTAssertEqual(killer.killedPIDs, [4821])
         XCTAssertEqual(vm.agentProcesses.map(\.pid), [9210], "rescan removed the killed row")
         XCTAssertNil(vm.agentProcessKillNotice)
+    }
+
+    func test_kill_abortsWhenPidReusedByDifferentProcess() async {
+        // Between presenting the alert and confirming, pid 4821 died and was
+        // reused by a different agent process (claude, not codex app-server).
+        // The pre-kill identity check must refuse to signal it.
+        let psReused = """
+          4821     1   0.4    00:05 ??       /Users/hau/.claude/local/claude
+        """
+        let ps = StubPSRunner([StubPSRunner.ok(psOrphanAndLive), StubPSRunner.ok(psReused)])
+        let killer = RecordingKiller()
+        let vm = makeVM(ps: ps, killer: killer)
+        await vm.scanAgentProcessesNow()
+        let target = vm.agentProcesses.first { $0.pid == 4821 }! // codex app-server
+        await vm.killAgentProcess(target)
+        XCTAssertTrue(killer.killedPIDs.isEmpty, "identity changed; must not kill")
+        XCTAssertTrue(vm.agentProcessKillNotice?.contains("changed") == true)
+    }
+
+    func test_kill_allowsPpidChange_parentDiedWhileAlertOpen() async {
+        // Live claude (ppid 812) loses its parent while the alert is open and
+        // reparents to launchd — same process, identity unchanged, kill proceeds.
+        let psNowOrphan = """
+          9210     1   1.4    22:11 ??       /Users/hau/.claude/local/claude --resume abc
+        """
+        let ps = StubPSRunner([StubPSRunner.ok(psOrphanAndLive),
+                               StubPSRunner.ok(psNowOrphan),
+                               StubPSRunner.ok(psNowOrphan)])
+        let killer = RecordingKiller()
+        let vm = makeVM(ps: ps, killer: killer)
+        await vm.scanAgentProcessesNow()
+        let target = vm.agentProcesses.first { $0.pid == 9210 }! // ppid 812 at capture
+        await vm.killAgentProcess(target)
+        XCTAssertEqual(killer.killedPIDs, [9210])
     }
 
     func test_killOrphan_survivor_setsNotice() async {
@@ -192,7 +230,7 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
         let ps = StubPSRunner([StubPSRunner.ok(psOrphanAndLive)])
         let vm = makeVM(ps: ps, killer: RecordingKiller())
         await vm.scanAgentProcessesNow()
-        await vm.killAgentProcess(pid: 4821)
+        await vm.killAgentProcess(vm.agentProcesses.first { $0.pid == 4821 }!)
         XCTAssertNotNil(vm.agentProcessKillNotice)
         XCTAssertTrue(vm.agentProcessKillNotice?.contains("did not exit") == true)
     }
@@ -202,7 +240,7 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
         killer.result = .permissionDenied
         let vm = makeVM(ps: StubPSRunner([StubPSRunner.ok(psOrphanAndLive)]), killer: killer)
         await vm.scanAgentProcessesNow()
-        await vm.killAgentProcess(pid: 4821)
+        await vm.killAgentProcess(vm.agentProcesses.first { $0.pid == 4821 }!)
         XCTAssertTrue(vm.agentProcessKillNotice?.contains("Permission denied") == true)
     }
 
@@ -210,11 +248,13 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
         // Editors (e.g. Zed Agent Panel) keep live-ppid sessions running
         // after their window closes, so any listed row is killable; the
         // UI confirmation alert is the safety gate, not an isOrphan guard.
-        let ps = StubPSRunner([StubPSRunner.ok(psOrphanAndLive), StubPSRunner.ok(psOrphanOnly)])
+        let ps = StubPSRunner([StubPSRunner.ok(psOrphanAndLive),
+                               StubPSRunner.ok(psOrphanAndLive),
+                               StubPSRunner.ok(psOrphanOnly)])
         let killer = RecordingKiller()
         let vm = makeVM(ps: ps, killer: killer)
         await vm.scanAgentProcessesNow()
-        await vm.killAgentProcess(pid: 9210) // live claude, ppid 812
+        await vm.killAgentProcess(vm.agentProcesses.first { $0.pid == 9210 }!) // live claude, ppid 812
         XCTAssertEqual(killer.killedPIDs, [9210])
         XCTAssertEqual(vm.agentProcesses.map(\.pid), [4821])
     }

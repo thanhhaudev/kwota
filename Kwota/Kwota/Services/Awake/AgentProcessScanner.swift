@@ -34,12 +34,14 @@ final class AgentProcessScanner {
         self.selfPID = selfPID
     }
 
-    /// Default runner: `ps -axww -o pid=,ppid=,pcpu=,etime=,tty=,args=`.
-    /// `=` suppresses headers; `-ww` prevents arg truncation.
+    /// Default runner: `ps -xww -o pid=,ppid=,pcpu=,etime=,tty=,args=`.
+    /// `=` suppresses headers; `-ww` prevents arg truncation. `-x` (without
+    /// `-a`) lists only the current user's processes, terminal-less included
+    /// — other users' agent sessions must not appear as killable rows.
     nonisolated static func defaultPSRunner() throws -> ProcessResult {
         try SystemProcessLauncher().run(
             executable: "/bin/ps",
-            arguments: ["-axww", "-o", "pid=,ppid=,pcpu=,etime=,tty=,args="],
+            arguments: ["-xww", "-o", "pid=,ppid=,pcpu=,etime=,tty=,args="],
             environment: nil
         )
     }
@@ -182,6 +184,11 @@ struct SystemAgentProcessKiller: AgentProcessKilling {
     var currentErrno: () -> Int32 = { errno }
 
     func terminate(pid: Int32) -> AgentProcessKillResult {
+        // Hard floor at the syscall boundary: kill(0,·) signals the caller's
+        // own process group, kill(1,·) launchd, negatives whole groups. No
+        // legitimate target is ever ≤ 1, regardless of what upstream parsing
+        // produced.
+        guard pid > 1 else { return .failed(errno: EINVAL) }
         guard killSyscall(pid, SIGTERM) != 0 else { return .terminated }
         switch currentErrno() {
         case ESRCH: return .alreadyGone

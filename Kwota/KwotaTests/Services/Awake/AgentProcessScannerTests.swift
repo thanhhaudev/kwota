@@ -231,6 +231,19 @@ final class AgentProcessScannerTests: XCTestCase {
         XCTAssertEqual(killer.terminate(pid: 123), .failed(errno: EINVAL))
     }
 
+    func test_killer_rejectsNonPositiveAndLaunchdPIDs() {
+        // kill(0,·) signals the caller's own process group, kill(1,·)
+        // launchd, negatives whole groups — the syscall must never fire.
+        var called = false
+        let killer = SystemAgentProcessKiller(
+            killSyscall: { _, _ in called = true; return 0 },
+            currentErrno: { 0 })
+        XCTAssertEqual(killer.terminate(pid: 0), .failed(errno: EINVAL))
+        XCTAssertEqual(killer.terminate(pid: 1), .failed(errno: EINVAL))
+        XCTAssertEqual(killer.terminate(pid: -5), .failed(errno: EINVAL))
+        XCTAssertFalse(called, "guard must reject before the syscall")
+    }
+
     func test_killer_sendsSIGTERM() {
         var sent: (pid: Int32, sig: Int32)?
         let killer = SystemAgentProcessKiller(

@@ -70,7 +70,7 @@ struct AgentProcessesCard: View {
         }
         .alert("Kill \(killTarget?.commandDisplay ?? "process")?", isPresented: $showKillAlert, presenting: killTarget) { proc in
             Button("Kill", role: .destructive) {
-                Task { await vm.killAgentProcess(pid: proc.pid) }
+                Task { await vm.killAgentProcess(proc) }
             }
             Button("Cancel", role: .cancel) {}
         } message: { proc in

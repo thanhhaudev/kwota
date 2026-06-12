@@ -1046,20 +1046,34 @@ final class MenuBarViewModel {
     /// Zed keep agent-panel sessions alive (live ppid, no terminal) long
     /// after their window closes, so "not an orphan" doesn't mean "in use".
     /// The confirmation alert is the safety gate.
-    func killAgentProcess(pid: Int32) async {
+    ///
+    /// Takes the full row captured when the alert was presented: the alert
+    /// can sit open while the 5s poll goes stale (or ps fails repeatedly),
+    /// and macOS reuses pids — so the kill re-scans and requires the pid to
+    /// still carry the same identity. ppid is allowed to differ: the parent
+    /// may have died (live → orphan) between presenting and confirming.
+    func killAgentProcess(_ target: AgentProcessInfo) async {
         agentProcessKillNotice = nil
-        guard let proc = agentProcesses.first(where: { $0.pid == pid }) else { return }
+        await scanAgentProcessesNow()
+        guard let current = agentProcesses.first(where: { $0.pid == target.pid }),
+              current.commandDisplay == target.commandDisplay,
+              current.provider == target.provider else {
+            agentProcessKillNotice = "\(target.commandDisplay) (PID \(target.pid)) is gone or changed; nothing was killed."
+            AppLog.shared.log("killAgentProcess pid=\(target.pid) aborted: identity changed", level: .info)
+            return
+        }
+        let pid = target.pid
         switch agentProcessKiller.terminate(pid: pid) {
         case .terminated, .alreadyGone:
             try? await Task.sleep(nanoseconds: agentProcessRescanDelayNanos)
             await scanAgentProcessesNow()
             if agentProcesses.contains(where: { $0.pid == pid }) {
-                agentProcessKillNotice = "\(proc.commandDisplay) (PID \(pid)) did not exit. SIGTERM was sent; the process may be busy or ignoring it."
+                agentProcessKillNotice = "\(target.commandDisplay) (PID \(pid)) did not exit. SIGTERM was sent; the process may be busy or ignoring it."
             }
         case .permissionDenied:
-            agentProcessKillNotice = "Permission denied killing \(proc.commandDisplay) (PID \(pid))."
+            agentProcessKillNotice = "Permission denied killing \(target.commandDisplay) (PID \(pid))."
         case .failed(let code):
-            agentProcessKillNotice = "Failed to kill \(proc.commandDisplay) (PID \(pid)) — errno \(code)."
+            agentProcessKillNotice = "Failed to kill \(target.commandDisplay) (PID \(pid)) — errno \(code)."
         }
         AppLog.shared.log("killAgentProcess pid=\(pid) notice=\(agentProcessKillNotice ?? "ok")", level: .info)
     }
