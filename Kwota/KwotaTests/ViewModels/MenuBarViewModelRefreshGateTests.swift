@@ -463,6 +463,162 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         )
     }
 
+    // MARK: - Rebind onto a floored provider must settle, not strand
+    //
+    // Regression for Codex adversarial review (2026-06-12): rebindHistory
+    // sets authState = .refreshing BEFORE calling refreshUsageNow. When
+    // the rebound profile's provider floor is open (verbatim Retry-After
+    // can be 2400s), the automatic gate blocks the fetch silently and no
+    // Task ever settles authState — the tab strands on a spinner (no
+    // cache) or a fake "Checking…" probing banner (with cache) until the
+    // floor expires. Single-account trigger: switch away to another
+    // provider and back, or sign out and back in, while throttled.
+
+    func test_rebindOntoFlooredProvider_settlesAuthState_insteadOfStranding() throws {
+        let p = try seedActiveProfile()
+        let vm = makeVM()
+        vm.refreshCoordinator?.applyRetryAfter(2400, for: .claude)
+
+        // Sign out, then re-activate the same (only) Claude account while
+        // the floor is still open.
+        try profileStore.clearActive()
+        try profileStore.setActive(id: p.id)
+
+        XCTAssertEqual(
+            vm.authState, .authenticated,
+            "blocked rebind refresh must settle authState — nothing else will"
+        )
+        XCTAssertFalse(
+            vm.isSwitchingProfile,
+            "stranded isSwitchingProfile pins the whole tab on the loading placeholder"
+        )
+        XCTAssertNil(
+            vm.lastFetchAttemptAt,
+            "precondition check: the fetch really was gate-blocked (no attempt stamped)"
+        )
+    }
+
+    // MARK: - Stale success must not clear a newer 429
+    //
+    // Regression for Codex adversarial review (2026-06-12): the Claude
+    // snapshot commit uses the freshness-based canCommitSnapshot (no
+    // generation check, by design), and clearRateLimitState used to ride
+    // inside that block. Ordering: T1 (slow 200, gen N) still in flight
+    // when T2 (fast 429, gen N+1) arms the banner + floor → T1's late
+    // commit wiped the newer rate-limit state. Slow responses and 429s
+    // co-occur on a degraded API, so the window is realistic.
+
+    func test_staleSlowSuccess_doesNotClear_newer429State() async throws {
+        try seedActiveProfile()
+
+        let okJSON = #"""
+        {"five_hour":{"utilization":10,"resets_at":"2026-06-13T00:00:00Z"},
+         "seven_day":{"utilization":20,"resets_at":"2026-06-18T00:00:00Z"}}
+        """#.data(using: .utf8)!
+
+        // Call 1 (the init-spawned refresh = T1): parks on the gate, then
+        // returns 200. Call 2+ (T2): immediate 429 with Retry-After.
+        let gate = TransportGate()
+        let client = ClaudeAPIClient(transport: { req in
+            let call = await gate.register()
+            if call == 1 {
+                await gate.parkUntilReleased()
+                let resp = HTTPURLResponse(
+                    url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+                )!
+                return (okJSON, resp)
+            }
+            let resp = HTTPURLResponse(
+                url: req.url!, statusCode: 429, httpVersion: nil,
+                headerFields: ["Retry-After": "2400"]
+            )!
+            return (Data(), resp)
+        }, now: { [unowned self] in self.clock })
+
+        let vm = makeVM(apiClient: client)
+
+        // Wait for T1 (init refresh) to reach the transport and park.
+        var deadline = Date().addingTimeInterval(5.0)
+        while Date() < deadline {
+            if await gate.callCount >= 1 { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let parked = await gate.callCount
+        XCTAssertGreaterThanOrEqual(parked, 1, "T1 must be in flight before T2 fires")
+
+        // T2: manual trigger past the burst throttle; gets the fast 429.
+        clock = clock.addingTimeInterval(11)
+        vm.refreshUsageNow(trigger: .manual)
+
+        deadline = Date().addingTimeInterval(5.0)
+        while Date() < deadline {
+            if vm.rateLimitedUntil != nil { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertNotNil(vm.rateLimitedUntil, "precondition: T2's 429 armed the banner")
+
+        // Release T1 — its stale-generation 200 commits the snapshot
+        // (freshness gate allows it) but must NOT clear T2's 429 state.
+        await gate.release()
+        deadline = Date().addingTimeInterval(5.0)
+        while Date() < deadline {
+            if vm.snapshot != nil { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertNotNil(vm.snapshot, "T1's snapshot itself may land — only the clear is gated")
+
+        XCTAssertNotNil(
+            vm.rateLimitedUntil,
+            "stale T1 success must not wipe the newer 429 banner window"
+        )
+        XCTAssertNotNil(
+            vm.refreshCoordinator?.backoffUntil(for: .claude),
+            "stale T1 success must not drop the newer verbatim floor"
+        )
+    }
+
+    // MARK: - Silent-429 counter does not bleed across rebind clears
+    //
+    // consecutive429Count drives the 60/120/240/300 fallback ladder. It
+    // must restart when the banner state is cleared on sign-out — without
+    // the reset, the next provider's (or session's) FIRST silent 429
+    // inherits step 2 of the ladder and backs off 120s instead of 60s.
+
+    func test_silent429Fallback_restartsAt60s_afterSignOutCycle() async throws {
+        let p = try seedActiveProfile()
+        // 429 with NO Retry-After — exercises the fallback ladder.
+        let vm = makeVM(apiClient: stubAPIClient(status: 429))
+
+        var deadline = Date().addingTimeInterval(5.0)
+        while Date() < deadline {
+            if vm.rateLimitedUntil != nil { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let first = try XCTUnwrap(vm.rateLimitedUntil)
+        XCTAssertEqual(
+            first.timeIntervalSince(clock), 60, accuracy: 0.001,
+            "first silent 429 starts the ladder at 60s"
+        )
+
+        // Sign out (clears banner state + counter), wait out the 60s
+        // floor, sign back in — the rebind refresh fires and 429s again.
+        try profileStore.clearActive()
+        XCTAssertNil(vm.rateLimitedUntil, "sign-out clears the banner window")
+        clock = clock.addingTimeInterval(61)
+        try profileStore.setActive(id: p.id)
+
+        deadline = Date().addingTimeInterval(5.0)
+        while Date() < deadline {
+            if vm.rateLimitedUntil != nil { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let second = try XCTUnwrap(vm.rateLimitedUntil)
+        XCTAssertEqual(
+            second.timeIntervalSince(clock), 60, accuracy: 0.001,
+            "post-sign-out silent 429 must restart the ladder at 60s, not inherit step 2 (120s)"
+        )
+    }
+
     // MARK: - replaceCredentials resets throttle
 
     func test_replaceCredentials_resetsThrottle_soReauthFetchesImmediately() throws {
@@ -730,6 +886,31 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
             vm.lastFetchAttemptAt, clock,
             "Codex profile has no lastSnapshot fallback — SWR must NOT skip refresh even when lastFetchedAt is fresh, otherwise the chart resolves to .empty"
         )
+    }
+
+    /// Orders two concurrent transport calls deterministically: call 1
+    /// parks until `release()`, later calls pass straight through. Lets a
+    /// test hold a slow 200 in flight while a fast 429 completes first.
+    actor TransportGate {
+        private(set) var callCount = 0
+        private var released = false
+        private var parked: [CheckedContinuation<Void, Never>] = []
+
+        func register() -> Int {
+            callCount += 1
+            return callCount
+        }
+
+        func parkUntilReleased() async {
+            if released { return }
+            await withCheckedContinuation { parked.append($0) }
+        }
+
+        func release() {
+            released = true
+            parked.forEach { $0.resume() }
+            parked.removeAll()
+        }
     }
 
     func test_profileSwitch_refreshes_whenProfileLastFetchedAtIsStale() throws {

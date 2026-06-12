@@ -57,6 +57,10 @@ struct KwotaInlineAlert<Detail: View>: View {
                         Spacer(minLength: 8)
                         ProgressView()
                             .controlSize(.small)
+                            // VoiceOver: the action button this spinner
+                            // replaces was focusable; without a label the
+                            // slot turns into an anonymous element.
+                            .accessibilityLabel("In progress")
                     } else if let actionTitle, let onAction {
                         Spacer(minLength: 8)
                         Button(actionTitle, action: onAction)

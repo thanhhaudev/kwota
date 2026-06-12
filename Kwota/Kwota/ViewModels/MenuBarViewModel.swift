@@ -1379,9 +1379,12 @@ final class MenuBarViewModel {
             lastFetchedAt = nil
             // Signed out — no provider on screen, so no rate-limit banner.
             // The coordinator floor survives (it's keyed to the provider's
-            // API, not the profile identity).
+            // API, not the profile identity). The silent-429 ladder counter
+            // resets with the banner: the next session's first silent 429
+            // must start at 60s, not inherit step 2 of the ladder.
             rateLimitedUntil = nil
             rateLimitedProviderID = nil
+            consecutive429Count = 0
             // No profile bound → not refreshing, not switching. Empty state.
             authState = .authenticated
             isSwitchingProfile = false
@@ -1415,6 +1418,9 @@ final class MenuBarViewModel {
            limitedProvider != profile.providerID {
             rateLimitedUntil = nil
             rateLimitedProviderID = nil
+            // The fallback ladder is provider-state too: Codex's first
+            // silent 429 must not back off 120s because Claude's did 60s.
+            consecutive429Count = 0
         }
         authState = .refreshing
         let store = UsageHistoryStore(historyFile: historyFileProvider(id))
@@ -1474,6 +1480,19 @@ final class MenuBarViewModel {
             return
         }
         refreshUsageNow(profile: profile)
+        // Settle if the gate blocked the fetch. `lastFetchAttemptAt` was
+        // reset to nil above and refreshUsageNow stamps it synchronously
+        // the moment its gate passes — still nil means no Task was
+        // spawned, so nothing will ever settle the `.refreshing` we set
+        // at the top of this function. Without this, rebinding onto a
+        // provider whose 429 floor is still open (switch away and back,
+        // or sign-out/sign-in, while throttled) strands the tab on a
+        // spinner — or on a fake "probing" RateLimitBanner — for the
+        // full verbatim Retry-After (observed up to ~2400s).
+        if lastFetchAttemptAt == nil {
+            authState = .authenticated
+            isSwitchingProfile = false
+        }
     }
 
     /// Pre-populate `summary` with a freshly-cached value from the profile
@@ -1726,10 +1745,21 @@ final class MenuBarViewModel {
                     rememberSummary(summary, for: profile.id)
                     self.lastFetchedAt = snap.fetchedAt
                     self.authState = .authenticated
-                    self.clearRateLimitState(
-                        for: summary.providerID,
-                        includingCoordinatorFloor: !summaryCarriedRetryAfter
-                    )
+                    // Rate-limit clearing is generation-gated even though
+                    // the snapshot commit itself deliberately is not
+                    // (canCommitSnapshot is freshness-based). A slow 200
+                    // from generation N proves nothing about a 429 that a
+                    // generation-N+1 task observed while N was in flight —
+                    // the 429 came from a LATER request. Clearing here
+                    // would wipe the newer banner + verbatim floor; slow
+                    // responses and 429s co-occur on a degraded API, so
+                    // the snapshot may land but the throttle state stays.
+                    if canCommitToUI() {
+                        self.clearRateLimitState(
+                            for: summary.providerID,
+                            includingCoordinatorFloor: !summaryCarriedRetryAfter
+                        )
+                    }
                     self.history.append(entry)
                     self.isSwitchingProfile = false
 

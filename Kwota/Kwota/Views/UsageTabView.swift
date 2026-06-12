@@ -23,7 +23,17 @@ struct UsageTabView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 40)
                 } else if let profile = vm.profileStore.activeProfile {
-                    statusBanner
+                    // 1s clock so the banner *selection* re-evaluates as
+                    // the rate-limit window / staleness threshold elapses.
+                    // The countdown text already ticked (RateLimitBanner
+                    // owns a TimelineView), but the branch choice here
+                    // used a render-time Date() — an expired banner
+                    // lingered on "Back-off elapsed" until some unrelated
+                    // VM change forced a redraw, and the StaleDataBanner
+                    // behind it stayed suppressed.
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        statusBanner(now: context.date)
+                    }
 
                     ProfileSwitcherCard(vm: vm)
 
@@ -84,7 +94,7 @@ struct UsageTabView: View {
     }
 
     @ViewBuilder
-    private var statusBanner: some View {
+    private func statusBanner(now: Date) -> some View {
         switch vm.authState {
         case .error, .unauthenticated, .expired:
             let provider = vm.profileStore.activeProfile
@@ -95,7 +105,7 @@ struct UsageTabView: View {
                     ?? "Authorization expired. Sign in again."
             )
         case .authenticated:
-            if let until = vm.rateLimitedUntil, until > Date() {
+            if let until = vm.rateLimitedUntil, until > now {
                 // "Try now" is the probe tier: it bypasses the back-off
                 // floor entirely (that's its purpose — the floor is the
                 // reason this banner exists). Only the burst throttle
@@ -105,7 +115,7 @@ struct UsageTabView: View {
                     onRetry: { vm.refreshUsageNow(trigger: .probe) }
                 )
             } else if let last = vm.lastFetchedAt,
-                      Date().timeIntervalSince(last) > StaleDataBanner.threshold {
+                      now.timeIntervalSince(last) > StaleDataBanner.threshold {
                 StaleDataBanner(lastFetchedAt: last, onRefresh: { vm.refreshUsageNow(trigger: .manual) })
             }
         case .refreshing:
@@ -114,7 +124,7 @@ struct UsageTabView: View {
             // made "Try now" look like the banner blinked away and came
             // back — or, before the probe tier existed, like nothing
             // happened at all.
-            if let until = vm.rateLimitedUntil, until > Date() {
+            if let until = vm.rateLimitedUntil, until > now {
                 RateLimitBanner(retryAt: until, isProbing: true, onRetry: {})
             } else {
                 EmptyView()
