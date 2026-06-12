@@ -88,24 +88,15 @@ final class AgentProcessesCardTests: XCTestCase {
         XCTAssertEqual(AgentProcessRowFormat.durationText(etime: "01:02:03:04"), "01:02:03:04")
     }
 
-    // MARK: - AgentProcessRowFormat.tier
-
-    func test_tier_boundaries() {
-        XCTAssertEqual(AgentProcessRowFormat.tier(cpuPercent: 0.0), .idle)
-        XCTAssertEqual(AgentProcessRowFormat.tier(cpuPercent: 1.9), .idle)
-        XCTAssertEqual(AgentProcessRowFormat.tier(cpuPercent: 2.0), .active)
-        XCTAssertEqual(AgentProcessRowFormat.tier(cpuPercent: 29.9), .active)
-        XCTAssertEqual(AgentProcessRowFormat.tier(cpuPercent: 30.0), .busy)
-        XCTAssertEqual(AgentProcessRowFormat.tier(cpuPercent: 312.5), .busy)
-    }
+    // MARK: - ActivityTier display (thresholds live in AgentProcessInfoTests)
 
     func test_tier_labelAndColor() {
-        XCTAssertEqual(AgentProcessRowFormat.ActivityTier.idle.label, "idle")
-        XCTAssertEqual(AgentProcessRowFormat.ActivityTier.active.label, "active")
-        XCTAssertEqual(AgentProcessRowFormat.ActivityTier.busy.label, "busy")
-        XCTAssertEqual(AgentProcessRowFormat.ActivityTier.idle.color, .secondary)
-        XCTAssertEqual(AgentProcessRowFormat.ActivityTier.active.color, .green)
-        XCTAssertEqual(AgentProcessRowFormat.ActivityTier.busy.color, .orange)
+        XCTAssertEqual(AgentProcessInfo.ActivityTier.idle.label, "idle")
+        XCTAssertEqual(AgentProcessInfo.ActivityTier.active.label, "active")
+        XCTAssertEqual(AgentProcessInfo.ActivityTier.busy.label, "busy")
+        XCTAssertEqual(AgentProcessInfo.ActivityTier.idle.color, .secondary)
+        XCTAssertEqual(AgentProcessInfo.ActivityTier.active.color, .green)
+        XCTAssertEqual(AgentProcessInfo.ActivityTier.busy.color, .orange)
     }
 
     func test_visible_allOrphans_stillCapped_toggleAppears() {

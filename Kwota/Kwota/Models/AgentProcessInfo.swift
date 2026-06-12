@@ -34,4 +34,21 @@ struct AgentProcessInfo: Identifiable, Equatable {
     var projectName: String? {
         workingDirectory.map { URL(fileURLWithPath: $0).lastPathComponent }
     }
+
+    /// CPU% mapped to a coarse activity bucket. Thresholds are hand-picked:
+    /// agent CLIs idle near 0%, sit well under 30% while streaming, and only
+    /// pass it on heavy tool runs. The bucket — not the raw % — is also the
+    /// list's sort key, so rows don't reshuffle on every poll tick as CPU
+    /// readings wobble. Display strings/colors live in the view layer.
+    enum ActivityTier: Int, Comparable {
+        case idle, active, busy
+
+        static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+    }
+
+    var activityTier: ActivityTier {
+        if cpuPercent < 2 { return .idle }
+        if cpuPercent < 30 { return .active }
+        return .busy
+    }
 }

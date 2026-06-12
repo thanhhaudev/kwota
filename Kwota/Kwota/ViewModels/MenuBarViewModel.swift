@@ -1076,7 +1076,10 @@ final class MenuBarViewModel {
         guard generation == agentProcessScanGeneration else { return }
         // Abandoned-first, not raw-orphan-first: detached-by-design codex
         // helpers with a live host (AgentProcessOrphanPolicy) are healthy
-        // and must not jump the queue ahead of ordinary rows.
+        // and must not jump the queue ahead of ordinary rows. Within that,
+        // working rows (busy > active > idle) surface above sleepers — by
+        // tier bucket, not raw CPU%, so the list doesn't reshuffle under
+        // the cursor every poll tick.
         let abandoned = Set(
             scanned.filter { AgentProcessOrphanPolicy.isAbandoned($0, in: scanned) }.map(\.pid)
         )
@@ -1084,6 +1087,7 @@ final class MenuBarViewModel {
             let a = abandoned.contains($0.pid)
             let b = abandoned.contains($1.pid)
             if a != b { return a }
+            if $0.activityTier != $1.activityTier { return $0.activityTier > $1.activityTier }
             return $0.pid < $1.pid
         }
     }

@@ -174,6 +174,22 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
         XCTAssertTrue(vm.agentProcesses[0].isOrphan)
     }
 
+    func test_scanNow_sortsAbandonedThenTierThenPid() async {
+        // 4 live claude rows with mixed CPU + 1 abandoned orphan. Expect:
+        // orphan first, then busy (35%) > active (5%) > idle (0.1 / 1.0)
+        // with pid as the idle tie-break.
+        let ps = """
+          9300   812  35.0    22:11 ttys016  /Users/hau/.claude/local/claude --resume a
+          9100   812   0.1    22:11 ttys016  /Users/hau/.claude/local/claude --resume b
+          4821     1   0.2 02:13:45 ??       /opt/homebrew/bin/codex app-server
+          9200   812   5.0    22:11 ttys016  /Users/hau/.claude/local/claude --resume c
+          9050   812   1.0    22:11 ttys016  /Users/hau/.claude/local/claude --resume d
+        """
+        let vm = makeVM(ps: StubPSRunner([StubPSRunner.ok(ps)]), killer: RecordingKiller())
+        await vm.scanAgentProcessesNow()
+        XCTAssertEqual(vm.agentProcesses.map(\.pid), [4821, 9300, 9200, 9050, 9100])
+    }
+
     func test_scanFailure_keepsPreviousSnapshot() async {
         struct Boom: Error {}
         let ps = StubPSRunner([StubPSRunner.ok(psOrphanAndLive), .failure(Boom())])

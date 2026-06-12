@@ -30,40 +30,30 @@ enum AgentProcessListModel {
     }
 }
 
+/// Display strings/colors for the model's activity bucket
+/// (`AgentProcessInfo.activityTier` owns the thresholds).
+extension AgentProcessInfo.ActivityTier {
+    var label: String {
+        switch self {
+        case .idle: "idle"
+        case .active: "active"
+        case .busy: "busy"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .idle: .secondary
+        case .active: .green
+        case .busy: .orange
+        }
+    }
+}
+
 /// Nontech-friendly wording for the row subtitle: "PID 4821 · ⏱ 2h 13m ·
 /// ● idle" instead of raw "PID 4821 · 0.2% · 02:13:45" — a timer glyph
 /// labels the duration and CPU% collapses into a colored activity dot.
 enum AgentProcessRowFormat {
-    /// CPU% mapped to a colored activity tier. Thresholds are hand-picked:
-    /// agent CLIs idle near 0%, sit well under 30% while streaming, and
-    /// only pass it on heavy tool runs — tune the constants if real-world
-    /// readings drift, the tiers themselves are stable.
-    enum ActivityTier: Equatable {
-        case idle, active, busy
-
-        var label: String {
-            switch self {
-            case .idle: "idle"
-            case .active: "active"
-            case .busy: "busy"
-            }
-        }
-
-        var color: Color {
-            switch self {
-            case .idle: .secondary
-            case .active: .green
-            case .busy: .orange
-            }
-        }
-    }
-
-    static func tier(cpuPercent: Double) -> ActivityTier {
-        if cpuPercent < 2 { return .idle }
-        if cpuPercent < 30 { return .active }
-        return .busy
-    }
-
     /// `ps` etime ("MM:SS", "HH:MM:SS", or "D-HH:MM:SS") rendered as a
     /// human duration — "2h 13m", zero components dropped, under a minute
     /// collapses to "Just started". Unparseable input passes through
@@ -325,7 +315,7 @@ struct AgentProcessesCard: View {
     /// color inline. Raw CPU% is intentionally not shown — the colored dot
     /// plus tier word replaces it for non-technical readability.
     private func subtitle(for proc: AgentProcessInfo) -> Text {
-        let tier = AgentProcessRowFormat.tier(cpuPercent: proc.cpuPercent)
+        let tier = proc.activityTier
         var text = inlineIcon("number")
             + Text("\(String(proc.pid)) · ")
             + inlineIcon("timer")
