@@ -39,6 +39,20 @@ final class PrivilegedHelperManagerTests: XCTestCase {
             .enabled)
     }
 
+    // MARK: - isSupported
+
+    func testIsSupportedIsInjectable() {
+        let service = FakeSystemService(status: .notRegistered)
+        let connector = FakeHelperConnector(version: nil)
+        let supported = PrivilegedHelperManager(
+            service: service, connector: connector, isSupported: true)
+        let unsupported = PrivilegedHelperManager(
+            service: service, connector: connector, isSupported: false)
+
+        XCTAssertTrue(supported.isSupported)
+        XCTAssertFalse(unsupported.isSupported)
+    }
+
     // MARK: - refreshStatus
 
     func testRefreshStatusReadsTheServiceAndConnector() async {

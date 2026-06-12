@@ -61,12 +61,25 @@ final class PrivilegedHelperManager {
 
     private(set) var status: PrivilegedHelperStatus = .notInstalled
 
+    /// Whether the helper can work at all for this binary. An ad-hoc build
+    /// has no team identifier, so the helper's fail-closed signing gate can
+    /// never accept the connection — the entire system-cache feature is dead
+    /// on arrival. The signature can't change while the process runs, so this
+    /// is resolved once at init. UI surfaces hide helper affordances and
+    /// catalog system caches when false.
+    let isSupported: Bool
+
     private let service: SystemServiceRegistering
     private let connector: HelperConnecting
 
-    init(service: SystemServiceRegistering, connector: HelperConnecting) {
+    init(
+        service: SystemServiceRegistering,
+        connector: HelperConnecting,
+        isSupported: Bool = KwotaHelperInfo.currentTeamIdentifier() != nil
+    ) {
         self.service = service
         self.connector = connector
+        self.isSupported = isSupported
     }
 
     /// The production manager, wired to the real SMAppService + helper XPC.

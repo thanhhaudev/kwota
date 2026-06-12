@@ -31,11 +31,16 @@ struct CacheSettingsView: View {
                     aiEvaluationRows
                 }
 
-                SettingsGroupedSection(
-                    caption: "Privileged helper",
-                    footer: "System caches (e.g. the icon services cache) are owned by macOS. Kwota cleans them through a small helper that runs with elevated privileges. Installing it asks for approval once; after that, cleaning — including background auto-clean — runs without prompts. System caches are always deleted permanently."
-                ) {
-                    privilegedHelperRows
+                // Hidden on ad-hoc builds: without a team identifier the
+                // helper's signing gate can never accept the app, so every
+                // affordance here would be a dead end.
+                if vm.privilegedHelper.isSupported {
+                    SettingsGroupedSection(
+                        caption: "Privileged helper",
+                        footer: "System caches (e.g. the icon services cache) are owned by macOS. Kwota cleans them through a small helper that runs with elevated privileges. Installing it asks for approval once; after that, cleaning — including background auto-clean — runs without prompts. System caches are always deleted permanently."
+                    ) {
+                        privilegedHelperRows
+                    }
                 }
 
                 SettingsGroupedSection(
@@ -50,7 +55,11 @@ struct CacheSettingsView: View {
             .padding(.bottom, 24)
             .frame(maxWidth: .infinity, alignment: .top)
         }
-        .task { await vm.privilegedHelper.refreshStatus() }
+        .task {
+            // Status only matters when the helper section is visible.
+            guard vm.privilegedHelper.isSupported else { return }
+            await vm.privilegedHelper.refreshStatus()
+        }
     }
 
     // MARK: - AI evaluation section
@@ -225,7 +234,13 @@ struct CacheSettingsView: View {
 
     @ViewBuilder
     private var trackedFoldersRows: some View {
-        ForEach(Array(vm.cacheState.rows.enumerated()), id: \.element.id) { idx, row in
+        // Helper-managed (catalog system) rows are pointless on ad-hoc
+        // builds — they can never be sized or cleaned — so they're dropped
+        // along with their auto-clean toggles.
+        let rows = vm.cacheState.rows.filter {
+            vm.privilegedHelper.isSupported || !$0.isHelperManaged
+        }
+        ForEach(Array(rows.enumerated()), id: \.element.id) { idx, row in
             if idx > 0 {
                 SettingsSectionDivider()
             }
@@ -315,8 +330,11 @@ struct CacheSettingsView: View {
         // tracked-folder rows above. The hairline divider is rendered by
         // the caller (trackedFoldersRows) before this view.
         HStack(spacing: 10) {
+            // No restore entry for helper-managed rows on ad-hoc builds —
+            // restoring a row that can never be sized or cleaned is a dead end.
             let hidden = MenuBarViewModel.hiddenBuiltInRows(
                 removed: vm.cacheState.removedDefaultPaths)
+                .filter { vm.privilegedHelper.isSupported || !$0.isHelperManaged }
             if hidden.isEmpty {
                 Button {
                     presentAddPathPanel()

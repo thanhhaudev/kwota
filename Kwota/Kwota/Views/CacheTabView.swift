@@ -52,10 +52,13 @@ struct CacheTabView: View {
 
     /// Hide rows with no content from the popover. Zero-byte rows after a
     /// clean are pure visual noise — they're still managed in Settings →
-    /// Cache, so users haven't lost access to them.
+    /// Cache, so users haven't lost access to them. Helper-managed (catalog
+    /// system) rows are hidden entirely when the privileged helper is
+    /// unsupported (ad-hoc build) — they could never be sized or cleaned.
     private func makeRowsModel() -> RowsModel {
+        let helperSupported = vm.privilegedHelper.isSupported
         let sorted = vm.cacheState.rows
-            .filter { $0.exists && $0.sizeBytes > 0 }
+            .filter { $0.exists && $0.sizeBytes > 0 && (helperSupported || !$0.isHelperManaged) }
             .sorted { $0.sizeBytes > $1.sizeBytes }
         return RowsModel(
             sorted: sorted,
@@ -73,7 +76,10 @@ struct CacheTabView: View {
     /// available even when under-cap (the cap only gates auto-triggered runs).
     private var cleanableBytes: Int {
         vm.cacheState.rows
-            .filter { $0.exists && $0.autoCleanEnabled && $0.sizeBytes > 0 }
+            .filter {
+                $0.exists && $0.autoCleanEnabled && $0.sizeBytes > 0
+                    && (vm.privilegedHelper.isSupported || !$0.isHelperManaged)
+            }
             .reduce(0) { $0 + $1.sizeBytes }
     }
 

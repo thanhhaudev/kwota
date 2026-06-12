@@ -282,6 +282,63 @@ final class SystemCacheRowsTests: XCTestCase {
                        "a tracking-only (isSystem && isCustom) row is never an auto-clean target")
     }
 
+    // MARK: - isHelperManaged
+
+    func testIsHelperManagedTrueForCatalogRow() {
+        let catalog = makeCatalogRow()
+        XCTAssertTrue(catalog.isHelperManaged,
+                      "a row at a SystemCacheCatalog path is sized/cleaned by the helper")
+    }
+
+    func testIsHelperManagedFalseForNonCatalogRows() {
+        // isSystem alone is not enough — user-added system-scope rows are
+        // sized by the unprivileged walk and keep working on ad-hoc builds.
+        XCTAssertFalse(makeRow("Tracking only", isSystem: true, isCustom: true).isHelperManaged)
+        XCTAssertFalse(makeRow("Yarn", isSystem: false, isCustom: true).isHelperManaged)
+    }
+
+    // MARK: - chooseAutoCleanTargets vs helper-managed rows (ad-hoc builds)
+
+    func testChooseAutoCleanTargetsDropsHelperManagedWhenUnsupported() {
+        var catalog = makeCatalogRow()
+        catalog.sizeBytes = 5_000_000_000
+        catalog.autoCleanEnabled = true
+        var normal = makeRow("Yarn", isSystem: false, isCustom: true)
+        normal.sizeBytes = 1_000_000_000
+        normal.autoCleanEnabled = true
+
+        let picked = MenuBarViewModel.chooseAutoCleanTargets(
+            from: [catalog, normal], byteOverage: 100, includeHelperManaged: false)
+
+        XCTAssertEqual(picked, [normal.path],
+                       "on an ad-hoc build the helper can never clean a catalog row — auto-clean must not retry it")
+    }
+
+    func testChooseAutoCleanTargetsKeepsHelperManagedByDefault() {
+        var catalog = makeCatalogRow()
+        catalog.sizeBytes = 5_000_000_000
+        catalog.autoCleanEnabled = true
+
+        let picked = MenuBarViewModel.chooseAutoCleanTargets(
+            from: [catalog], byteOverage: 100)
+
+        XCTAssertEqual(picked, [catalog.path],
+                       "signed builds keep routing catalog rows to the helper")
+    }
+
+    /// A row at a real `SystemCacheCatalog` path (`isSystem && !isCustom`),
+    /// matching how `CacheStubData.systemRows()` seeds it.
+    private func makeCatalogRow() -> CachePathRow {
+        CachePathRow(
+            displayName: "Icon services cache",
+            path: URL(fileURLWithPath: "/Library/Caches/com.apple.iconservices.store"),
+            sizeBytes: 0,
+            risk: .safe,
+            autoCleanEnabled: false,
+            isCustom: false,
+            isSystem: true)
+    }
+
     // MARK: - autoCleanMap
 
     func testAutoCleanMapToleratesDuplicatePaths() {

@@ -2080,9 +2080,12 @@ final class MenuBarViewModel {
         // System caches (e.g. icon services) are root-readable only; the
         // unprivileged CacheCleaner walk above can't size them. Ask the root
         // helper when it's enabled — silent, no prompt. When it isn't enabled,
-        // the rows simply keep whatever size they had.
-        let systemIDs = Self.splitCleanTargets(
-            cacheState.rows.filter(\.isSystem).map(\.path)).system
+        // the rows simply keep whatever size they had. Skipped entirely when
+        // the helper is unsupported (ad-hoc build) — the XPC call could never
+        // succeed and the rows are hidden from the UI anyway.
+        let systemIDs = privilegedHelper.isSupported
+            ? Self.splitCleanTargets(cacheState.rows.filter(\.isSystem).map(\.path)).system
+            : []
         if !systemIDs.isEmpty {
             let sizes = await privilegedHelper.systemCacheSizes(identifiers: systemIDs)
             if !sizes.isEmpty {
@@ -2171,7 +2174,8 @@ final class MenuBarViewModel {
         let overage = totalBytes - cap
         let targets = Self.chooseAutoCleanTargets(
             from: cacheState.rows,
-            byteOverage: overage
+            byteOverage: overage,
+            includeHelperManaged: privilegedHelper.isSupported
         )
         guard !targets.isEmpty else {
             AppLog.shared.log(
@@ -2271,9 +2275,13 @@ final class MenuBarViewModel {
     /// If even all candidates don't cover the overage, returns the full set —
     /// the scheduler still cleans what it can and logs that the cap is still
     /// exceeded for the user to handle manually.
+    /// `includeHelperManaged: false` (ad-hoc build) additionally drops catalog
+    /// system rows — the privileged helper can never serve them, so auto-clean
+    /// must not silently retry them every tick.
     nonisolated static func chooseAutoCleanTargets(
         from rows: [CachePathRow],
-        byteOverage: Int
+        byteOverage: Int,
+        includeHelperManaged: Bool = true
     ) -> [URL] {
         guard byteOverage > 0 else { return [] }
         let candidates = rows
@@ -2282,7 +2290,8 @@ final class MenuBarViewModel {
                 $0.isCleanable &&
                 $0.autoCleanEnabled &&
                 $0.sizeBytes > 0 &&
-                $0.effectiveRisk != .risky
+                $0.effectiveRisk != .risky &&
+                (includeHelperManaged || !$0.isHelperManaged)
             }
             .sorted { $0.sizeBytes > $1.sizeBytes }
         var freed = 0
@@ -2676,6 +2685,7 @@ final class MenuBarViewModel {
     private var cacheCleanNowTargets: [CachePathRow] {
         cacheState.rows.filter {
             $0.exists && $0.isCleanable && $0.autoCleanEnabled && $0.sizeBytes > 0
+                && (privilegedHelper.isSupported || !$0.isHelperManaged)
         }
     }
 

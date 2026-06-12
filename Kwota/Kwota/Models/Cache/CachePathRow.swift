@@ -78,6 +78,13 @@ struct CachePathRow: Identifiable, Equatable {
     /// defaults all remain cleanable.
     var isCleanable: Bool { !(isSystem && isCustom) }
 
+    /// Whether this row's size and cleaning are owned by the privileged
+    /// helper. Keyed on catalog membership, not `isSystem`: user-added
+    /// system-scope folders (`isSystem && isCustom`) are sized by the
+    /// unprivileged walk and never touch the helper, so they keep working
+    /// in builds where the helper is unsupported (ad-hoc signing).
+    var isHelperManaged: Bool { SystemCacheCatalog.identifier(for: path) != nil }
+
     /// Display names that appear on BOTH a system row and a non-system row.
     /// A user-scope cache can share its name with a machine-wide one (e.g.
     /// the icon-services cache lives at `~/Library/Caches/...` and
