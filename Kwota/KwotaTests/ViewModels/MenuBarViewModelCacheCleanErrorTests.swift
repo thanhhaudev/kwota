@@ -173,4 +173,47 @@ final class MenuBarViewModelCacheCleanErrorTests: XCTestCase {
             vm.cacheState.systemCleanError, .connectionFailed("system still broken"),
             "cleaning a normal cache must not erase an unrelated system-cache error")
     }
+    // MARK: - Inline-confirm seams (NSAlert removed from popover flows)
+
+    private func eligibleRow(name: String, bytes: Int) -> CachePathRow {
+        let dir = temp.url.appendingPathComponent("cache-\(name)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return CachePathRow(displayName: name, path: dir, sizeBytes: bytes, risk: .safe,
+                            autoCleanEnabled: true, isSystem: false)
+    }
+
+    func test_cleanNowPlan_summarizesEligibleRows() async {
+        let helper = await enabledHelper(cleanResult: .success(SystemCleanOutcome(itemsRemoved: 0, bytesFreed: 0)))
+        let vm = makeVM(helper: helper)
+        var off = eligibleRow(name: "off", bytes: 7)
+        off.autoCleanEnabled = false
+        vm.cacheState.rows = [eligibleRow(name: "a", bytes: 5), eligibleRow(name: "b", bytes: 9), off]
+        vm.cacheState.settings.deletePermanently = true
+        let plan = vm.cacheCleanNowPlan
+        XCTAssertEqual(plan?.count, 2, "auto-off rows are not part of the plan")
+        XCTAssertEqual(plan?.totalBytes, 14)
+        XCTAssertEqual(plan?.permanent, true)
+    }
+
+    func test_cleanNowPlan_nilWhenNothingEligible() async {
+        let helper = await enabledHelper(cleanResult: .success(SystemCleanOutcome(itemsRemoved: 0, bytesFreed: 0)))
+        let vm = makeVM(helper: helper)
+        vm.cacheState.rows = []
+        XCTAssertNil(vm.cacheCleanNowPlan)
+    }
+
+    func test_riskyTransitions_noticeOncePerPath() async {
+        let helper = await enabledHelper(cleanResult: .success(SystemCleanOutcome(itemsRemoved: 0, bytesFreed: 0)))
+        let vm = makeVM(helper: helper)
+        let row = eligibleRow(name: "JetBrains", bytes: 1)
+        vm.cacheState.rows = [row]
+        XCTAssertTrue(vm.processRiskyTransitions([row.path]))
+        XCTAssertTrue(vm.cacheRiskyNotice?.contains("JetBrains") == true)
+        vm.cacheDismissRiskyNotice()
+        XCTAssertNil(vm.cacheRiskyNotice)
+        XCTAssertFalse(vm.processRiskyTransitions([row.path]),
+                       "already-alerted path must stay silent")
+        XCTAssertNil(vm.cacheRiskyNotice)
+    }
+
 }

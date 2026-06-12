@@ -417,6 +417,9 @@ final class MenuBarViewModel {
     /// Rows with a kill in flight (TERM -> grace -> KILL spans ~1s); the
     /// UI swaps their controls for a spinner.
     private(set) var killingAgentPIDs: Set<Int32> = []
+
+    /// Inline notice for newly-flagged risky cache folders; nil hides it.
+    private(set) var cacheRiskyNotice: String?
     private var agentProcessPollTask: Task<Void, Never>?
     /// Bumped by stopAgentProcessPolling; an in-flight scan that started
     /// under an older generation discards its result instead of clobbering
@@ -2502,35 +2505,46 @@ final class MenuBarViewModel {
         saveCacheState()
     }
 
-    /// Bulk clean: every auto-on row with content. Confirms first via
-    /// NSAlert because the action covers multiple folders at once and the
-    /// total can be 10s of GB — easy to misclick. The alert copy reflects
-    /// whether permanent-delete is on (irreversible) or the default Trash
-    /// route (recoverable).
-    func cacheCleanNow() {
-        let targets = cacheState.rows.filter {
+    /// Confirm copy for the footer's inline confirm strip. nil when no row
+    /// is eligible (button is disabled anyway). Confirmation itself lives in
+    /// the VIEW: an NSAlert here used to yank key status away from the
+    /// MenuBarExtra window, closing the popover mid-flow.
+    struct CacheCleanNowPlan: Equatable {
+        let count: Int
+        let totalBytes: Int
+        let permanent: Bool
+    }
+
+    var cacheCleanNowPlan: CacheCleanNowPlan? {
+        let targets = cacheCleanNowTargets
+        guard !targets.isEmpty else { return nil }
+        return CacheCleanNowPlan(
+            count: targets.count,
+            totalBytes: targets.reduce(0) { $0 + $1.sizeBytes },
+            permanent: cacheState.settings.deletePermanently
+        )
+    }
+
+    private var cacheCleanNowTargets: [CachePathRow] {
+        cacheState.rows.filter {
             $0.exists && $0.isCleanable && $0.autoCleanEnabled && $0.sizeBytes > 0
         }
+    }
+
+    /// Bulk clean: every auto-on row with content. The caller has already
+    /// shown the inline confirm built from `cacheCleanNowPlan`.
+    func cacheCleanNowConfirmed() {
+        let targets = cacheCleanNowTargets
         guard !targets.isEmpty else { return }
-
-        let totalBytes = targets.reduce(0) { $0 + $1.sizeBytes }
-        let count = targets.count
-        let permanent = cacheState.settings.deletePermanently
-        let alert = NSAlert()
-        alert.messageText = permanent
-            ? "Permanently delete \(count) cache folder\(count == 1 ? "" : "s")?"
-            : "Clean \(count) cache folder\(count == 1 ? "" : "s")?"
-        alert.informativeText = permanent
-            ? "\(totalBytes.formattedBytes) will be permanently deleted and cannot be recovered."
-            : "\(totalBytes.formattedBytes) will be moved to the Trash. You can recover items from Finder until the Trash is emptied."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: permanent ? "Delete" : "Clean")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
         let urls = targets.map(\.path)
         Task { await cacheClean(targets: urls, surfaceErrors: true) }
     }
+
+    func cacheDismissRiskyNotice() { cacheRiskyNotice = nil }
+
+    /// Row-level deletes need an inline confirm only when the permanent
+    /// (non-Trash) route is on.
+    var cacheDeleteIsPermanent: Bool { cacheState.settings.deletePermanently }
 
     func cacheToggleAuto(rowID: UUID) {
         guard let idx = cacheState.rows.firstIndex(where: { $0.id == rowID }) else { return }
@@ -2664,16 +2678,8 @@ final class MenuBarViewModel {
         guard cacheState.cleaningRowIDs.isEmpty,
               !cacheState.isCleaning, !cacheState.isScanning else { return }
 
-        if cacheState.settings.deletePermanently {
-            let alert = NSAlert()
-            alert.messageText = "Permanently delete \(row.displayName)?"
-            alert.informativeText = "\(row.sizeBytes.formattedBytes) will be permanently deleted and cannot be recovered."
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "Delete")
-            alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-        }
-
+        // Permanent-delete confirmation happens inline in the row (see
+        // CacheRowView) — an NSAlert here closed the popover.
         cacheState.cleaningRowIDs.insert(rowID)
         Task {
             await performClean(targets: [row.path], surfaceErrors: true)
@@ -2938,23 +2944,9 @@ final class MenuBarViewModel {
             cacheState.rows.first(where: { $0.path == url })?.displayName ?? url.lastPathComponent
         }
 
-        #if canImport(AppKit)
-        let alert = NSAlert()
-        alert.messageText = novel.count == 1
-            ? "1 folder flagged risky"
-            : "\(novel.count) folders flagged risky"
-        alert.informativeText = """
-        Kwota's AI evaluation says these folders may contain user state or \
-        config that auto-clean could destroy. Auto-clean is OFF for risky \
-        rows by default — review each in the popover before flipping the \
-        toggle on.
-
-        \(displayNames.map { "• \($0)" }.joined(separator: "\n"))
-        """
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
-        #endif
+        // Inline notice in the Cache tab (an NSAlert here closed the
+        // popover that triggered the evaluation).
+        cacheRiskyNotice = "The AI evaluation flagged \(displayNames.joined(separator: ", ")) as possibly holding user state or config. Auto-clean stays OFF for risky rows — review each before enabling it."
 
         for url in novel {
             cacheState.riskyAlertedPaths.insert(url)

@@ -14,6 +14,10 @@ import SwiftUI
 struct CacheTabView: View {
     let vm: MenuBarViewModel
     @State private var showAllRows: Bool = false
+    /// Inline confirms (an alert would close the MenuBarExtra popover —
+    /// same pattern as the Awake tab's kill confirm).
+    @State private var confirmingCleanNow = false
+    @State private var confirmingDeleteRowID: UUID?
     /// Row whose AI detail sheet is currently open. nil hides the sheet.
     @State private var aiDetailRowID: UUID?
     /// Cached upper bound for the scrollable folder list. Resolved once on
@@ -93,11 +97,26 @@ struct CacheTabView: View {
                 isRescanning: vm.cacheState.isScanning || vm.cacheState.isCleaning,
                 isEvaluatingAI: vm.cacheState.isEvaluatingAll,
                 unevaluatedCount: model.unevaluatedCount,
-                onCleanNow: { vm.cacheCleanNow() },
+                onCleanNow: { confirmingCleanNow = true },
                 onRescan: { Task { await vm.cacheScan(force: true) } },
                 onEvaluateAll: { vm.cacheEvaluateAllWithAI() }
             )
             .padding(.horizontal, 2)
+
+            if confirmingCleanNow, let plan = vm.cacheCleanNowPlan {
+                cleanNowConfirmStrip(plan)
+            }
+
+            if let risky = vm.cacheRiskyNotice {
+                KwotaInlineAlert(
+                    tint: .red,
+                    icon: "exclamationmark.octagon.fill",
+                    title: "Folders flagged risky",
+                    detail: risky,
+                    actionTitle: "Dismiss",
+                    onAction: { vm.cacheDismissRiskyNotice() }
+                )
+            }
 
             if let error = vm.cacheState.aiEvaluationError {
                 let display = aiErrorDisplay(for: error)
@@ -151,6 +170,34 @@ struct CacheTabView: View {
     /// Map an `EvaluationError` to its inline-banner copy. Kept here (not on
     /// the error type itself) because tint + icon are SwiftUI concerns the
     /// service layer shouldn't know about.
+    /// Two-button confirm for the bulk clean — same inline pattern as the
+    /// Awake tab (the popover cannot host alerts).
+    private func cleanNowConfirmStrip(_ plan: MenuBarViewModel.CacheCleanNowPlan) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: plan.permanent ? "exclamationmark.triangle.fill" : "trash")
+                .font(.system(size: 12))
+                .foregroundStyle(plan.permanent ? .red : .orange)
+            Text(plan.permanent
+                ? "Permanently delete \(plan.count) folder\(plan.count == 1 ? "" : "s")? \(plan.totalBytes.formattedBytes) cannot be recovered."
+                : "Clean \(plan.count) folder\(plan.count == 1 ? "" : "s")? \(plan.totalBytes.formattedBytes) will move to the Trash.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            Button(plan.permanent ? "Delete" : "Clean") {
+                confirmingCleanNow = false
+                vm.cacheCleanNowConfirmed()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .tint(.red)
+            Button("Cancel") { confirmingCleanNow = false }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+        }
+        .kwotaCard()
+    }
+
     private func aiErrorDisplay(
         for error: CacheEvaluator.EvaluationError
     ) -> (tint: Color, icon: String, title: String, detail: String) {
@@ -267,7 +314,19 @@ struct CacheTabView: View {
                                     && scopeCollisions.contains(row.displayName),
                                 isReEvaluating: vm.cacheState.evaluatingRowIDs.contains(row.id),
                                 isCleaning: vm.cacheState.cleaningRowIDs.contains(row.id),
-                                onCleanNow: { vm.cacheCleanRow(rowID: row.id) },
+                                onCleanNow: {
+                                    if vm.cacheDeleteIsPermanent {
+                                        confirmingDeleteRowID = row.id
+                                    } else {
+                                        vm.cacheCleanRow(rowID: row.id)
+                                    }
+                                },
+                                isConfirmingDelete: confirmingDeleteRowID == row.id,
+                                onConfirmDelete: {
+                                    confirmingDeleteRowID = nil
+                                    vm.cacheCleanRow(rowID: row.id)
+                                },
+                                onCancelDelete: { confirmingDeleteRowID = nil },
                                 onReEvaluate: { vm.cacheReEvaluateRow(rowID: row.id) },
                                 onToggleAuto: { vm.cacheToggleAuto(rowID: row.id) },
                                 onReveal: { vm.cacheRevealInFinder(rowID: row.id) },
