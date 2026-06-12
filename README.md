@@ -32,7 +32,18 @@ DerivedData is shared at `~/Library/Developer/Xcode/DerivedData/Kwota-shared`. T
 
 The app runs without signing setup. To enable **system-cache cleaning** (needs a root helper):
 
-1. Set `DEVELOPMENT_TEAM` in `Local.xcconfig` — your Apple team ID from Xcode → Settings → Accounts. No paid Apple Developer Program needed. `make build` creates `Local.xcconfig` from `.example` if missing.
+1. Get your Apple Team ID and put it in `Local.xcconfig` (`make build` creates it
+   from `.example` if missing). No paid Apple Developer Program needed:
+   1. Xcode → Settings → Accounts → `+` → sign in with your Apple ID. A free
+      account works — Xcode creates a "Personal Team" for it.
+   2. Open `Kwota/Kwota.xcodeproj`, select the **Kwota** target →
+      **Signing & Capabilities** → pick your team in the **Team** dropdown.
+   3. Xcode writes the team ID into the project file. Read it back:
+      `grep -m1 DEVELOPMENT_TEAM Kwota/Kwota.xcodeproj/project.pbxproj`
+      — the 10-character value is your Team ID.
+   4. Set `DEVELOPMENT_TEAM = <that ID>` in `Local.xcconfig`, then revert the
+      project file: `git checkout -- Kwota/Kwota.xcodeproj` (the team belongs
+      in `Local.xcconfig`, which is gitignored).
 2. `make release-app`, drag `build/Release/Kwota.app` to `/Applications`.
 3. Settings → Cache → Privileged helper → Install. Approve in System Settings → General → Login Items & Extensions.
 
