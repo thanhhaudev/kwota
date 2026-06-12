@@ -286,4 +286,76 @@ final class AgentProcessScannerTests: XCTestCase {
         XCTAssertEqual(sent?.pid, 4821)
         XCTAssertEqual(sent?.sig, SIGTERM)
     }
+
+    // MARK: - AgentProcessOrphanPolicy
+
+    private func policyProc(
+        pid: Int32,
+        ppid: Int32,
+        provider: ProviderID = .claude,
+        command: String = "claude",
+        cwd: String? = "/Users/hau/proj"
+    ) -> AgentProcessInfo {
+        AgentProcessInfo(
+            pid: pid,
+            ppid: ppid,
+            provider: provider,
+            commandDisplay: command,
+            cpuPercent: 0.0,
+            elapsed: "01:00",
+            workingDirectory: cwd
+        )
+    }
+
+    func test_policy_attachedRow_neverAbandoned() {
+        let proc = policyProc(pid: 10, ppid: 500)
+        XCTAssertFalse(AgentProcessOrphanPolicy.isAbandoned(proc, in: [proc]))
+    }
+
+    func test_policy_claudeOrphan_isAbandoned() {
+        // Non-codex-script rows keep the plain ppid heuristic, even with a
+        // sibling claude in the same project.
+        let orphan = policyProc(pid: 10, ppid: 1)
+        let sibling = policyProc(pid: 20, ppid: 500)
+        XCTAssertTrue(AgentProcessOrphanPolicy.isAbandoned(orphan, in: [orphan, sibling]))
+    }
+
+    func test_policy_brokerWithLiveClaudeSameCwd_notAbandoned() {
+        let broker = policyProc(pid: 10, ppid: 1, provider: .codex, command: "app-server-broker.mjs")
+        let host = policyProc(pid: 20, ppid: 500)
+        XCTAssertFalse(AgentProcessOrphanPolicy.isAbandoned(broker, in: [broker, host]))
+    }
+
+    func test_policy_brokerWithoutHost_isAbandoned() {
+        let broker = policyProc(pid: 10, ppid: 1, provider: .codex, command: "app-server-broker.mjs")
+        XCTAssertTrue(AgentProcessOrphanPolicy.isAbandoned(broker, in: [broker]))
+    }
+
+    func test_policy_brokerWithClaudeInOtherProject_isAbandoned() {
+        let broker = policyProc(pid: 10, ppid: 1, provider: .codex, command: "app-server-broker.mjs")
+        let other = policyProc(pid: 20, ppid: 500, cwd: "/Users/hau/elsewhere")
+        XCTAssertTrue(AgentProcessOrphanPolicy.isAbandoned(broker, in: [broker, other]))
+    }
+
+    func test_policy_brokerWithOnlyCodexSibling_isAbandoned() {
+        // Only a claude row proves a live host; another codex helper in the
+        // same cwd does not.
+        let broker = policyProc(pid: 10, ppid: 1, provider: .codex, command: "app-server-broker.mjs")
+        let sibling = policyProc(pid: 20, ppid: 1, provider: .codex, command: "codex-companion.mjs")
+        XCTAssertTrue(AgentProcessOrphanPolicy.isAbandoned(broker, in: [broker, sibling]))
+    }
+
+    func test_policy_taskWorkerSameRule() {
+        let worker = policyProc(pid: 10, ppid: 1, provider: .codex, command: "codex-companion.mjs")
+        let host = policyProc(pid: 20, ppid: 500)
+        XCTAssertFalse(AgentProcessOrphanPolicy.isAbandoned(worker, in: [worker, host]))
+    }
+
+    func test_policy_brokerWithoutCwd_fallsBackToPpidHeuristic() {
+        // lsof enrichment is best-effort; with no cwd to match on, the raw
+        // ppid signal stands.
+        let broker = policyProc(pid: 10, ppid: 1, provider: .codex, command: "app-server-broker.mjs", cwd: nil)
+        let host = policyProc(pid: 20, ppid: 500)
+        XCTAssertTrue(AgentProcessOrphanPolicy.isAbandoned(broker, in: [broker, host]))
+    }
 }

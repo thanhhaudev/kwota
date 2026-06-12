@@ -2,10 +2,11 @@
 //  AgentProcessInfo.swift
 //  Kwota
 //
-//  One agent-related process from a `ps` snapshot. "Orphan" means the
-//  original parent died and launchd adopted the process (ppid == 1) —
-//  e.g. a `codex app-server` broker left over from a closed worktree
-//  session. Orphans are the only rows the UI lets the user kill.
+//  One agent-related process from a `ps` snapshot. `isOrphan` is the raw
+//  ppid==1 signal (launchd adopted the process); whether that actually
+//  means "abandoned" is decided per-snapshot by AgentProcessOrphanPolicy —
+//  codex's node helpers detach to ppid 1 by design. Every row is killable;
+//  the inline confirm is the safety gate.
 //
 
 import Foundation

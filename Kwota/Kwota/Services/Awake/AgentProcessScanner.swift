@@ -145,7 +145,10 @@ final class AgentProcessScanner {
     /// Node-hosted codex tooling — argv[0] is "node", so these only match by
     /// an args marker. The app-server broker detaches to ppid 1 by design;
     /// matching it makes genuine orphan brokers visible in the list.
-    nonisolated private static let codexScriptMarkers = [
+    /// Internal (not private): AgentProcessOrphanPolicy keys off the same
+    /// list — these are exactly the rows where ppid 1 is healthy steady
+    /// state rather than an abandonment signal.
+    nonisolated static let codexScriptMarkers = [
         "codex-companion.mjs",
         "app-server-broker.mjs",
     ]
@@ -171,6 +174,29 @@ final class AgentProcessScanner {
             return "\(base) \(tokens[1])"
         }
         return base
+    }
+}
+
+// MARK: - Orphan-badge policy
+
+/// Decides whether a ppid==1 row is *abandoned* rather than merely detached.
+/// The codex plugin's node helpers (app-server broker, detached task
+/// workers) spawn with `detached: true` + `unref()` — ppid 1 is their
+/// healthy steady state, so reparenting alone cannot mean "lost its parent"
+/// for them. The real signal is host liveness: the broker serves the Claude
+/// Code session that spawned it, in the same project, so a live claude row
+/// sharing its working directory proves it is in use. No such host in the
+/// snapshot — or no cwd to match on (lsof enrichment is best-effort) —
+/// falls back to the plain ppid heuristic.
+enum AgentProcessOrphanPolicy {
+    static func isAbandoned(_ proc: AgentProcessInfo, in snapshot: [AgentProcessInfo]) -> Bool {
+        guard proc.isOrphan else { return false }
+        guard AgentProcessScanner.codexScriptMarkers.contains(proc.commandDisplay),
+              let cwd = proc.workingDirectory
+        else { return true }
+        return !snapshot.contains {
+            $0.pid != proc.pid && $0.provider == .claude && $0.workingDirectory == cwd
+        }
     }
 }
 

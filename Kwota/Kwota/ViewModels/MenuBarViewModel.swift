@@ -1074,8 +1074,16 @@ final class MenuBarViewModel {
         let generation = agentProcessScanGeneration
         guard let scanned = await agentProcessScanner.scan() else { return }
         guard generation == agentProcessScanGeneration else { return }
+        // Abandoned-first, not raw-orphan-first: detached-by-design codex
+        // helpers with a live host (AgentProcessOrphanPolicy) are healthy
+        // and must not jump the queue ahead of ordinary rows.
+        let abandoned = Set(
+            scanned.filter { AgentProcessOrphanPolicy.isAbandoned($0, in: scanned) }.map(\.pid)
+        )
         agentProcesses = scanned.sorted {
-            if $0.isOrphan != $1.isOrphan { return $0.isOrphan }
+            let a = abandoned.contains($0.pid)
+            let b = abandoned.contains($1.pid)
+            if a != b { return a }
             return $0.pid < $1.pid
         }
     }
