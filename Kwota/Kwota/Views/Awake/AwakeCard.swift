@@ -47,7 +47,7 @@ enum AwakeCardCopy {
                 if userIdleGateEnabled,
                    let last = lastActivity,
                    now.timeIntervalSince(last) < 5 * 60 {
-                    return "Agent active — engages when you step away"
+                    return "Agent active — keeps your Mac awake once you step away"
                 }
                 return "Waiting for agent activity"
             }

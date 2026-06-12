@@ -86,7 +86,7 @@ final class AwakeCardCopyTests: XCTestCase {
             batteryThreshold: nil,
             userIdleGateEnabled: true
         )
-        XCTAssertEqual(s, "Agent active — engages when you step away")
+        XCTAssertEqual(s, "Agent active — keeps your Mac awake once you step away")
     }
 
     func test_subtitle_idle_autoOn_gateOff_recentActivity_showsWaiting() {
