@@ -402,6 +402,21 @@ final class MenuBarViewModel {
     private(set) var lastUsageTick: Date?
     private(set) var isNotificationPermissionDenied: Bool = false
 
+    // MARK: - Awake tab — Agent Processes section
+
+    private let agentProcessScanner: AgentProcessScanner
+    private let agentProcessKiller: any AgentProcessKilling
+    /// Snapshot rendered by AgentProcessesCard. Orphans sort first.
+    private(set) var agentProcesses: [AgentProcessInfo] = []
+    /// Inline-alert text for a failed kill; nil hides the alert.
+    private(set) var agentProcessKillNotice: String?
+    private var agentProcessPollTask: Task<Void, Never>?
+    var isAgentProcessPollingActive: Bool { agentProcessPollTask != nil }
+    /// 5 s while the Awake tab is visible. Internal so tests can shrink it.
+    var agentProcessPollIntervalNanos: UInt64 = 5_000_000_000
+    /// Post-SIGTERM rescan delay. Tests set 0.
+    var agentProcessRescanDelayNanos: UInt64 = 500_000_000
+
     // MARK: - Cache tab state
 
     /// State for the Cache tab.
@@ -527,6 +542,8 @@ final class MenuBarViewModel {
         antigravityAutoProfileCoordinator: AntigravityAutoProfileCoordinator? = nil,
         autoProfileMigrator: AutoProfileMigrator? = nil,
         activityHistorian: ActivityHistorian? = nil,
+        agentProcessScanner: AgentProcessScanner? = nil,
+        agentProcessKiller: (any AgentProcessKilling)? = nil,
         now: @escaping () -> Date = Date.init,
         startupMode: StartupMode = .live
     ) {
@@ -545,6 +562,12 @@ final class MenuBarViewModel {
         self.cliRefresher = resolvedCLIRefresher
         self.cliRunner = cliRunner ?? ClaudeCLIRunner()
         self.privilegedHelper = privilegedHelper ?? PrivilegedHelperManager.live()
+
+        // Both defaults are inert at init time (no IO until scan()/kill is
+        // called), so test fixtures that don't care about this feature can
+        // skip injecting them without hanging the test host.
+        self.agentProcessScanner = agentProcessScanner ?? AgentProcessScanner()
+        self.agentProcessKiller = agentProcessKiller ?? SystemAgentProcessKiller()
 
         // Hosted-tests use a tmp file so suite runs don't stomp on the
         // user's real persisted cache state. Live mode points at the
@@ -979,6 +1002,57 @@ final class MenuBarViewModel {
         isPopoverOpen = false
         refreshCoordinator?.popoverDidClose()
         antigravityProcessWatcher.popoverDidClose()
+    }
+
+    // MARK: Agent process polling + kill
+
+    /// Driven by KeepAwakeTabView.onAppear — runs only while the Awake tab
+    /// is visible, consistent with the popover-cadence energy rules.
+    func startAgentProcessPolling() {
+        guard agentProcessPollTask == nil else { return }
+        agentProcessPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.scanAgentProcessesNow()
+                let interval = self?.agentProcessPollIntervalNanos ?? 5_000_000_000
+                try? await Task.sleep(nanoseconds: interval)
+            }
+        }
+    }
+
+    func stopAgentProcessPolling() {
+        agentProcessPollTask?.cancel()
+        agentProcessPollTask = nil
+    }
+
+    /// nil scan (ps failure) keeps the previous snapshot — a transient ps
+    /// hiccup must not blank the section.
+    func scanAgentProcessesNow() async {
+        guard let scanned = await agentProcessScanner.scan() else { return }
+        agentProcesses = scanned.sorted {
+            if $0.isOrphan != $1.isOrphan { return $0.isOrphan }
+            return $0.pid < $1.pid
+        }
+    }
+
+    /// SIGTERM + delayed rescan. Orphan-only by design: the guard is the
+    /// last line of defense even though the UI never shows Kill on live rows.
+    func killOrphanAgentProcess(pid: Int32) async {
+        agentProcessKillNotice = nil
+        guard let proc = agentProcesses.first(where: { $0.pid == pid }),
+              proc.isOrphan else { return }
+        switch agentProcessKiller.terminate(pid: pid) {
+        case .terminated, .alreadyGone:
+            try? await Task.sleep(nanoseconds: agentProcessRescanDelayNanos)
+            await scanAgentProcessesNow()
+            if agentProcesses.contains(where: { $0.pid == pid }) {
+                agentProcessKillNotice = "\(proc.commandDisplay) (PID \(pid)) did not exit. SIGTERM was sent; the process may be busy or ignoring it."
+            }
+        case .permissionDenied:
+            agentProcessKillNotice = "Permission denied killing \(proc.commandDisplay) (PID \(pid))."
+        case .failed(let code):
+            agentProcessKillNotice = "Failed to kill \(proc.commandDisplay) (PID \(pid)) — errno \(code)."
+        }
+        AppLog.shared.log("killOrphanAgentProcess pid=\(pid) notice=\(agentProcessKillNotice ?? "ok")", level: .info)
     }
 
     /// Single source of truth for "is it safe to issue a usage fetch right
