@@ -257,6 +257,26 @@ final class AgentProcessScannerTests: XCTestCase {
         XCTAssertFalse(called, "guard must reject before the syscall")
     }
 
+    func test_killer_forceTerminate_sendsSIGKILL() {
+        var sent: (pid: Int32, sig: Int32)?
+        let killer = SystemAgentProcessKiller(
+            killSyscall: { pid, sig in sent = (pid, sig); return 0 },
+            currentErrno: { 0 })
+        XCTAssertEqual(killer.forceTerminate(pid: 4821), .terminated)
+        XCTAssertEqual(sent?.pid, 4821)
+        XCTAssertEqual(sent?.sig, SIGKILL)
+    }
+
+    func test_killer_forceTerminate_sameGuardAsTerminate() {
+        var called = false
+        let killer = SystemAgentProcessKiller(
+            killSyscall: { _, _ in called = true; return 0 },
+            currentErrno: { 0 })
+        XCTAssertEqual(killer.forceTerminate(pid: 0), .failed(errno: EINVAL))
+        XCTAssertEqual(killer.forceTerminate(pid: 1), .failed(errno: EINVAL))
+        XCTAssertFalse(called)
+    }
+
     func test_killer_sendsSIGTERM() {
         var sent: (pid: Int32, sig: Int32)?
         let killer = SystemAgentProcessKiller(

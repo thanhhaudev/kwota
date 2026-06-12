@@ -185,6 +185,9 @@ enum AgentProcessKillResult: Equatable {
 
 protocol AgentProcessKilling {
     func terminate(pid: Int32) -> AgentProcessKillResult
+    /// SIGKILL escalation, offered when SIGTERM is ignored — Claude Code's
+    /// editor-spawned (ACP) sessions trap SIGTERM and keep running.
+    func forceTerminate(pid: Int32) -> AgentProcessKillResult
 }
 
 /// SIGTERM via kill(2). Syscall and errno read are injected so the errno
@@ -194,12 +197,20 @@ struct SystemAgentProcessKiller: AgentProcessKilling {
     var currentErrno: () -> Int32 = { errno }
 
     func terminate(pid: Int32) -> AgentProcessKillResult {
+        send(SIGTERM, to: pid)
+    }
+
+    func forceTerminate(pid: Int32) -> AgentProcessKillResult {
+        send(SIGKILL, to: pid)
+    }
+
+    private func send(_ sig: Int32, to pid: Int32) -> AgentProcessKillResult {
         // Hard floor at the syscall boundary: kill(0,·) signals the caller's
         // own process group, kill(1,·) launchd, negatives whole groups. No
         // legitimate target is ever ≤ 1, regardless of what upstream parsing
         // produced.
         guard pid > 1 else { return .failed(errno: EINVAL) }
-        guard killSyscall(pid, SIGTERM) != 0 else { return .terminated }
+        guard killSyscall(pid, sig) != 0 else { return .terminated }
         switch currentErrno() {
         case ESRCH: return .alreadyGone
         case EPERM: return .permissionDenied

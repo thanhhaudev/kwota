@@ -43,10 +43,16 @@ final class GatedPSRunner: @unchecked Sendable {
 @MainActor
 final class RecordingKiller: AgentProcessKilling {
     var result: AgentProcessKillResult = .terminated
+    var forceResult: AgentProcessKillResult = .terminated
     private(set) var killedPIDs: [Int32] = []
+    private(set) var forceKilledPIDs: [Int32] = []
     func terminate(pid: Int32) -> AgentProcessKillResult {
         killedPIDs.append(pid)
         return result
+    }
+    func forceTerminate(pid: Int32) -> AgentProcessKillResult {
+        forceKilledPIDs.append(pid)
+        return forceResult
     }
 }
 
@@ -271,6 +277,42 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
         await vm.killAgentProcess(vm.agentProcesses.first { $0.pid == 4821 }!)
         XCTAssertNotNil(vm.agentProcessKillNotice)
         XCTAssertTrue(vm.agentProcessKillNotice?.contains("did not exit") == true)
+        XCTAssertEqual(vm.agentProcessKillRetryTarget?.pid, 4821,
+                       "survivor must arm the Force Kill action")
+    }
+
+    func test_forceKill_sigkillsSurvivorAndClears() async {
+        // SIGTERM survivor (Claude Code ACP sessions trap SIGTERM), then
+        // Force Kill: SIGKILL lands and the post-rescan shows the row gone.
+        let ps = StubPSRunner([StubPSRunner.ok(psOrphanAndLive),  // initial
+                               StubPSRunner.ok(psOrphanAndLive),  // pre-kill verify
+                               StubPSRunner.ok(psOrphanAndLive),  // post-TERM rescan: survived
+                               StubPSRunner.ok(psOrphanAndLive),  // pre-force verify
+                               StubPSRunner.ok(psLiveOnly)])      // post-KILL rescan: gone
+        let killer = RecordingKiller()
+        let vm = makeVM(ps: ps, killer: killer)
+        await vm.scanAgentProcessesNow()
+        await vm.killAgentProcess(vm.agentProcesses.first { $0.pid == 4821 }!)
+        let retry = vm.agentProcessKillRetryTarget
+        XCTAssertNotNil(retry)
+        await vm.forceKillAgentProcess(retry!)
+        XCTAssertEqual(killer.forceKilledPIDs, [4821])
+        XCTAssertNil(vm.agentProcessKillNotice, "force kill succeeded; notice clears")
+        XCTAssertNil(vm.agentProcessKillRetryTarget)
+        XCTAssertEqual(vm.agentProcesses.map(\.pid), [9210])
+    }
+
+    func test_forceKill_rowAlreadyGone_noSyscallNoNotice() async {
+        // Process died between arming Force Kill and clicking it.
+        let ps = StubPSRunner([StubPSRunner.ok(psOrphanAndLive),
+                               StubPSRunner.ok(psLiveOnly)]) // pre-force verify: gone
+        let killer = RecordingKiller()
+        let vm = makeVM(ps: ps, killer: killer)
+        await vm.scanAgentProcessesNow()
+        let target = vm.agentProcesses.first { $0.pid == 4821 }!
+        await vm.forceKillAgentProcess(target)
+        XCTAssertTrue(killer.forceKilledPIDs.isEmpty)
+        XCTAssertNil(vm.agentProcessKillNotice)
     }
 
     func test_killOrphan_permissionDenied_setsNotice() async {

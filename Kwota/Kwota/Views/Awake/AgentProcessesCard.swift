@@ -61,11 +61,17 @@ struct AgentProcessesCard: View {
             .kwotaCard()
 
             if let notice = vm.agentProcessKillNotice {
+                // Survivor notices arm a Force Kill (SIGKILL) action —
+                // Claude Code's editor-spawned sessions trap SIGTERM.
                 KwotaInlineAlert(
                     tint: .orange,
                     icon: "exclamationmark.triangle.fill",
                     title: "Kill failed",
-                    detail: notice
+                    detail: notice,
+                    actionTitle: vm.agentProcessKillRetryTarget != nil ? "Force Kill" : nil,
+                    onAction: vm.agentProcessKillRetryTarget.map { target in
+                        { Task { await vm.forceKillAgentProcess(target) } }
+                    }
                 )
             }
         }
