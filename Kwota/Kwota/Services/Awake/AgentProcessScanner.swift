@@ -16,24 +16,41 @@ import Foundation
 
 final class AgentProcessScanner {
     typealias PSRunner = @Sendable () throws -> ProcessResult
+    /// Batch cwd lookup for the matched pids (lsof). Best-effort: a throw or
+    /// nonzero exit just leaves rows without a working directory.
+    typealias CWDRunner = @Sendable ([Int32]) throws -> ProcessResult
 
     private let runPS: PSRunner
+    private let runCWD: CWDRunner
     private let selfPID: Int32
 
     init(
         runPS: @escaping PSRunner = AgentProcessScanner.defaultPSRunner,
+        runCWD: @escaping CWDRunner = AgentProcessScanner.defaultCWDRunner,
         selfPID: Int32 = Int32(ProcessInfo.processInfo.processIdentifier)
     ) {
         self.runPS = runPS
+        self.runCWD = runCWD
         self.selfPID = selfPID
     }
 
-    /// Default runner: `ps -axww -o pid=,ppid=,pcpu=,etime=,args=`.
+    /// Default runner: `ps -axww -o pid=,ppid=,pcpu=,etime=,tty=,args=`.
     /// `=` suppresses headers; `-ww` prevents arg truncation.
     nonisolated static func defaultPSRunner() throws -> ProcessResult {
         try SystemProcessLauncher().run(
             executable: "/bin/ps",
-            arguments: ["-axww", "-o", "pid=,ppid=,pcpu=,etime=,args="],
+            arguments: ["-axww", "-o", "pid=,ppid=,pcpu=,etime=,tty=,args="],
+            environment: nil
+        )
+    }
+
+    /// One lsof spawn per scan tick for ALL matched pids (comma list), not
+    /// one per pid — the list is small (~15) and the tick runs only while
+    /// the Awake tab is visible.
+    nonisolated static func defaultCWDRunner(pids: [Int32]) throws -> ProcessResult {
+        try SystemProcessLauncher().run(
+            executable: "/usr/sbin/lsof",
+            arguments: ["-a", "-d", "cwd", "-p", pids.map(String.init).joined(separator: ","), "-Fn"],
             environment: nil
         )
     }
@@ -41,39 +58,70 @@ final class AgentProcessScanner {
     /// nil on ps failure — caller keeps its previous snapshot.
     func scan() async -> [AgentProcessInfo]? {
         let runPS = self.runPS
-        let result = try? await OffMain.run { try runPS() }
-        guard let result, result.exitCode == 0 else {
-            AppLog.shared.log("AgentProcessScanner: ps failed", level: .warn)
-            return nil
+        let runCWD = self.runCWD
+        let selfPID = self.selfPID
+        let procs: [AgentProcessInfo]? = await OffMain.run {
+            guard let result = try? runPS(), result.exitCode == 0 else { return nil }
+            var procs = Self.parse(psOutput: result.stdout, selfPID: selfPID)
+            guard !procs.isEmpty else { return procs }
+            // Best-effort enrichment; lsof can fail (permissions, raced
+            // exits) without invalidating the snapshot.
+            if let cwdResult = try? runCWD(procs.map(\.pid)), cwdResult.exitCode == 0 {
+                let cwds = Self.parseCWDs(lsofOutput: cwdResult.stdout)
+                for i in procs.indices {
+                    procs[i].workingDirectory = cwds[procs[i].pid]
+                }
+            }
+            return procs
         }
-        return Self.parse(psOutput: result.stdout, selfPID: selfPID)
+        if procs == nil {
+            AppLog.shared.log("AgentProcessScanner: ps failed", level: .warn)
+        }
+        return procs
     }
 
     // MARK: - Pure parsing (unit-test surface)
 
-    /// Each line: pid ppid pcpu etime args… — first four fields are
+    /// Each line: pid ppid pcpu etime tty args… — first five fields are
     /// whitespace-delimited; everything after is the command line (which
-    /// may itself contain spaces, so split with maxSplits: 4).
+    /// may itself contain spaces, so split with maxSplits: 5).
     nonisolated static func parse(psOutput: String, selfPID: Int32) -> [AgentProcessInfo] {
         psOutput.split(separator: "\n").compactMap { line in
-            let fields = line.split(separator: " ", maxSplits: 4, omittingEmptySubsequences: true)
-            guard fields.count == 5,
+            let fields = line.split(separator: " ", maxSplits: 5, omittingEmptySubsequences: true)
+            guard fields.count == 6,
                   let pid = Int32(fields[0]),
                   let ppid = Int32(fields[1]),
                   let cpu = Double(fields[2])
             else { return nil }
             guard pid != selfPID else { return nil }
-            let args = String(fields[4])
+            let args = String(fields[5])
             guard let provider = classify(args: args) else { return nil }
+            let tty = String(fields[4])
             return AgentProcessInfo(
                 pid: pid,
                 ppid: ppid,
                 provider: provider,
                 commandDisplay: displayName(args: args, provider: provider),
                 cpuPercent: cpu,
-                elapsed: String(fields[3])
+                elapsed: String(fields[3]),
+                tty: tty == "??" ? nil : tty
             )
         }
+    }
+
+    /// `lsof -Fn` emits `p<pid>` then `n<path>` per process; other field
+    /// prefixes (e.g. `fcwd`) are ignored.
+    nonisolated static func parseCWDs(lsofOutput: String) -> [Int32: String] {
+        var result: [Int32: String] = [:]
+        var currentPID: Int32?
+        for line in lsofOutput.split(separator: "\n") {
+            if line.hasPrefix("p"), let pid = Int32(line.dropFirst()) {
+                currentPID = pid
+            } else if line.hasPrefix("n"), let pid = currentPID, result[pid] == nil {
+                result[pid] = String(line.dropFirst())
+            }
+        }
+        return result
     }
 
     /// nil = not an agent process. Exclusions run first: the Antigravity

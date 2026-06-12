@@ -41,11 +41,11 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
     private var profileStore: ProfileStore!
 
     private let psOrphanAndLive = """
-      4821     1   0.2 02:13:45 /opt/homebrew/bin/codex app-server
-      9210   812   1.4    22:11 /Users/hau/.claude/local/claude --resume abc
+      4821     1   0.2 02:13:45 ??       /opt/homebrew/bin/codex app-server
+      9210   812   1.4    22:11 ttys016  /Users/hau/.claude/local/claude --resume abc
     """
     private let psLiveOnly = """
-      9210   812   1.4    22:11 /Users/hau/.claude/local/claude --resume abc
+      9210   812   1.4    22:11 ttys016  /Users/hau/.claude/local/claude --resume abc
     """
 
     override func setUp() async throws {
@@ -110,7 +110,11 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
             codexAutoProfileCoordinator: codexCoordStub,
             antigravityAutoProfileCoordinator: antigravityCoordStub,
             autoProfileMigrator: inertMigrator,
-            agentProcessScanner: AgentProcessScanner(runPS: { try ps.next() }, selfPID: 99999),
+            agentProcessScanner: AgentProcessScanner(
+                runPS: { try ps.next() },
+                // Stubbed so the test never spawns a real lsof.
+                runCWD: { _ in ProcessResult(stdout: "", stderr: "", exitCode: 1) },
+                selfPID: 99999),
             agentProcessKiller: killer,
             now: { Date() }
         )

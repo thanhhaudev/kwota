@@ -131,12 +131,27 @@ struct AgentProcessesCard: View {
                     .font(.callout)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text("PID \(String(proc.pid)) · \(String(format: "%.1f", proc.cpuPercent))% · \(proc.elapsed)")
+                Text(subtitle(for: proc))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(proc.workingDirectory ?? "")
             }
             Spacer(minLength: 8)
+            if proc.tty == nil && !proc.isOrphan {
+                // No controlling terminal: editor-spawned agent server (e.g.
+                // Zed Agent Panel) rather than an interactive session.
+                // Orphan rows skip it — the Orphan badge already implies
+                // detachment and row width is tight with the Kill button.
+                Text("background")
+                    .font(.system(size: 10, weight: .medium))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                    .foregroundStyle(.secondary)
+            }
             if proc.isOrphan {
                 Text("Orphan")
                     .font(.system(size: 10, weight: .semibold))
@@ -153,6 +168,20 @@ struct AgentProcessesCard: View {
                 .tint(.red)
             }
         }
+    }
+
+    /// "PID 4821 · 0.2% · 02:13:45 · kwota" — the trailing project name (cwd
+    /// basename) is what tells 14 look-alike claude sessions apart.
+    private func subtitle(for proc: AgentProcessInfo) -> String {
+        var parts = [
+            "PID \(String(proc.pid))",
+            "\(String(format: "%.1f", proc.cpuPercent))%",
+            proc.elapsed,
+        ]
+        if let project = proc.projectName {
+            parts.append(project)
+        }
+        return parts.joined(separator: " · ")
     }
 
     private func iconAsset(for provider: ProviderID) -> String {

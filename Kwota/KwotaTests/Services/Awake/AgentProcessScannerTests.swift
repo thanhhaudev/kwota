@@ -11,19 +11,19 @@ final class AgentProcessScannerTests: XCTestCase {
 
     // MARK: - parse: fixtures
 
-    /// Realistic `ps -axww -o pid=,ppid=,pcpu=,etime=,args=` output.
+    /// Realistic `ps -axww -o pid=,ppid=,pcpu=,etime=,tty=,args=` output.
     /// Covers: orphan codex, live claude with flag args, day-format etime,
     /// Antigravity language_server, foreign (Codeium) language_server,
     /// Antigravity Electron helper, node-hosted codex-companion, and a
-    /// non-agent process.
+    /// non-agent process. `??` = no controlling terminal (background).
     private let fixture = """
-      4821     1   0.2 02:13:45 /opt/homebrew/bin/codex app-server
-      9210   812   1.4    22:11 /Users/hau/.claude/local/claude --resume abc123
-      1203     1   0.0 3-01:22:33 /Applications/Antigravity.app/Contents/Resources/app/extensions/bin/language_server_macos_arm --serve
-      3333     1   0.0    10:00 /usr/local/bin/language_server_macos_arm --codeium
-       544     1   0.0    01:02 /Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper --type=utility
-      7777   500   0.0    05:00 node /Users/hau/.codex/plugins/codex-companion.mjs --port 1234
-      8888     1   0.0    00:30 /usr/sbin/cupsd -l
+      4821     1   0.2 02:13:45 ??       /opt/homebrew/bin/codex app-server
+      9210   812   1.4    22:11 ttys066  /Users/hau/.claude/local/claude --resume abc123
+      1203     1   0.0 3-01:22:33 ??       /Applications/Antigravity.app/Contents/Resources/app/extensions/bin/language_server_macos_arm --serve
+      3333     1   0.0    10:00 ??       /usr/local/bin/language_server_macos_arm --codeium
+       544     1   0.0    01:02 ??       /Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper --type=utility
+      7777   500   0.0    05:00 ??       node /Users/hau/.codex/plugins/codex-companion.mjs --port 1234
+      8888     1   0.0    00:30 ??       /usr/sbin/cupsd -l
     """
 
     func test_parse_matchesAgentProcessesOnly() {
@@ -40,6 +40,31 @@ final class AgentProcessScannerTests: XCTestCase {
         XCTAssertEqual(codex.cpuPercent, 0.2, accuracy: 0.001)
         XCTAssertEqual(codex.elapsed, "02:13:45")
         XCTAssertTrue(codex.isOrphan)
+    }
+
+    func test_parse_ttyExtracted() {
+        let procs = AgentProcessScanner.parse(psOutput: fixture, selfPID: 99999)
+        XCTAssertNil(procs[0].tty, "?? means no controlling terminal")
+        XCTAssertEqual(procs[1].tty, "ttys066")
+    }
+
+    // MARK: - parseCWDs (lsof -Fn batch output)
+
+    func test_parseCWDs_mapsPidToPath() {
+        let out = """
+        p4821
+        n/Users/hau/SideProjects/kwota
+        p9210
+        n/Users/hau/SideProjects/kashback-system
+        """
+        let map = AgentProcessScanner.parseCWDs(lsofOutput: out)
+        XCTAssertEqual(map[4821], "/Users/hau/SideProjects/kwota")
+        XCTAssertEqual(map[9210], "/Users/hau/SideProjects/kashback-system")
+    }
+
+    func test_parseCWDs_ignoresOtherFieldLines() {
+        let out = "p4821\nfcwd\nn/tmp\ngarbage\n"
+        XCTAssertEqual(AgentProcessScanner.parseCWDs(lsofOutput: out), [4821: "/tmp"])
     }
 
     func test_parse_dayFormatEtimeKeptRaw() {
@@ -126,12 +151,42 @@ final class AgentProcessScannerTests: XCTestCase {
     func test_scan_success_returnsParsedRows() async {
         let scanner = AgentProcessScanner(
             runPS: { ProcessResult(
-                stdout: "  4821     1   0.2 02:13:45 /opt/homebrew/bin/codex app-server\n",
+                stdout: "  4821     1   0.2 02:13:45 ??       /opt/homebrew/bin/codex app-server\n",
                 stderr: "", exitCode: 0) },
             selfPID: 99999
         )
         let rows = await scanner.scan()
         XCTAssertEqual(rows?.map(\.pid), [4821])
+    }
+
+    func test_scan_enrichesWorkingDirectory() async {
+        let scanner = AgentProcessScanner(
+            runPS: { ProcessResult(
+                stdout: "  4821     1   0.2 02:13:45 ??       /opt/homebrew/bin/codex app-server\n",
+                stderr: "", exitCode: 0) },
+            runCWD: { pids in
+                XCTAssertEqual(pids, [4821])
+                return ProcessResult(stdout: "p4821\nn/Users/hau/SideProjects/kwota\n",
+                                     stderr: "", exitCode: 0)
+            },
+            selfPID: 99999
+        )
+        let rows = await scanner.scan()
+        XCTAssertEqual(rows?.first?.workingDirectory, "/Users/hau/SideProjects/kwota")
+    }
+
+    func test_scan_cwdFailure_leavesRowsWithoutDirectory() async {
+        struct Boom: Error {}
+        let scanner = AgentProcessScanner(
+            runPS: { ProcessResult(
+                stdout: "  4821     1   0.2 02:13:45 ??       /opt/homebrew/bin/codex app-server\n",
+                stderr: "", exitCode: 0) },
+            runCWD: { _ in throw Boom() },
+            selfPID: 99999
+        )
+        let rows = await scanner.scan()
+        XCTAssertEqual(rows?.map(\.pid), [4821], "cwd lookup is best-effort, never fatal")
+        XCTAssertNil(rows?.first?.workingDirectory)
     }
 
     func test_scan_nonzeroExit_returnsNil() async {
