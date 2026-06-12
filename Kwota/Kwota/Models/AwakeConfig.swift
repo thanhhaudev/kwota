@@ -28,6 +28,32 @@ enum IdleWindow: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+/// How long the user must be away (no keyboard / mouse / trackpad input)
+/// before auto mode is allowed to raise the assertion. While the user is
+/// actively at the Mac, macOS can't idle-sleep anyway, so caffeinating is
+/// pointless — the gate keeps the awake tint meaning "Kwota actually had
+/// to keep the Mac awake". `.off` restores the ungated behavior.
+enum UserIdleGate: String, CaseIterable, Codable, Identifiable {
+    case off, s30, m1, m2
+    var id: String { rawValue }
+    var seconds: TimeInterval? {
+        switch self {
+        case .off: return nil
+        case .s30: return 30
+        case .m1:  return 60
+        case .m2:  return 120
+        }
+    }
+    var label: String {
+        switch self {
+        case .off: return "Off"
+        case .s30: return "30 s"
+        case .m1:  return "1 min"
+        case .m2:  return "2 min"
+        }
+    }
+}
+
 enum BatteryThreshold: String, CaseIterable, Codable, Identifiable {
     case off, p10, p15, p20, p25, p30
     var id: String { rawValue }
@@ -84,6 +110,7 @@ struct AwakeConfig: Codable, Equatable {
     var idleWindow: IdleWindow
     var batteryThreshold: BatteryThreshold
     var forceTimeout: TimeoutChoice
+    var userIdleGate: UserIdleGate
 
     static let `default` = AwakeConfig(
         autoEnabled: true,
@@ -95,7 +122,8 @@ struct AwakeConfig: Codable, Equatable {
         ),
         idleWindow: .m5,
         batteryThreshold: .p20,
-        forceTimeout: .h2
+        forceTimeout: .h2,
+        userIdleGate: .m1
     )
 
     init(
@@ -103,13 +131,15 @@ struct AwakeConfig: Codable, Equatable {
         flags: CaffeinateOptions,
         idleWindow: IdleWindow,
         batteryThreshold: BatteryThreshold,
-        forceTimeout: TimeoutChoice
+        forceTimeout: TimeoutChoice,
+        userIdleGate: UserIdleGate = .m1
     ) {
         self.autoEnabled = autoEnabled
         self.flags = flags
         self.idleWindow = idleWindow
         self.batteryThreshold = batteryThreshold
         self.forceTimeout = forceTimeout
+        self.userIdleGate = userIdleGate
     }
 
     /// Decode missing fields to their default values, gracefully fall back
@@ -125,6 +155,7 @@ struct AwakeConfig: Codable, Equatable {
         self.idleWindow       = (try? c.decode(IdleWindow.self,        forKey: .idleWindow))       ?? d.idleWindow
         self.batteryThreshold = (try? c.decode(BatteryThreshold.self,  forKey: .batteryThreshold)) ?? d.batteryThreshold
         self.forceTimeout     = (try? c.decode(TimeoutChoice.self,     forKey: .forceTimeout))     ?? d.forceTimeout
+        self.userIdleGate     = (try? c.decode(UserIdleGate.self,      forKey: .userIdleGate))     ?? d.userIdleGate
         self.flags            = Self.resolveFlags(decoder: decoder, container: c, default: d.flags)
     }
 
@@ -148,7 +179,7 @@ struct AwakeConfig: Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case autoEnabled, flags, idleWindow, batteryThreshold, forceTimeout
+        case autoEnabled, flags, idleWindow, batteryThreshold, forceTimeout, userIdleGate
     }
 
     /// Decode-only keys for one-shot migration from the old `autoFlags`/

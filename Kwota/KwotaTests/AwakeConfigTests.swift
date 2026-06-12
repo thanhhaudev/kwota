@@ -170,4 +170,40 @@ final class AwakeConfigTests: XCTestCase {
         XCTAssertNil(dict["autoFlags"], "encoder must not re-emit legacy autoFlags")
         XCTAssertNil(dict["forceFlags"], "encoder must not re-emit legacy forceFlags")
     }
+
+    func testUserIdleGate_secondsMapping() {
+        XCTAssertNil(UserIdleGate.off.seconds)
+        XCTAssertEqual(UserIdleGate.s30.seconds, 30)
+        XCTAssertEqual(UserIdleGate.m1.seconds, 60)
+        XCTAssertEqual(UserIdleGate.m2.seconds, 120)
+    }
+
+    func testDefaultConfig_userIdleGateIsOneMinute() {
+        XCTAssertEqual(AwakeConfig.default.userIdleGate, .m1)
+    }
+
+    func testDecode_missingUserIdleGate_defaultsToOneMinute() throws {
+        // Payload shaped like a pre-gate build's output.
+        let json = """
+        {"autoEnabled": true, "idleWindow": "m5"}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(AwakeConfig.self, from: json)
+        XCTAssertEqual(decoded.userIdleGate, .m1)
+    }
+
+    func testDecode_unknownUserIdleGate_fallsBackToDefault() throws {
+        let json = """
+        {"userIdleGate": "h99"}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(AwakeConfig.self, from: json)
+        XCTAssertEqual(decoded.userIdleGate, .m1)
+    }
+
+    func testCodableRoundTrip_preservesUserIdleGate() throws {
+        var cfg = AwakeConfig.default
+        cfg.userIdleGate = .off
+        let data = try JSONEncoder().encode(cfg)
+        let decoded = try JSONDecoder().decode(AwakeConfig.self, from: data)
+        XCTAssertEqual(decoded.userIdleGate, .off)
+    }
 }
