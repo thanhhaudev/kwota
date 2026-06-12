@@ -1,28 +1,32 @@
 # Kwota
 
-Token usage tracker for AI coding assistants. Lives in the menu bar; toggles `caffeinate` and previews the local Claude cache.
+Token usage tracker for AI coding assistants. Lives in the menu bar; auto-keeps your Mac awake while agents are working, and tracks caches on your machine.
 
-Personal project, single developer. macOS 14.0+, Xcode 16+.
+Hobby project, built for fun. macOS 14.0+ to run, Xcode 16+ to build.
+
+![Kwota preview](assets/preview.gif)
 
 ## Providers
 
 | Provider    | Tracked                                              | Source                                                                          |
 | ----------- | ---------------------------------------------------- | ------------------------------------------------------------------------------- |
-| Claude Code | 5-hour session, weekly limit, per-model breakdown    | `claude.ai/api/usage` (OAuth) + `~/.claude/projects/**/*.jsonl`                 |
+| Claude Code | 5-hour session, weekly limit, per-model breakdown    | `api.anthropic.com/api/oauth/usage` (OAuth via Claude CLI auth) + `~/.claude/projects/**/*.jsonl` |
 | Codex       | 5-hour + weekly buckets                              | `wham/usage`                                                                    |
 | Antigravity | Credit pools + per-model quotas                      | local Connect-RPC `GetUserStatus`                                               |
 
 ## Build
 
 ```bash
-make build          # debug
-make run            # build + launch
-make release-app    # release build → build/Release/Kwota.app
-make test           # unit tests (~90s, parallel)
-make help           # all targets
+make build                       # debug
+make run                         # build + launch
+make release-app                 # release build → build/Release/Kwota.app
+make test                        # unit tests (~90s, parallel)
+make test-only SUITE=<Name>      # one suite, no rebuild
+make test-all                    # include UI tests (serial)
+make help                        # all targets
 ```
 
-DerivedData is shared at `~/Library/Developer/Xcode/DerivedData/Kwota-shared`.
+DerivedData is shared at `~/Library/Developer/Xcode/DerivedData/Kwota-shared`. The UI test target is excluded from `make test` by default.
 
 ## Install
 
@@ -38,9 +42,9 @@ If `Install` errors after a previous attempt: `sudo sfltool resetbtm`.
 
 **Usage** — per-provider quota view (see the Providers table above). Each provider gets a session chart with an `avg` reference line (typical % at the same point in past cycles) and a pace hint ("on track", "above typical", etc.). A Free-plan overlay shows for Claude accounts with no paid subscription.
 
-**Awake** — toggle `caffeinate` (manual / auto / battery-aware). Below it: a multi-provider activity chart of recent agent replies. Keep-awake reasons are stacked separately — auto (green), manual (blue), battery (orange).
+**Awake** — toggle `caffeinate` (manual / auto / battery-aware). Below it: a multi-provider activity chart of recent agent replies. The chart shades each awake interval by mode — auto (green) or manual (blue). Battery (orange) shows up as the status dot in the card, menu-bar icon, and Settings row when auto is blocked by a low-battery threshold.
 
-**Cache** — previews `~/.claude/projects/` with size breakdown and an AI evaluation per row. System-wide icon caches also appear here once the privileged helper is installed.
+**Cache** — tracks caches across your machine: developer tooling (Xcode DerivedData, npm / bun / yarn / pnpm, pip, Homebrew, JetBrains, VS Code, Cursor), iOS Simulator / DeviceSupport, the macOS Icon services cache, generic `~/.cache`, and more. Each row shows a size breakdown and an AI evaluation. System-wide caches that need root also appear here once the privileged helper is installed.
 
 ## How polling works
 
@@ -54,7 +58,7 @@ Manual refresh (chart button or "Refresh" shortcut) respects the same back-off a
 
 ## How token data is collected
 
-Kwota never invokes `claude` or `codex` to read usage — that would burn quota.
+Kwota never invokes `claude`, `codex`, or `agy` to read usage — that would burn quota.
 
 The Cache tab's "AI evaluation" is the one feature that does spawn `claude -p` (Anthropic blocks 3rd-party API access). It uses your normal subscription quota; Kwota tells you when it happens.
 
@@ -70,23 +74,13 @@ For any elapsed time `t` in the current cycle, `avg(t)` is the mean of `value(t)
 
 Claude and Codex share the same chart. Two views:
 
-- **Session** — bars per hour of the current 5-hour cycle. The latest bar is the focal bar; an extra ghost bar projects the next hour from the last 2-3 deltas.
+- **Session** — bars per hour of the current 5-hour cycle. The latest bar is the focal bar; an extra ghost bar projects the next hour from up to the last 3 hour-to-hour deltas.
 - **Week** — bars per day of the current 7-day cycle.
 
 Each bar's color comes from its own value — green → yellow → red as it approaches the limit. The session's focal bar adds a slow "warm pulse" when the pace is heavy. The dashed green `avg` line (toggleable) sits over the bars. Before the first successful fetch, the chart shows "Waiting for first fetch…".
 
-## Tests
-
-```bash
-make test                          # unit suite
-make test-only SUITE=<Name>        # one suite, no rebuild
-make test-all                      # include UI tests
-```
-
-The UI test target is excluded from `make test` by default.
-
 ## Notes
 
-- Sandbox-disabled. Launches `/usr/bin/caffeinate`, probes `claude --version`, holds IOKit power assertions, reads `~/.claude/` directly. Distribute as a Developer-ID-signed `.app`, not via the Mac App Store.
-- `claude` / `codex` are resolved against an augmented PATH that includes `/opt/homebrew/bin` and `/usr/local/bin`.
+- Sandbox-disabled. Launches `/usr/bin/caffeinate`, probes `claude --version` / `codex --version` / `agy --version`, holds IOKit power assertions, and reads `~/.claude/`, `~/.codex/`, and `~/.gemini/antigravity*/` directly. Distribute as a Developer-ID-signed `.app`, not via the Mac App Store.
+- `claude` / `codex` / `agy` are resolved against an augmented PATH that includes `/opt/homebrew/bin` and `/usr/local/bin`.
 - No remote backend — only reads provider files and APIs.
