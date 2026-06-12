@@ -5,9 +5,26 @@
 
 import SwiftUI
 
+/// Path display for cache rows: a row inside the user's home directory
+/// drops the "/Users/<name>" prefix — ~40% of the line that carries no
+/// information, every user row shares it — and signals the scope with a
+/// house glyph instead. Paths outside home pass through unchanged.
+enum CachePathDisplay {
+    static func abbreviate(_ path: String, home: String) -> (inHome: Bool, display: String) {
+        let home = home.hasSuffix("/") ? String(home.dropLast()) : home
+        guard !home.isEmpty, path.hasPrefix(home + "/") else {
+            return (false, path)
+        }
+        let remainder = String(path.dropFirst(home.count + 1))
+        guard !remainder.isEmpty else { return (false, path) }
+        return (true, remainder)
+    }
+}
+
 /// Single row in the popover Cache list. Three-line layout (AI annotation
-/// is conditional): name + chips + size on top, path in the middle, optional
-/// AI summary on the bottom. Trailing ⋯ menu houses per-row actions.
+/// is conditional): name + chips on top, size + path in the middle,
+/// optional AI summary on the bottom. Trailing ⋯ menu houses per-row
+/// actions.
 struct CacheRowView: View {
     let row: CachePathRow
     /// True when this (non-system) row shares its name with a system row, so
@@ -54,7 +71,6 @@ struct CacheRowView: View {
                         .foregroundStyle(row.exists ? .primary : .secondary)
                     chips
                     Spacer(minLength: 8)
-                    sizeOrStatus
                     CacheRowMenu(
                         row: row,
                         isReEvaluating: isReEvaluating,
@@ -69,11 +85,7 @@ struct CacheRowView: View {
                     )
                 }
 
-                Text(row.path.path)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                infoLine
 
                 aiAnnotation
             }
@@ -86,29 +98,59 @@ struct CacheRowView: View {
         .accessibilityLabel(Text(accessibilityDescription))
     }
 
-    /// The trailing status pill in the row's top line. Normally the size
-    /// badge; while the row's clean is in flight it swaps in place to a
-    /// mini spinner + "Removing…" — inline feedback that doesn't cover the
-    /// path or other info.
+    /// Middle info line: "💾 1.2 GB · 🏠 Library/Caches/Claude". Size leads
+    /// the line (left-anchored, monospaced) so sizes still scan vertically
+    /// across rows after moving off the top line; the path truncates in the
+    /// middle independently so the size never gets cut. While the row's
+    /// clean is in flight the size segment swaps in place to a mini spinner
+    /// + "Removing…" — same inline feedback as the old trailing capsule.
     @ViewBuilder
-    private var sizeOrStatus: some View {
-        if isCleaning {
-            HStack(spacing: 4) {
-                ProgressView()
-                    .controlSize(.mini)
-                Text("Removing…")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
+    private var infoLine: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            if isCleaning {
+                HStack(spacing: 4) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text("Removing…")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityLabel(Text("Removing \(row.displayName)"))
+            } else {
+                (inlineIcon("internaldrive")
+                    + Text(row.exists ? formatBytes(row.sizeBytes) : "—"))
+                    .font(.system(size: 11, weight: .medium).monospacedDigit())
+                    .foregroundStyle(row.exists ? .primary : .secondary)
             }
-            .accessibilityLabel(Text("Removing \(row.displayName)"))
-        } else {
-            Text(row.exists ? formatBytes(row.sizeBytes) : "—")
-                .font(.system(size: 10, weight: .medium).monospacedDigit())
-                .foregroundStyle(row.exists ? .primary : .secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Capsule().fill(Color.secondary.opacity(0.14)))
+            pathText
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                // The home prefix is hidden in the display string — keep
+                // the full literal path one hover away.
+                .help(row.path.path)
         }
+    }
+
+    /// "· 🏠 Library/Caches/Claude" for home-relative paths, the raw path
+    /// for everything else (e.g. /Library/Caches system rows).
+    private var pathText: Text {
+        let abbrev = CachePathDisplay.abbreviate(row.path.path, home: NSHomeDirectory())
+        if abbrev.inHome {
+            return Text("· ") + inlineIcon("house") + Text(abbrev.display)
+        }
+        return Text("· \(abbrev.display)")
+    }
+
+    /// Field glyph inside the info line — same sizing trick as the Awake
+    /// tab's agent-process subtitle: slightly under the text size and
+    /// nudged up half a point so it reads as a label, not a character.
+    private func inlineIcon(_ systemName: String) -> Text {
+        Text(Image(systemName: systemName))
+            .font(.system(size: 8.5))
+            .baselineOffset(0.5)
+            + Text(" ")
     }
 
     @ViewBuilder
