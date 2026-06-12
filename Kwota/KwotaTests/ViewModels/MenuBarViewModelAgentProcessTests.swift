@@ -269,6 +269,22 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
         XCTAssertEqual(killer.killedPIDs, [9210])
     }
 
+    func test_kill_marksRowAsKillingWhileInFlight() async {
+        // The TERM -> grace -> KILL window takes ~1s; the UI shows a spinner
+        // on the row via killingAgentPIDs for its whole duration.
+        let runner = GatedPSRunner([psOrphanAndLive, psOrphanAndLive])
+        let vm = makeVM(runPS: { try runner.next() }, killer: RecordingKiller())
+        await vm.scanAgentProcessesNow() // call 0
+        let target = vm.agentProcesses.first { $0.pid == 4821 }!
+        XCTAssertFalse(vm.killingAgentPIDs.contains(4821))
+        let kill = Task { await vm.killAgentProcess(target) } // call 1 blocks
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(vm.killingAgentPIDs.contains(4821), "in-flight kill must be visible")
+        runner.gate.signal()
+        await kill.value
+        XCTAssertFalse(vm.killingAgentPIDs.contains(4821), "cleared when the kill ends")
+    }
+
     func test_kill_escalatesToSigkillWhenTermIgnored() async {
         // Claude Code ACP sessions trap SIGTERM. Queue: initial scan,
         // pre-TERM verify, post-TERM rescan (survived), pre-KILL verify,

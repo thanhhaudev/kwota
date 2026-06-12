@@ -414,6 +414,9 @@ final class MenuBarViewModel {
     private(set) var agentProcesses: [AgentProcessInfo] = []
     /// Inline-alert text for a failed kill; nil hides the alert.
     private(set) var agentProcessKillNotice: String?
+    /// Rows with a kill in flight (TERM -> grace -> KILL spans ~1s); the
+    /// UI swaps their controls for a spinner.
+    private(set) var killingAgentPIDs: Set<Int32> = []
     private var agentProcessPollTask: Task<Void, Never>?
     /// Bumped by stopAgentProcessPolling; an in-flight scan that started
     /// under an older generation discards its result instead of clobbering
@@ -1068,6 +1071,8 @@ final class MenuBarViewModel {
     /// differ — the parent can die while the confirm is pending.
     func killAgentProcess(_ target: AgentProcessInfo) async {
         agentProcessKillNotice = nil
+        killingAgentPIDs.insert(target.pid)
+        defer { killingAgentPIDs.remove(target.pid) }
         guard await verifiedCurrentRow(for: target) != nil else {
             agentProcessKillNotice = "\(target.commandDisplay) (PID \(target.pid)) is gone or changed; nothing was killed."
             AppLog.shared.log("killAgentProcess pid=\(target.pid) aborted: identity changed", level: .info)

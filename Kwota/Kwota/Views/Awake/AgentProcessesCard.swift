@@ -159,7 +159,13 @@ struct AgentProcessesCard: View {
                     .help(proc.workingDirectory ?? "")
             }
             Spacer(minLength: 8)
-            if confirmingKillPID == proc.pid {
+            if vm.killingAgentPIDs.contains(proc.pid) {
+                // Kill in flight (TERM -> grace -> KILL): spinner replaces
+                // the controls so the row can't be re-confirmed meanwhile.
+                ProgressView()
+                    .controlSize(.small)
+                    .help("Killing…")
+            } else if confirmingKillPID == proc.pid {
                 // Step 2 of the inline confirm — replaces the glyph with an
                 // explicit destructive choice. Stays inside the popover
                 // (an alert would steal key status and close it).
