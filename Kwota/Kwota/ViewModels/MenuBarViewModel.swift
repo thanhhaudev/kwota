@@ -414,11 +414,6 @@ final class MenuBarViewModel {
     private(set) var agentProcesses: [AgentProcessInfo] = []
     /// Inline-alert text for a failed kill; nil hides the alert.
     private(set) var agentProcessKillNotice: String?
-    /// Armed when SIGTERM left the process running — the inline alert
-    /// offers a Force Kill (SIGKILL) action for this row. Claude Code's
-    /// editor-spawned sessions trap SIGTERM, so this is the only way to
-    /// clean them from the UI.
-    private(set) var agentProcessKillRetryTarget: AgentProcessInfo?
     private var agentProcessPollTask: Task<Void, Never>?
     /// Bumped by stopAgentProcessPolling; an in-flight scan that started
     /// under an older generation discards its result instead of clobbering
@@ -1060,23 +1055,20 @@ final class MenuBarViewModel {
         }
     }
 
-    /// SIGTERM + delayed rescan. Any listed row is killable — editors like
-    /// Zed keep agent-panel sessions alive (live ppid, no terminal) long
-    /// after their window closes, so "not an orphan" doesn't mean "in use".
-    /// The confirmation alert is the safety gate.
+    /// Kill with automatic escalation, mirroring launchctl semantics:
+    /// SIGTERM first (well-behaved processes flush and exit within the
+    /// grace window), then SIGKILL if the process is still there — Claude
+    /// Code's editor-spawned sessions trap SIGTERM, so without escalation
+    /// the rows users most want to clean are unkillable. Any listed row is
+    /// killable; the inline confirm is the safety gate.
     ///
-    /// Takes the full row captured when the alert was presented: the alert
-    /// can sit open while the 5s poll goes stale (or ps fails repeatedly),
-    /// and macOS reuses pids — so the kill re-scans and requires the pid to
-    /// still carry the same identity. ppid is allowed to differ: the parent
-    /// may have died (live → orphan) between presenting and confirming.
+    /// Takes the full row captured at confirm time: the confirm can sit
+    /// while the 5s poll goes stale and macOS reuses pids, so both signals
+    /// re-verify that the pid still carries the same identity. ppid may
+    /// differ — the parent can die while the confirm is pending.
     func killAgentProcess(_ target: AgentProcessInfo) async {
         agentProcessKillNotice = nil
-        agentProcessKillRetryTarget = nil
-        await scanAgentProcessesNow()
-        guard let current = agentProcesses.first(where: { $0.pid == target.pid }),
-              current.commandDisplay == target.commandDisplay,
-              current.provider == target.provider else {
+        guard await verifiedCurrentRow(for: target) != nil else {
             agentProcessKillNotice = "\(target.commandDisplay) (PID \(target.pid)) is gone or changed; nothing was killed."
             AppLog.shared.log("killAgentProcess pid=\(target.pid) aborted: identity changed", level: .info)
             return
@@ -1086,9 +1078,21 @@ final class MenuBarViewModel {
         case .terminated, .alreadyGone:
             try? await Task.sleep(nanoseconds: agentProcessRescanDelayNanos)
             await scanAgentProcessesNow()
-            if agentProcesses.contains(where: { $0.pid == pid }) {
-                agentProcessKillNotice = "\(target.commandDisplay) (PID \(pid)) did not exit. SIGTERM was sent; the process may be busy or ignoring it."
-                agentProcessKillRetryTarget = target
+            guard agentProcesses.contains(where: { $0.pid == pid }) else { break } // graceful exit
+            // SIGTERM ignored — escalate. Re-verify identity once more:
+            // the survivor must still be the same process, not a reuse.
+            guard await verifiedCurrentRow(for: target) != nil else { break }
+            switch agentProcessKiller.forceTerminate(pid: pid) {
+            case .terminated, .alreadyGone:
+                try? await Task.sleep(nanoseconds: agentProcessRescanDelayNanos)
+                await scanAgentProcessesNow()
+                if agentProcesses.contains(where: { $0.pid == pid }) {
+                    agentProcessKillNotice = "\(target.commandDisplay) (PID \(pid)) survived SIGKILL — it may be stuck in the kernel."
+                }
+            case .permissionDenied:
+                agentProcessKillNotice = "Permission denied killing \(target.commandDisplay) (PID \(pid))."
+            case .failed(let code):
+                agentProcessKillNotice = "Failed to kill \(target.commandDisplay) (PID \(pid)) — errno \(code)."
             }
         case .permissionDenied:
             agentProcessKillNotice = "Permission denied killing \(target.commandDisplay) (PID \(pid))."
@@ -1098,31 +1102,13 @@ final class MenuBarViewModel {
         AppLog.shared.log("killAgentProcess pid=\(pid) notice=\(agentProcessKillNotice ?? "ok")", level: .info)
     }
 
-    /// SIGKILL escalation behind the "Force Kill" action on the survivor
-    /// notice. Same fresh-scan identity check as the SIGTERM path; a row
-    /// that vanished in the meantime means the process exited after all —
-    /// clear the notice and walk away.
-    func forceKillAgentProcess(_ target: AgentProcessInfo) async {
-        agentProcessKillNotice = nil
-        agentProcessKillRetryTarget = nil
+    /// Fresh scan + identity match (command + provider; ppid free to change).
+    private func verifiedCurrentRow(for target: AgentProcessInfo) async -> AgentProcessInfo? {
         await scanAgentProcessesNow()
         guard let current = agentProcesses.first(where: { $0.pid == target.pid }),
               current.commandDisplay == target.commandDisplay,
-              current.provider == target.provider else { return }
-        let pid = target.pid
-        switch agentProcessKiller.forceTerminate(pid: pid) {
-        case .terminated, .alreadyGone:
-            try? await Task.sleep(nanoseconds: agentProcessRescanDelayNanos)
-            await scanAgentProcessesNow()
-            if agentProcesses.contains(where: { $0.pid == pid }) {
-                agentProcessKillNotice = "\(target.commandDisplay) (PID \(pid)) survived SIGKILL — it may be stuck in the kernel."
-            }
-        case .permissionDenied:
-            agentProcessKillNotice = "Permission denied force-killing \(target.commandDisplay) (PID \(pid))."
-        case .failed(let code):
-            agentProcessKillNotice = "Failed to force-kill \(target.commandDisplay) (PID \(pid)) — errno \(code)."
-        }
-        AppLog.shared.log("forceKillAgentProcess pid=\(pid) notice=\(agentProcessKillNotice ?? "ok")", level: .info)
+              current.provider == target.provider else { return nil }
+        return current
     }
 
     /// Single source of truth for "is it safe to issue a usage fetch right

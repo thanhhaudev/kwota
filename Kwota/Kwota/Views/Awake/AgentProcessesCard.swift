@@ -61,17 +61,11 @@ struct AgentProcessesCard: View {
             .kwotaCard()
 
             if let notice = vm.agentProcessKillNotice {
-                // Survivor notices arm a Force Kill (SIGKILL) action —
-                // Claude Code's editor-spawned sessions trap SIGTERM.
                 KwotaInlineAlert(
                     tint: .orange,
                     icon: "exclamationmark.triangle.fill",
                     title: "Kill failed",
-                    detail: notice,
-                    actionTitle: vm.agentProcessKillRetryTarget != nil ? "Force Kill" : nil,
-                    onAction: vm.agentProcessKillRetryTarget.map { target in
-                        { Task { await vm.forceKillAgentProcess(target) } }
-                    }
+                    detail: notice
                 )
             }
         }
@@ -200,7 +194,7 @@ struct AgentProcessesCard: View {
                 .onHover { hovering in
                     hoveredKillPID = hovering ? proc.pid : nil
                 }
-                .help("Kill process (SIGTERM)")
+                .help("Kill process (SIGTERM, then SIGKILL if ignored)")
                 .accessibilityLabel("Kill \(proc.commandDisplay), PID \(String(proc.pid))")
             }
         }

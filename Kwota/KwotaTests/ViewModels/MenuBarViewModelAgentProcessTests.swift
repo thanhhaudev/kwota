@@ -269,50 +269,50 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
         XCTAssertEqual(killer.killedPIDs, [9210])
     }
 
-    func test_killOrphan_survivor_setsNotice() async {
-        // Same ps output before and after the kill — process refused SIGTERM.
-        let ps = StubPSRunner([StubPSRunner.ok(psOrphanAndLive)])
-        let vm = makeVM(ps: ps, killer: RecordingKiller())
-        await vm.scanAgentProcessesNow()
-        await vm.killAgentProcess(vm.agentProcesses.first { $0.pid == 4821 }!)
-        XCTAssertNotNil(vm.agentProcessKillNotice)
-        XCTAssertTrue(vm.agentProcessKillNotice?.contains("did not exit") == true)
-        XCTAssertEqual(vm.agentProcessKillRetryTarget?.pid, 4821,
-                       "survivor must arm the Force Kill action")
-    }
-
-    func test_forceKill_sigkillsSurvivorAndClears() async {
-        // SIGTERM survivor (Claude Code ACP sessions trap SIGTERM), then
-        // Force Kill: SIGKILL lands and the post-rescan shows the row gone.
-        let ps = StubPSRunner([StubPSRunner.ok(psOrphanAndLive),  // initial
-                               StubPSRunner.ok(psOrphanAndLive),  // pre-kill verify
-                               StubPSRunner.ok(psOrphanAndLive),  // post-TERM rescan: survived
-                               StubPSRunner.ok(psOrphanAndLive),  // pre-force verify
-                               StubPSRunner.ok(psLiveOnly)])      // post-KILL rescan: gone
+    func test_kill_escalatesToSigkillWhenTermIgnored() async {
+        // Claude Code ACP sessions trap SIGTERM. Queue: initial scan,
+        // pre-TERM verify, post-TERM rescan (survived), pre-KILL verify,
+        // post-KILL rescan (gone). One user action, no notice.
+        let ps = StubPSRunner([StubPSRunner.ok(psOrphanAndLive),
+                               StubPSRunner.ok(psOrphanAndLive),
+                               StubPSRunner.ok(psOrphanAndLive),
+                               StubPSRunner.ok(psOrphanAndLive),
+                               StubPSRunner.ok(psLiveOnly)])
         let killer = RecordingKiller()
         let vm = makeVM(ps: ps, killer: killer)
         await vm.scanAgentProcessesNow()
         await vm.killAgentProcess(vm.agentProcesses.first { $0.pid == 4821 }!)
-        let retry = vm.agentProcessKillRetryTarget
-        XCTAssertNotNil(retry)
-        await vm.forceKillAgentProcess(retry!)
-        XCTAssertEqual(killer.forceKilledPIDs, [4821])
-        XCTAssertNil(vm.agentProcessKillNotice, "force kill succeeded; notice clears")
-        XCTAssertNil(vm.agentProcessKillRetryTarget)
+        XCTAssertEqual(killer.killedPIDs, [4821], "SIGTERM attempted first")
+        XCTAssertEqual(killer.forceKilledPIDs, [4821], "auto-escalated to SIGKILL")
+        XCTAssertNil(vm.agentProcessKillNotice)
         XCTAssertEqual(vm.agentProcesses.map(\.pid), [9210])
     }
 
-    func test_forceKill_rowAlreadyGone_noSyscallNoNotice() async {
-        // Process died between arming Force Kill and clicking it.
+    func test_kill_noEscalationWhenTermSucceeds() async {
+        // Well-behaved process exits within the grace window — SIGKILL
+        // must never fire.
         let ps = StubPSRunner([StubPSRunner.ok(psOrphanAndLive),
-                               StubPSRunner.ok(psLiveOnly)]) // pre-force verify: gone
+                               StubPSRunner.ok(psOrphanAndLive),
+                               StubPSRunner.ok(psLiveOnly)])
         let killer = RecordingKiller()
         let vm = makeVM(ps: ps, killer: killer)
         await vm.scanAgentProcessesNow()
-        let target = vm.agentProcesses.first { $0.pid == 4821 }!
-        await vm.forceKillAgentProcess(target)
-        XCTAssertTrue(killer.forceKilledPIDs.isEmpty)
+        await vm.killAgentProcess(vm.agentProcesses.first { $0.pid == 4821 }!)
+        XCTAssertEqual(killer.killedPIDs, [4821])
+        XCTAssertTrue(killer.forceKilledPIDs.isEmpty, "graceful exit; no SIGKILL")
         XCTAssertNil(vm.agentProcessKillNotice)
+    }
+
+    func test_kill_sigkillSurvivor_setsNotice() async {
+        // Same snapshot at every step: even SIGKILL left it visible
+        // (kernel-stuck). The notice says so; nothing more to offer.
+        let ps = StubPSRunner([StubPSRunner.ok(psOrphanAndLive)])
+        let killer = RecordingKiller()
+        let vm = makeVM(ps: ps, killer: killer)
+        await vm.scanAgentProcessesNow()
+        await vm.killAgentProcess(vm.agentProcesses.first { $0.pid == 4821 }!)
+        XCTAssertEqual(killer.forceKilledPIDs, [4821])
+        XCTAssertTrue(vm.agentProcessKillNotice?.contains("SIGKILL") == true)
     }
 
     func test_killOrphan_permissionDenied_setsNotice() async {
