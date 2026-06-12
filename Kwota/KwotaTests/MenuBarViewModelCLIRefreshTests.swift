@@ -165,6 +165,14 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         return (watcher, coord)
     }
 
+    /// Returns a history-file mapping rooted in the per-test TempDirectory so
+    /// 200-path refreshes append usage history under the temp dir instead of
+    /// the real ~/Library/Application Support/com.thanhhaudev.Kwota/profiles/.
+    private func makeHistoryFileProvider() -> (UUID) -> URL {
+        let temp = self.temp!
+        return { id in temp.file("history-\(id.uuidString).json") }
+    }
+
     private func seedCLIProfile(accessToken: String) throws -> Profile {
         let profile = Profile(name: "CLI", authMethod: .cliSync)
         let cred = Credential.cliToken(
@@ -211,7 +219,8 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
             codexAccountWatcher: codexWatcher1,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(),
-            codexAutoProfileCoordinator: codexCoord1
+            codexAutoProfileCoordinator: codexCoord1,
+            historyFileProvider: makeHistoryFileProvider()
         )
 
         await waitForAuthState(vm, .authenticated)
@@ -262,7 +271,8 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
             codexAccountWatcher: codexWatcher2,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(),
-            codexAutoProfileCoordinator: codexCoord2
+            codexAutoProfileCoordinator: codexCoord2,
+            historyFileProvider: makeHistoryFileProvider()
         )
 
         await waitForAuthState(vm, .expired)
@@ -311,7 +321,8 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
             codexAccountWatcher: codexWatcher3,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(),
-            codexAutoProfileCoordinator: codexCoord3
+            codexAutoProfileCoordinator: codexCoord3,
+            historyFileProvider: makeHistoryFileProvider()
         )
 
         await waitForAuthState(vm, .expired)
@@ -347,7 +358,8 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
             codexAccountWatcher: codexWatcher4,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(),
-            codexAutoProfileCoordinator: codexCoord4
+            codexAutoProfileCoordinator: codexCoord4,
+            historyFileProvider: makeHistoryFileProvider()
         )
 
         await waitForAuthState(vm, .expired)
@@ -399,7 +411,8 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
             codexAccountWatcher: codexWatcher5,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(),
-            codexAutoProfileCoordinator: codexCoord5
+            codexAutoProfileCoordinator: codexCoord5,
+            historyFileProvider: makeHistoryFileProvider()
         )
         XCTAssertTrue(vm.hasNoProfiles)
         XCTAssertNil(vm.snapshot)
@@ -467,7 +480,8 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
             codexAccountWatcher: codexWatcher6,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(),
-            codexAutoProfileCoordinator: codexCoord6
+            codexAutoProfileCoordinator: codexCoord6,
+            historyFileProvider: makeHistoryFileProvider()
         )
 
         await waitForAuthState(vm, .authenticated)
@@ -503,7 +517,8 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
             codexAccountWatcher: codexWatcher7,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(),
-            codexAutoProfileCoordinator: codexCoord7
+            codexAutoProfileCoordinator: codexCoord7,
+            historyFileProvider: makeHistoryFileProvider()
         )
 
         await waitForAuthState(vm, .expired)
@@ -534,7 +549,8 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
             codexAccountWatcher: codexWatcher8,
             antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
             autoProfileCoordinator: makePermissiveCoordinator(),
-            codexAutoProfileCoordinator: codexCoord8
+            codexAutoProfileCoordinator: codexCoord8,
+            historyFileProvider: makeHistoryFileProvider()
         )
 
         await waitForAuthState(vm, .authenticated)

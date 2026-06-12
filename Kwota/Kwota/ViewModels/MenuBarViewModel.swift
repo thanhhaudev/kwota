@@ -194,6 +194,10 @@ final class MenuBarViewModel {
     private let cliRunner: ClaudeCLIInvocation
     let privilegedHelper: PrivilegedHelperManager
     private var historyStore: UsageHistoryStore?
+    /// Maps a profile id to its usage-history file. Defaults to the live
+    /// `AppPaths.usageHistoryFile(id:)`; tests inject a temp-dir mapping so
+    /// 200-path refreshes never write under the real per-profile dirs.
+    private let historyFileProvider: (UUID) -> URL
     var refreshCoordinator: UsageRefreshCoordinator?
     /// Disk-backed Cache-tab state (settings, AI evals, custom paths,
     /// toggles, risky-alert acks). Read once on init to seed `cacheState`,
@@ -518,6 +522,7 @@ final class MenuBarViewModel {
         caffeine: CaffeinateManager? = nil,
         probe: ClaudeProbe? = nil,
         cache: CacheCleaner? = nil,
+        cachePersistence: CachePersistenceStore? = nil,
         profileStore: ProfileStore? = nil,
         credentialStore: KeychainCredentialStore? = nil,
         profileUsageFetcher: (any ProfileUsageFetching)? = nil,
@@ -544,6 +549,7 @@ final class MenuBarViewModel {
         activityHistorian: ActivityHistorian? = nil,
         agentProcessScanner: AgentProcessScanner? = nil,
         agentProcessKiller: (any AgentProcessKilling)? = nil,
+        historyFileProvider: ((UUID) -> URL)? = nil,
         now: @escaping () -> Date = Date.init,
         startupMode: StartupMode = .live
     ) {
@@ -571,11 +577,13 @@ final class MenuBarViewModel {
 
         // Hosted-tests use a tmp file so suite runs don't stomp on the
         // user's real persisted cache state. Live mode points at the
-        // standard Application Support file.
-        self.cachePersistence = startupMode == .live
+        // standard Application Support file. Tests that exercise cache
+        // persistence inject their own store to stay hermetic.
+        self.cachePersistence = cachePersistence ?? (startupMode == .live
             ? CachePersistenceStore()
             : CachePersistenceStore(url: FileManager.default.temporaryDirectory
-                .appendingPathComponent("kwota-test-cache-state-\(UUID().uuidString).json"))
+                .appendingPathComponent("kwota-test-cache-state-\(UUID().uuidString).json")))
+        self.historyFileProvider = historyFileProvider ?? { AppPaths.usageHistoryFile(id: $0) }
 
         // Default registry comes pre-loaded with a ClaudeProvider that wraps
         // the same service instances the VM holds. Tests override by passing
@@ -812,7 +820,7 @@ final class MenuBarViewModel {
         // Apply persisted Cache state BEFORE starting the scheduler so the
         // scheduler picks up the user's chosen `scanInterval` on first run
         // rather than the stub default.
-        self.applyPersistedCacheState(cachePersistence.load())
+        self.applyPersistedCacheState(self.cachePersistence.load())
 
         if startupMode == .live {
             // Same blast radius as the Claude backfill above: only when we built
@@ -1294,7 +1302,7 @@ final class MenuBarViewModel {
             return
         }
         authState = .refreshing
-        let store = UsageHistoryStore(historyFile: AppPaths.usageHistoryFile(id: id))
+        let store = UsageHistoryStore(historyFile: historyFileProvider(id))
         historyStore = store
         history = (try? store.load()) ?? []
         let cached = profile.lastSnapshot
@@ -1451,7 +1459,7 @@ final class MenuBarViewModel {
            let h = historyStore {
             return h
         }
-        return UsageHistoryStore(historyFile: AppPaths.usageHistoryFile(id: profile.id))
+        return UsageHistoryStore(historyFile: historyFileProvider(profile.id))
     }
 
     /// Liveness gate for notifications. A profile is "live" when its
