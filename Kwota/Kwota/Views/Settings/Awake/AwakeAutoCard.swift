@@ -34,6 +34,21 @@ struct AwakeAutoCard: View {
             }
             SettingsSectionDivider()
             SettingsRow(
+                title: "Start only after you've been away for",
+                subtitle: "Keyboard, mouse, or trackpad input counts as present. While you're using the Mac it can't go to sleep anyway."
+            ) {
+                CompactInlinePicker(
+                    selection: Binding(
+                        get: { vm.awake.config.userIdleGate },
+                        set: { vm.awake.updateUserIdleGate($0) }
+                    ),
+                    options: UserIdleGate.allCases,
+                    title: { $0.label }
+                )
+                .disabled(!vm.awake.config.autoEnabled)
+            }
+            SettingsSectionDivider()
+            SettingsRow(
                 title: "Stop on battery below",
                 subtitle: batterySubtitle
             ) {

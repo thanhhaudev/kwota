@@ -562,6 +562,7 @@ final class MenuBarViewModel {
         registry: ProviderRegistry? = nil,
         shortcutCoordinator: ShortcutCoordinator? = nil,
         awake: AwakeSupervisor? = nil,
+        userInputMonitor: UserInputIdleProviding? = nil,
         activitySource: ActivitySource? = nil,
         battery: BatteryMonitoring? = nil,
         awakeNotifier: AwakeNotifying? = nil,
@@ -739,6 +740,7 @@ final class MenuBarViewModel {
                 battery: resolvedBattery,
                 notifier: resolvedNotifier,
                 configStore: resolvedAwakeStore,
+                userInput: userInputMonitor ?? SystemUserInputMonitor(),
                 onWillSleep: { [weak resolvedSessionLog] date, _ in
                     resolvedSessionLog?.closeOpenSessions(at: date)
                 },
