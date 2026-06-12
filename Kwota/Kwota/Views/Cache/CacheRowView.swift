@@ -20,11 +20,6 @@ struct CacheRowView: View {
     /// blocks interaction, and disables the ⋯ menu's "Clean now".
     let isCleaning: Bool
     let onCleanNow: () -> Void
-    /// Row-level permanent-delete confirm (inline — alerts close the
-    /// popover). The parent owns which row is confirming.
-    let isConfirmingDelete: Bool
-    let onConfirmDelete: () -> Void
-    let onCancelDelete: () -> Void
     let onReEvaluate: () -> Void
     let onToggleAuto: () -> Void
     let onReveal: () -> Void
@@ -81,7 +76,6 @@ struct CacheRowView: View {
                     .truncationMode(.middle)
 
                 aiAnnotation
-                deleteConfirmStrip
             }
         }
         .padding(.vertical, 6)
@@ -90,29 +84,6 @@ struct CacheRowView: View {
         // descendants into a single element and swallows their actions.
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text(accessibilityDescription))
-    }
-
-    /// Inline confirm shown only on the permanent-delete route — the Trash
-    /// route stays one-tap (Finder's "Delete Immediately" vs "Move to
-    /// Trash" distinction).
-    @ViewBuilder
-    private var deleteConfirmStrip: some View {
-        if isConfirmingDelete {
-            HStack(spacing: 8) {
-                Text("Permanently delete? \(formatBytes(row.sizeBytes)) cannot be recovered.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.red)
-                Spacer(minLength: 8)
-                Button("Delete", action: onConfirmDelete)
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .tint(.red)
-                Button("Cancel", action: onCancelDelete)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-            }
-            .padding(.top, 4)
-        }
     }
 
     /// The trailing status pill in the row's top line. Normally the size

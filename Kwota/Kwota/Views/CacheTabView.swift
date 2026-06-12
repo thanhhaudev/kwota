@@ -102,9 +102,25 @@ struct CacheTabView: View {
                 onEvaluateAll: { vm.cacheEvaluateAllWithAI() }
             )
             .padding(.horizontal, 2)
-
-            if confirmingCleanNow, let plan = vm.cacheCleanNowPlan {
-                cleanNowConfirmStrip(plan)
+            // Anchored confirm bubble — same .popover survival trick as the
+            // AI-detail popovers below (alerts/sheets dismiss the popover).
+            .popover(isPresented: $confirmingCleanNow, arrowEdge: .bottom) {
+                if let plan = vm.cacheCleanNowPlan {
+                    KwotaConfirmPopover(
+                        title: plan.permanent
+                            ? "Permanently delete \(plan.count) folder\(plan.count == 1 ? "" : "s")?"
+                            : "Clean \(plan.count) folder\(plan.count == 1 ? "" : "s")?",
+                        message: plan.permanent
+                            ? "\(plan.totalBytes.formattedBytes) will be permanently deleted and cannot be recovered."
+                            : "\(plan.totalBytes.formattedBytes) will be moved to the Trash. You can recover items from Finder until the Trash is emptied.",
+                        destructiveTitle: plan.permanent ? "Delete" : "Clean",
+                        onConfirm: {
+                            confirmingCleanNow = false
+                            vm.cacheCleanNowConfirmed()
+                        },
+                        onCancel: { confirmingCleanNow = false }
+                    )
+                }
             }
 
             if let risky = vm.cacheRiskyNotice {
@@ -170,34 +186,6 @@ struct CacheTabView: View {
     /// Map an `EvaluationError` to its inline-banner copy. Kept here (not on
     /// the error type itself) because tint + icon are SwiftUI concerns the
     /// service layer shouldn't know about.
-    /// Two-button confirm for the bulk clean — same inline pattern as the
-    /// Awake tab (the popover cannot host alerts).
-    private func cleanNowConfirmStrip(_ plan: MenuBarViewModel.CacheCleanNowPlan) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: plan.permanent ? "exclamationmark.triangle.fill" : "trash")
-                .font(.system(size: 12))
-                .foregroundStyle(plan.permanent ? .red : .orange)
-            Text(plan.permanent
-                ? "Permanently delete \(plan.count) folder\(plan.count == 1 ? "" : "s")? \(plan.totalBytes.formattedBytes) cannot be recovered."
-                : "Clean \(plan.count) folder\(plan.count == 1 ? "" : "s")? \(plan.totalBytes.formattedBytes) will move to the Trash.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 8)
-            Button(plan.permanent ? "Delete" : "Clean") {
-                confirmingCleanNow = false
-                vm.cacheCleanNowConfirmed()
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-            .tint(.red)
-            Button("Cancel") { confirmingCleanNow = false }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-        }
-        .kwotaCard()
-    }
-
     private func aiErrorDisplay(
         for error: CacheEvaluator.EvaluationError
     ) -> (tint: Color, icon: String, title: String, detail: String) {
@@ -321,12 +309,7 @@ struct CacheTabView: View {
                                         vm.cacheCleanRow(rowID: row.id)
                                     }
                                 },
-                                isConfirmingDelete: confirmingDeleteRowID == row.id,
-                                onConfirmDelete: {
-                                    confirmingDeleteRowID = nil
-                                    vm.cacheCleanRow(rowID: row.id)
-                                },
-                                onCancelDelete: { confirmingDeleteRowID = nil },
+
                                 onReEvaluate: { vm.cacheReEvaluateRow(rowID: row.id) },
                                 onToggleAuto: { vm.cacheToggleAuto(rowID: row.id) },
                                 onReveal: { vm.cacheRevealInFinder(rowID: row.id) },
@@ -334,6 +317,25 @@ struct CacheTabView: View {
                                 onRemove: { vm.cacheRemoveRow(rowID: row.id) },
                                 onShowAIDetail: { aiDetailRowID = row.id }
                             )
+                            .popover(
+                                isPresented: Binding(
+                                    get: { confirmingDeleteRowID == row.id },
+                                    set: { if !$0 { confirmingDeleteRowID = nil } }
+                                ),
+                                attachmentAnchor: .rect(.bounds),
+                                arrowEdge: .trailing
+                            ) {
+                                KwotaConfirmPopover(
+                                    title: "Permanently delete \(row.displayName)?",
+                                    message: "\(row.sizeBytes.formattedBytes) will be permanently deleted and cannot be recovered.",
+                                    destructiveTitle: "Delete",
+                                    onConfirm: {
+                                        confirmingDeleteRowID = nil
+                                        vm.cacheCleanRow(rowID: row.id)
+                                    },
+                                    onCancel: { confirmingDeleteRowID = nil }
+                                )
+                            }
                             // `.popover` lives on each row (instead of on the
                             // tab root) so its arrow anchors to the row that
                             // was clicked — vertical position tracks the row,

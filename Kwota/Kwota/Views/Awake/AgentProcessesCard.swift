@@ -161,34 +161,17 @@ struct AgentProcessesCard: View {
             Spacer(minLength: 8)
             if vm.killingAgentPIDs.contains(proc.pid) {
                 // Kill in flight (TERM -> grace -> KILL): spinner replaces
-                // the controls so the row can't be re-confirmed meanwhile.
+                // the control so the row can't be re-confirmed meanwhile.
                 ProgressView()
                     .controlSize(.small)
                     .help("Killing…")
-            } else if confirmingKillPID == proc.pid {
-                // Step 2 of the inline confirm — replaces the glyph with an
-                // explicit destructive choice. Stays inside the popover
-                // (an alert would steal key status and close it).
-                Button("Kill") {
-                    confirmingKillPID = nil
-                    Task { await vm.killAgentProcess(proc) }
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .tint(.red)
-                .help(proc.isOrphan
-                    ? "Re-parented to launchd; SIGTERM will be sent"
-                    : "Still attached to a running parent and may be in use; SIGTERM will be sent")
-                Button("Cancel") {
-                    confirmingKillPID = nil
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             } else {
                 // Native inline-remove affordance (Safari downloads style):
                 // quiet gray glyph, red on hover. Available on every row —
                 // editors keep agent sessions alive after their window
-                // closes, so live rows can be abandoned too.
+                // closes, so live rows can be abandoned too. The confirm is
+                // an anchored bubble (KwotaConfirmPopover) shared with the
+                // Cache tab — same survival trick, same look.
                 Button {
                     confirmingKillPID = proc.pid
                 } label: {
@@ -202,6 +185,27 @@ struct AgentProcessesCard: View {
                 }
                 .help("Kill process (SIGTERM, then SIGKILL if ignored)")
                 .accessibilityLabel("Kill \(proc.commandDisplay), PID \(String(proc.pid))")
+                .popover(
+                    isPresented: Binding(
+                        get: { confirmingKillPID == proc.pid },
+                        set: { if !$0 { confirmingKillPID = nil } }
+                    ),
+                    attachmentAnchor: .rect(.bounds),
+                    arrowEdge: .trailing
+                ) {
+                    KwotaConfirmPopover(
+                        title: "Kill \(proc.commandDisplay)?",
+                        message: proc.isOrphan
+                            ? "PID \(String(proc.pid)) lost its parent and was re-parented to launchd. SIGTERM will be sent, then SIGKILL if it is ignored."
+                            : "PID \(String(proc.pid)) is still attached to a running parent and may be in use. SIGTERM will be sent, then SIGKILL if it is ignored.",
+                        destructiveTitle: "Kill",
+                        onConfirm: {
+                            confirmingKillPID = nil
+                            Task { await vm.killAgentProcess(proc) }
+                        },
+                        onCancel: { confirmingKillPID = nil }
+                    )
+                }
             }
         }
     }
