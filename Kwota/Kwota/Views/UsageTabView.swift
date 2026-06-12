@@ -31,11 +31,23 @@ struct UsageTabView: View {
                     // lingered on "Back-off elapsed" until some unrelated
                     // VM change forced a redraw, and the StaleDataBanner
                     // behind it stayed suppressed.
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        statusBanner(now: context.date)
-                    }
+                    //
+                    // spacing-0 wrapper: the TimelineView is a permanent
+                    // stack child, so in the outer spacing-10 VStack its
+                    // zero-size no-banner state still earned a spacing
+                    // slot — a phantom 10pt above the profile card that
+                    // no other tab had. Each banner branch carries its
+                    // own .padding(.bottom, 10) instead; padding must sit
+                    // INSIDE the branches because a modifier on the
+                    // resolved-empty builder output materializes the same
+                    // phantom gap (measured in ZeroSizeChildSpacingTests).
+                    VStack(alignment: .leading, spacing: 0) {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            statusBanner(now: context.date)
+                        }
 
-                    ProfileSwitcherCard(vm: vm)
+                        ProfileSwitcherCard(vm: vm)
+                    }
 
                     // Resolve the chart region via the VM's pure helper so the
                     // view never substitutes a provider-mismatched payload. The
@@ -104,6 +116,7 @@ struct UsageTabView: View {
                 detail: provider?.reauthInstruction
                     ?? "Authorization expired. Sign in again."
             )
+            .padding(.bottom, 10)
         case .authenticated:
             if let until = vm.rateLimitedUntil, until > now {
                 // "Try now" is the probe tier: it bypasses the back-off
@@ -120,9 +133,11 @@ struct UsageTabView: View {
                     probeEnabled: vm.canRefreshNow(now: now, trigger: .probe),
                     onRetry: { vm.refreshUsageNow(trigger: .probe) }
                 )
+                .padding(.bottom, 10)
             } else if let last = vm.lastFetchedAt,
                       now.timeIntervalSince(last) > StaleDataBanner.threshold {
                 StaleDataBanner(lastFetchedAt: last, onRefresh: { vm.refreshUsageNow(trigger: .manual) })
+                    .padding(.bottom, 10)
             }
         case .refreshing:
             // Keep the rate-limit banner mounted (with a spinner in the
@@ -132,6 +147,7 @@ struct UsageTabView: View {
             // happened at all.
             if let until = vm.rateLimitedUntil, until > now {
                 RateLimitBanner(retryAt: until, isProbing: true, onRetry: {})
+                    .padding(.bottom, 10)
             } else {
                 EmptyView()
             }
