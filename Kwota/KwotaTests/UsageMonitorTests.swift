@@ -25,6 +25,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: clock.dateProvider,
             legacyDailyQuotaEstimate: 1_000
@@ -54,6 +55,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: clock.dateProvider,
             fileEvents: stream,
@@ -85,6 +87,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: clock.dateProvider,
             legacyDailyQuotaEstimate: 1_000_000
@@ -107,6 +110,7 @@ final class UsageMonitorTests: XCTestCase {
         let clock = InMemoryClock(date("2026-04-26T12:00:00Z"))
         let monitor = UsageMonitor(
             reader: reader, ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: clock.dateProvider, legacyDailyQuotaEstimate: 100
         )
@@ -124,6 +128,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: clock.dateProvider,
             legacyDailyQuotaEstimate: 1_000_000
@@ -163,6 +168,7 @@ final class UsageMonitorTests: XCTestCase {
         let clock = InMemoryClock(date("2026-04-26T12:00:00Z"))
         let monitor = UsageMonitor(
             reader: reader, ledgerURL: url,
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: clock.dateProvider, legacyDailyQuotaEstimate: 1_000_000
         )
@@ -186,6 +192,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T10:00:00Z"),
             clock: clock.dateProvider,
             legacyDailyQuotaEstimate: 1_000_000
@@ -209,6 +216,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: clock.dateProvider,
             legacyDailyQuotaEstimate: 1_000_000
@@ -228,6 +236,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T10:00:00Z"),
             clock: clock.dateProvider,
             legacyDailyQuotaEstimate: 1_000_000
@@ -254,6 +263,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T14:00:00Z"),
             clock: clock.dateProvider,
             legacyDailyQuotaEstimate: 1_000_000
@@ -275,6 +285,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T14:00:00Z"),
             clock: clock.dateProvider,
             legacyDailyQuotaEstimate: 1_000_000
@@ -298,6 +309,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T22:00:00Z"),
             clock: { nowValue },
             legacyDailyQuotaEstimate: 1_000_000
@@ -538,6 +550,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: ledgerURL,
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: clock.dateProvider,
             legacyDailyQuotaEstimate: 1_000,
@@ -564,6 +577,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: ledgerURL,
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: clock.dateProvider,
             legacyDailyQuotaEstimate: 1_000,
@@ -595,6 +609,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: ledgerURL,
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: clock.dateProvider,
             legacyDailyQuotaEstimate: 1_000,
@@ -646,6 +661,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: ledgerURL,
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: clock.dateProvider,
             legacyDailyQuotaEstimate: 1_000,
@@ -736,6 +752,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: ledgerURL,
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: InMemoryClock(date("2026-04-26T12:00:00Z")).dateProvider,
             legacyDailyQuotaEstimate: 1_000_000
@@ -789,6 +806,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: ledgerURL,
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: clock.dateProvider,
             legacyDailyQuotaEstimate: 1_000_000,
@@ -832,6 +850,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: clock.dateProvider,
             fileEvents: stream,
@@ -878,6 +897,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: clock.dateProvider,
             fileEvents: stream,
@@ -909,7 +929,8 @@ final class UsageMonitorTests: XCTestCase {
         let reader = FakeJSONLogReader()
         let monitor = UsageMonitor(
             reader: reader,
-            ledgerURL: tmp.file("ledger.json")
+            ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json")
         )
         XCTAssertEqual(monitor.safetyPollIntervalForTesting, 300)
         _ = monitor
@@ -985,6 +1006,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: clock.dateProvider,
             legacyDailyQuotaEstimate: 1_000_000,
@@ -1007,6 +1029,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             persistDebounce: 10.0
         )
 
@@ -1026,6 +1049,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             persistDebounce: 10.0
         )
 
@@ -1048,6 +1072,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: clock.dateProvider,
             legacyDailyQuotaEstimate: 1_000_000,
@@ -1085,6 +1110,7 @@ final class UsageMonitorTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
             appLaunchInstant: date("2026-04-26T11:00:00Z"),
             clock: clock.dateProvider,
             legacyDailyQuotaEstimate: 1_000_000,

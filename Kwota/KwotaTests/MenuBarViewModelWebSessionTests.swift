@@ -65,7 +65,8 @@ final class MenuBarViewModelWebSessionTests: XCTestCase {
         })
         let usage = UsageMonitor(
             reader: FakeJSONLogReader(),
-            ledgerURL: temp.file("ledger-\(UUID().uuidString).json")
+            ledgerURL: temp.file("ledger-\(UUID().uuidString).json"),
+            dailyCounterURL: temp.file("daily-counter-\(UUID().uuidString).json")
         )
         let codexWatcherStub = CodexAccountWatcher(
             authRead: { nil },
@@ -394,7 +395,16 @@ final class MenuBarViewModelWebSessionTests: XCTestCase {
             oauthRead: { nil },
             defaults: sandboxedDefaults2
         )
+        // Hermetic UsageMonitor: without it the default UsageMonitor.live()
+        // walks the real ~/.claude/projects tree and writes the real
+        // ledger.json / usage-monitor-daily.json during the test run.
+        let usage2 = UsageMonitor(
+            reader: FakeJSONLogReader(),
+            ledgerURL: temp.file("ledger-\(UUID().uuidString).json"),
+            dailyCounterURL: temp.file("daily-counter-\(UUID().uuidString).json")
+        )
         let vm = MenuBarViewModel(
+            usage: usage2,
             cachePersistence: CachePersistenceStore(url: temp.file("cache-state-\(UUID().uuidString).json")),
             profileStore: store,
             credentialStore: keychain,

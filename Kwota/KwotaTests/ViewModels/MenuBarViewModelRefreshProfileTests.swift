@@ -31,15 +31,52 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
     }
 
     private func makeVM(stubFetcher: StubOAuthProfileFetcher, registry: ProviderRegistry? = nil) -> MenuBarViewModel {
+        // Full hermetic kit (mirrors MenuBarViewModelActivityForwardingTests):
+        // seedProfile() runs BEFORE makeVM and ProfileStore.add activates the
+        // profile, so the init-driven refresh tick fires immediately. Every
+        // default that could reach the network (ClaudeAPIClient.live() inside
+        // the default registry, 401-retry posting the fake refresh token to
+        // the real OAuth endpoint), the real ~/.claude.json, or Claude Code's
+        // Keychain item must be stubbed out.
+        let vmWatcher = CLIAccountWatcher(
+            oauthRead: { nil },
+            fileEvents: AsyncStream { _ in }
+        )
+        let coordWatcher = CLIAccountWatcher(
+            oauthRead: { nil },
+            fileEvents: AsyncStream { _ in }
+        )
+        let permissiveCoord = AutoProfileCoordinator(
+            watcher: coordWatcher,
+            profileStore: profileStore,
+            alwaysAllowRefresh: true
+        )
         let codexWatcherStub = CodexAccountWatcher(
             authRead: { nil },
             fileEvents: AsyncStream { _ in }
         )
+        let codexCoordWatcher = CodexAccountWatcher(
+            authRead: { nil },
+            fileEvents: AsyncStream { _ in }
+        )
         let codexCoordStub = CodexAutoProfileCoordinator(
-            watcher: codexWatcherStub,
+            watcher: codexCoordWatcher,
             profileStore: profileStore,
             keychain: keychain,
             clock: { Date() }
+        )
+        let antigravityWatcherVM = AntigravityProcessWatcher(detect: { nil })
+        let antigravityWatcherCoord = AntigravityProcessWatcher(detect: { nil })
+        let antigravityCoordStub = AntigravityAutoProfileCoordinator(
+            watcher: antigravityWatcherCoord,
+            profileStore: profileStore
+        )
+        let sandboxedDefaults = UserDefaults(suiteName: "kwota-refresh-profile-test-\(UUID())")!
+        sandboxedDefaults.set(true, forKey: "autoDetectMigrationCompleted")
+        let inertMigrator = AutoProfileMigrator(
+            profileStore: profileStore,
+            oauthRead: { nil },
+            defaults: sandboxedDefaults
         )
         // Hermetic UsageMonitor: prevents the live default from reading
         // ~/.claude/projects/**/*.jsonl and writing to the shared ledger
@@ -49,16 +86,43 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
             ledgerURL: temp.file("ledger-\(UUID().uuidString).json"),
             dailyCounterURL: temp.file("daily-counter-\(UUID().uuidString).json")
         )
+        let stubClient = ClaudeAPIClient(transport: { req in
+            let url = req.url ?? URL(string: "https://example.invalid")!
+            let resp = HTTPURLResponse(url: url, statusCode: 401,
+                                       httpVersion: nil, headerFields: nil)!
+            return (Data(), resp)
+        })
+        // Stub refresher: reader points at a missing temp file with a nil
+        // keychain probe so forceRefresh never touches Claude Code's real
+        // Keychain item or ~/.claude/.credentials.json.
+        let stubRefresher = CLITokenRefresher(
+            reader: CLICredentialReader(
+                credentialsFile: temp.file("missing-credentials.json"),
+                keychainProbe: { nil }
+            ),
+            store: keychain
+        )
+        let tempDir = temp!
         return MenuBarViewModel(
             usage: usage,
+            cachePersistence: CachePersistenceStore(url: temp.file("cache-state-\(UUID().uuidString).json")),
             profileStore: profileStore,
             credentialStore: keychain,
+            apiClient: stubClient,
+            cliRefresher: stubRefresher,
             registry: registry,
             activitySource: CompositeActivitySource(sources: []),
+            awakeSessionLog: AwakeSessionLog(autoStart: false),
+            cliAccountWatcher: vmWatcher,
             codexAccountWatcher: codexWatcherStub,
-            antigravityProcessWatcher: AntigravityProcessWatcher(detect: { nil }),
+            antigravityProcessWatcher: antigravityWatcherVM,
             oauthProfileFetcher: stubFetcher,
-            codexAutoProfileCoordinator: codexCoordStub
+            autoProfileCoordinator: permissiveCoord,
+            codexAutoProfileCoordinator: codexCoordStub,
+            antigravityAutoProfileCoordinator: antigravityCoordStub,
+            autoProfileMigrator: inertMigrator,
+            activityHistorian: ActivityHistorian(autoBackfill: false),
+            historyFileProvider: { id in tempDir.file("history-\(id.uuidString).json") }
         )
     }
 

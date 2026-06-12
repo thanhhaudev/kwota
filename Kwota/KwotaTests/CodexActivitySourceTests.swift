@@ -24,12 +24,25 @@ final class CodexActivitySourceTests: XCTestCase {
     private let sessionPath =
         "/Users/x/.codex/sessions/2026/05/20/rollout-2026-05-20T10-47-14-abc.jsonl"
 
+    /// Hermetic scanner rooted at a nonexistent temp home: the default
+    /// `ProviderActivityBackfill.codex()` walks the REAL ~/.codex on every
+    /// poll-driven discovery scan, so live codex sessions on this machine
+    /// could inject spurious events into count assertions. `matchesFile` /
+    /// `timestamp` are pure and home-independent, so temp-file tests still
+    /// parse their rollout fixtures normally.
+    private func tempHomeScanner() -> ProviderActivityScanner {
+        ProviderActivityBackfill.codex(
+            home: FileManager.default.temporaryDirectory
+                .appendingPathComponent("codexhome-\(UUID().uuidString)", isDirectory: true)
+        )
+    }
+
     func testEmitsWhenLive() async {
         var cont: AsyncStream<String>.Continuation!
         let stream = AsyncStream<String> { cont = $0 }
         let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
         var received: [ActivityEvent] = []
-        let source = CodexActivitySource(isLive: { true }, makeFileEvents: { stream }, clock: { fixedDate }, notificationCenter: NotificationCenter())
+        let source = CodexActivitySource(isLive: { true }, makeFileEvents: { stream }, clock: { fixedDate }, scanner: tempHomeScanner(), walProbe: { [] }, notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
         source.start()
         cont.yield(sessionPath)
@@ -44,7 +57,7 @@ final class CodexActivitySourceTests: XCTestCase {
         var cont: AsyncStream<String>.Continuation!
         let stream = AsyncStream<String> { cont = $0 }
         var received: [ActivityEvent] = []
-        let source = CodexActivitySource(isLive: { false }, makeFileEvents: { stream }, clock: { Date() }, notificationCenter: NotificationCenter())
+        let source = CodexActivitySource(isLive: { false }, makeFileEvents: { stream }, clock: { Date() }, scanner: tempHomeScanner(), walProbe: { [] }, notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
         source.start()
         cont.yield(sessionPath)
@@ -57,7 +70,7 @@ final class CodexActivitySourceTests: XCTestCase {
         var cont: AsyncStream<String>.Continuation!
         let stream = AsyncStream<String> { cont = $0 }
         var received: [ActivityEvent] = []
-        let source = CodexActivitySource(isLive: { true }, makeFileEvents: { stream }, clock: { Date() }, notificationCenter: NotificationCenter())
+        let source = CodexActivitySource(isLive: { true }, makeFileEvents: { stream }, clock: { Date() }, scanner: tempHomeScanner(), walProbe: { [] }, notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
         source.start()
         cont.yield("/Users/x/.codex/history.jsonl")
@@ -72,7 +85,7 @@ final class CodexActivitySourceTests: XCTestCase {
         let stream = AsyncStream<String> { cont = $0 }
         var live = false
         var received: [ActivityEvent] = []
-        let source = CodexActivitySource(isLive: { live }, makeFileEvents: { stream }, clock: { Date() }, notificationCenter: NotificationCenter())
+        let source = CodexActivitySource(isLive: { live }, makeFileEvents: { stream }, clock: { Date() }, scanner: tempHomeScanner(), walProbe: { [] }, notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
         source.start()
         cont.yield(sessionPath); await drain()
@@ -105,7 +118,7 @@ final class CodexActivitySourceTests: XCTestCase {
         var cont: AsyncStream<String>.Continuation!
         let stream = AsyncStream<String> { cont = $0 }
         var received: [ActivityEvent] = []
-        let source = CodexActivitySource(isLive: { true }, makeFileEvents: { stream }, clock: { Date() }, notificationCenter: NotificationCenter())
+        let source = CodexActivitySource(isLive: { true }, makeFileEvents: { stream }, clock: { Date() }, scanner: tempHomeScanner(), walProbe: { [] }, notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
         source.start()
 
@@ -134,7 +147,7 @@ final class CodexActivitySourceTests: XCTestCase {
         var cont: AsyncStream<String>.Continuation!
         let stream = AsyncStream<String> { cont = $0 }
         var received: [ActivityEvent] = []
-        let source = CodexActivitySource(isLive: { true }, makeFileEvents: { stream }, clock: { Date() }, notificationCenter: NotificationCenter())
+        let source = CodexActivitySource(isLive: { true }, makeFileEvents: { stream }, clock: { Date() }, scanner: tempHomeScanner(), walProbe: { [] }, notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
         source.start()
         cont.yield(file.path); await drain()
@@ -159,7 +172,7 @@ final class CodexActivitySourceTests: XCTestCase {
         var cont: AsyncStream<String>.Continuation!
         let stream = AsyncStream<String> { cont = $0 }
         var received: [ActivityEvent] = []
-        let source = CodexActivitySource(isLive: { true }, makeFileEvents: { stream }, clock: { Date() }, notificationCenter: NotificationCenter())
+        let source = CodexActivitySource(isLive: { true }, makeFileEvents: { stream }, clock: { Date() }, scanner: tempHomeScanner(), walProbe: { [] }, notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
         source.start()
         cont.yield(file.path); await drain()
@@ -184,6 +197,8 @@ final class CodexActivitySourceTests: XCTestCase {
         let source = CodexActivitySource(
             isLive: { true }, makeFileEvents: { stream },
             clock: { Date(timeIntervalSince1970: 1_000_000) },
+            scanner: tempHomeScanner(),
+            walProbe: { [] },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
         source.start()
@@ -214,7 +229,8 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
-            pollInterval: 0.2, notificationCenter: NotificationCenter())
+            scanner: tempHomeScanner(),
+            pollInterval: 0.2, walProbe: { [] }, notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
         source.start()
         cont.yield(file.path); await drain()   // FSEvents first-sights the file (offset set)
@@ -247,7 +263,8 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { true }, makeFileEvents: make, clock: { Date() },
-            pollInterval: 60, notificationCenter: center)
+            scanner: tempHomeScanner(),
+            pollInterval: 60, walProbe: { [] }, notificationCenter: center)
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
         source.start()
         await drain()
@@ -290,7 +307,7 @@ final class CodexActivitySourceTests: XCTestCase {
             isLive: { true }, makeFileEvents: { stream },
             clock: { Date(timeIntervalSince1970: 1_000_000) },
             scanner: ProviderActivityBackfill.codex(home: home),
-            pollInterval: 0.2, notificationCenter: NotificationCenter())
+            pollInterval: 0.2, walProbe: { [] }, notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
         source.start()
         await drain()
@@ -351,6 +368,8 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { true }, makeFileEvents: { stream }, clock: { fixedDate },
+            scanner: tempHomeScanner(),
+            walProbe: { [] },
             isClaudeCodexCompanionRunning: { true },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
@@ -376,6 +395,8 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
+            scanner: tempHomeScanner(),
+            walProbe: { [] },
             isClaudeCodexCompanionRunning: { true },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
@@ -399,6 +420,8 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { false }, makeFileEvents: { stream }, clock: { Date() },
+            scanner: tempHomeScanner(),
+            walProbe: { [] },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
         source.start()
@@ -420,6 +443,8 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { live }, makeFileEvents: { stream }, clock: { Date() },
+            scanner: tempHomeScanner(),
+            walProbe: { [] },
             isClaudeCodexCompanionRunning: { true },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
@@ -446,6 +471,8 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
+            scanner: tempHomeScanner(),
+            walProbe: { [] },
             isClaudeCodexCompanionRunning: { true },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
@@ -474,6 +501,8 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
+            scanner: tempHomeScanner(),
+            walProbe: { [] },
             isClaudeCodexCompanionRunning: { companionAlive },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
@@ -500,6 +529,8 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
+            scanner: tempHomeScanner(),
+            walProbe: { [] },
             isClaudeCodexCompanionRunning: { false },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
@@ -528,6 +559,8 @@ final class CodexActivitySourceTests: XCTestCase {
         // "recent" thing is unrelated Claude chat happening in some other project.
         let source = CodexActivitySource(
             isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
+            scanner: tempHomeScanner(),
+            walProbe: { [] },
             isClaudeCodexCompanionRunning: { false },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
@@ -556,6 +589,8 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
+            scanner: tempHomeScanner(),
+            walProbe: { [] },
             isClaudeCodexCompanionRunning: { companionAlive },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
@@ -596,6 +631,8 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { live }, makeFileEvents: { stream }, clock: { Date() },
+            scanner: tempHomeScanner(),
+            walProbe: { [] },
             isClaudeCodexCompanionRunning: { companion },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
@@ -640,6 +677,8 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { true }, makeFileEvents: { stream }, clock: { clockTime },
+            scanner: tempHomeScanner(),
+            walProbe: { [] },
             isClaudeCodexCompanionRunning: { true },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
@@ -676,6 +715,8 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { true }, makeFileEvents: makeStream, clock: { Date() },
+            scanner: tempHomeScanner(),
+            walProbe: { [] },
             isClaudeCodexCompanionRunning: { companion },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
@@ -711,6 +752,8 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
+            scanner: tempHomeScanner(),
+            walProbe: { [] },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
         source.start()
@@ -733,6 +776,8 @@ final class CodexActivitySourceTests: XCTestCase {
         var received: [ActivityEvent] = []
         let source = CodexActivitySource(
             isLive: { true }, makeFileEvents: { stream }, clock: { Date() },
+            scanner: tempHomeScanner(),
+            walProbe: { [] },
             notificationCenter: NotificationCenter())
         source.activityPublisher.sink { received.append($0) }.store(in: &bag)
         source.start()
@@ -792,6 +837,7 @@ final class CodexActivitySourceTests: XCTestCase {
             isLive: { true },
             makeFileEvents: { stream },
             clock: { Date() },
+            scanner: tempHomeScanner(),
             walPollInterval: 0.05,
             walProbe: { [(path: walPath, mtime: probedMtime)] },
             notificationCenter: NotificationCenter()
@@ -821,6 +867,7 @@ final class CodexActivitySourceTests: XCTestCase {
             isLive: { true },
             makeFileEvents: { stream },
             clock: { Date() },
+            scanner: tempHomeScanner(),
             walPollInterval: 0.05,
             walProbe: { [(path: walPath, mtime: box.mtime)] },
             isClaudeCodexCompanionRunning: { true },
@@ -867,6 +914,7 @@ final class CodexActivitySourceTests: XCTestCase {
             isLive: { true },
             makeFileEvents: { stream },
             clock: { Date() },
+            scanner: tempHomeScanner(),
             walPollInterval: 0.05,
             walProbe: {
                 guard let attrs = try? FileManager.default.attributesOfItem(atPath: walURL.path),

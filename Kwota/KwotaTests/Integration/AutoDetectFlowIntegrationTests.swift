@@ -188,6 +188,7 @@ final class AutoDetectFlowIntegrationTests: XCTestCase {
         let monitor = UsageMonitor(
             reader: reader,
             ledgerURL: temp.file("ledger.json"),
+            dailyCounterURL: temp.file("daily-counter.json"),
             appLaunchInstant: boundary.addingTimeInterval(-120),
             clock: { now },
             legacyDailyQuotaEstimate: 1_000_000
