@@ -29,37 +29,57 @@ enum AgentProcessListModel {
     }
 }
 
-/// Nontech-friendly wording for the row subtitle. Raw `ps` values (PID,
-/// CPU%) move to the hover tooltip; the visible line reads
-/// "Running 2h 13m · idle" instead of "PID 4821 · 0.2% · 02:13:45".
+/// Nontech-friendly wording for the row subtitle: "PID 4821 · ⏱ 2h 13m ·
+/// ● idle" instead of raw "PID 4821 · 0.2% · 02:13:45" — a timer glyph
+/// labels the duration and CPU% collapses into a colored activity dot.
 enum AgentProcessRowFormat {
-    /// CPU% mapped to a plain-English activity tier. Thresholds are
-    /// hand-picked: agent CLIs idle near 0%, sit well under 30% while
-    /// streaming, and only pass it on heavy tool runs — tune the constants
-    /// if real-world readings drift, the tiers themselves are stable.
-    static func activityText(cpuPercent: Double) -> String {
-        if cpuPercent < 2 { return "idle" }
-        if cpuPercent < 30 { return "active" }
-        return "busy"
+    /// CPU% mapped to a colored activity tier. Thresholds are hand-picked:
+    /// agent CLIs idle near 0%, sit well under 30% while streaming, and
+    /// only pass it on heavy tool runs — tune the constants if real-world
+    /// readings drift, the tiers themselves are stable.
+    enum ActivityTier: Equatable {
+        case idle, active, busy
+
+        var label: String {
+            switch self {
+            case .idle: "idle"
+            case .active: "active"
+            case .busy: "busy"
+            }
+        }
+
+        var color: Color {
+            switch self {
+            case .idle: .secondary
+            case .active: .green
+            case .busy: .orange
+            }
+        }
+    }
+
+    static func tier(cpuPercent: Double) -> ActivityTier {
+        if cpuPercent < 2 { return .idle }
+        if cpuPercent < 30 { return .active }
+        return .busy
     }
 
     /// `ps` etime ("MM:SS", "HH:MM:SS", or "D-HH:MM:SS") rendered as a
-    /// human duration — "Running 2h 13m", zero components dropped, under a
-    /// minute collapses to "Just started". Unparseable input passes through
+    /// human duration — "2h 13m", zero components dropped, under a minute
+    /// collapses to "Just started". Unparseable input passes through
     /// unchanged so a surprise `ps` format degrades to the old raw display.
-    static func runningText(etime: String) -> String {
+    static func durationText(etime: String) -> String {
         guard let seconds = parseETime(etime) else { return etime }
         if seconds < 60 { return "Just started" }
         let days = seconds / 86_400
         let hours = (seconds % 86_400) / 3_600
         let minutes = (seconds % 3_600) / 60
         if days > 0 {
-            return hours > 0 ? "Running \(days)d \(hours)h" : "Running \(days)d"
+            return hours > 0 ? "\(days)d \(hours)h" : "\(days)d"
         }
         if hours > 0 {
-            return minutes > 0 ? "Running \(hours)h \(minutes)m" : "Running \(hours)h"
+            return minutes > 0 ? "\(hours)h \(minutes)m" : "\(hours)h"
         }
-        return "Running \(minutes)m"
+        return "\(minutes)m"
     }
 
     private static func parseETime(_ etime: String) -> Int? {
@@ -207,13 +227,12 @@ struct AgentProcessesCard: View {
                         badge("background", tint: nil)
                     }
                 }
-                Text(subtitle(for: proc))
+                subtitle(for: proc)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .help(tooltip(for: proc))
             }
             Spacer(minLength: 8)
             if vm.killingAgentPIDs.contains(proc.pid) {
@@ -279,32 +298,24 @@ struct AgentProcessesCard: View {
             .fixedSize()
     }
 
-    /// "Running 2h 13m · idle · kwota" — the trailing project name (cwd
-    /// basename) is what tells 14 look-alike claude sessions apart. Raw
-    /// PID/CPU% moved to the hover tooltip (`tooltip(for:)`); PID also
-    /// survives in the kill confirm and the accessibility label.
-    private func subtitle(for proc: AgentProcessInfo) -> String {
-        var parts = [
-            AgentProcessRowFormat.runningText(etime: proc.elapsed),
-            AgentProcessRowFormat.activityText(cpuPercent: proc.cpuPercent),
-        ]
+    /// "PID 4821 · ⏱ 2h 13m · ● idle · kwota" — the trailing project name
+    /// (cwd basename) is what tells 14 look-alike claude sessions apart.
+    /// Returns concatenated `Text` so the activity dot can carry its tier
+    /// color inline. Raw CPU% is intentionally not shown — the colored dot
+    /// plus tier word replaces it for non-technical readability.
+    private func subtitle(for proc: AgentProcessInfo) -> Text {
+        let tier = AgentProcessRowFormat.tier(cpuPercent: proc.cpuPercent)
+        var text = Text("PID \(String(proc.pid)) · ")
+            + Text(Image(systemName: "timer"))
+            + Text(" \(AgentProcessRowFormat.durationText(etime: proc.elapsed)) · ")
+            + Text(Image(systemName: "circle.fill"))
+                .font(.system(size: 6))
+                .foregroundStyle(tier.color)
+            + Text(" \(tier.label)")
         if let project = proc.projectName {
-            parts.append(project)
+            text = text + Text(" · \(project)")
         }
-        return parts.joined(separator: " · ")
-    }
-
-    /// Technical detail relocated off the visible line: PID + raw CPU%,
-    /// plus the full working directory (the subtitle only shows its
-    /// basename).
-    private func tooltip(for proc: AgentProcessInfo) -> String {
-        var lines = [
-            "PID \(String(proc.pid)) · CPU \(String(format: "%.1f", proc.cpuPercent))%"
-        ]
-        if let dir = proc.workingDirectory {
-            lines.append(dir)
-        }
-        return lines.joined(separator: "\n")
+        return text
     }
 
     private func iconAsset(for provider: ProviderID) -> String {

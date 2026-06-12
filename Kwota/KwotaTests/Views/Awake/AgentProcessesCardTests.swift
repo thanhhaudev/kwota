@@ -3,6 +3,7 @@
 //  KwotaTests
 //
 
+import SwiftUI
 import XCTest
 @testable import Kwota
 
@@ -56,46 +57,55 @@ final class AgentProcessesCardTests: XCTestCase {
         XCTAssertEqual(AgentProcessListModel.hiddenCount(all, showAll: false), 0)
     }
 
-    // MARK: - AgentProcessRowFormat.runningText
+    // MARK: - AgentProcessRowFormat.durationText
 
-    func test_runningText_minutesSeconds() {
-        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "05:30"), "Running 5m")
+    func test_durationText_minutesSeconds() {
+        XCTAssertEqual(AgentProcessRowFormat.durationText(etime: "05:30"), "5m")
     }
 
-    func test_runningText_hoursMinutesSeconds() {
-        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "02:13:45"), "Running 2h 13m")
+    func test_durationText_hoursMinutesSeconds() {
+        XCTAssertEqual(AgentProcessRowFormat.durationText(etime: "02:13:45"), "2h 13m")
     }
 
-    func test_runningText_daysForm() {
-        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "1-03:00:00"), "Running 1d 3h")
+    func test_durationText_daysForm() {
+        XCTAssertEqual(AgentProcessRowFormat.durationText(etime: "1-03:00:00"), "1d 3h")
     }
 
-    func test_runningText_dropsZeroSecondaryComponent() {
-        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "2-00:10:00"), "Running 2d")
-        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "01:00:59"), "Running 1h")
+    func test_durationText_dropsZeroSecondaryComponent() {
+        XCTAssertEqual(AgentProcessRowFormat.durationText(etime: "2-00:10:00"), "2d")
+        XCTAssertEqual(AgentProcessRowFormat.durationText(etime: "01:00:59"), "1h")
     }
 
-    func test_runningText_underAMinute() {
-        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "00:45"), "Just started")
+    func test_durationText_underAMinute() {
+        XCTAssertEqual(AgentProcessRowFormat.durationText(etime: "00:45"), "Just started")
     }
 
-    func test_runningText_unparseable_passesThrough() {
+    func test_durationText_unparseable_passesThrough() {
         // Surprise ps format degrades to the old raw display, not garbage.
-        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "weird"), "weird")
-        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: ""), "")
-        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "x-01:00:00"), "x-01:00:00")
-        XCTAssertEqual(AgentProcessRowFormat.runningText(etime: "01:02:03:04"), "01:02:03:04")
+        XCTAssertEqual(AgentProcessRowFormat.durationText(etime: "weird"), "weird")
+        XCTAssertEqual(AgentProcessRowFormat.durationText(etime: ""), "")
+        XCTAssertEqual(AgentProcessRowFormat.durationText(etime: "x-01:00:00"), "x-01:00:00")
+        XCTAssertEqual(AgentProcessRowFormat.durationText(etime: "01:02:03:04"), "01:02:03:04")
     }
 
-    // MARK: - AgentProcessRowFormat.activityText
+    // MARK: - AgentProcessRowFormat.tier
 
-    func test_activityText_tierBoundaries() {
-        XCTAssertEqual(AgentProcessRowFormat.activityText(cpuPercent: 0.0), "idle")
-        XCTAssertEqual(AgentProcessRowFormat.activityText(cpuPercent: 1.9), "idle")
-        XCTAssertEqual(AgentProcessRowFormat.activityText(cpuPercent: 2.0), "active")
-        XCTAssertEqual(AgentProcessRowFormat.activityText(cpuPercent: 29.9), "active")
-        XCTAssertEqual(AgentProcessRowFormat.activityText(cpuPercent: 30.0), "busy")
-        XCTAssertEqual(AgentProcessRowFormat.activityText(cpuPercent: 312.5), "busy")
+    func test_tier_boundaries() {
+        XCTAssertEqual(AgentProcessRowFormat.tier(cpuPercent: 0.0), .idle)
+        XCTAssertEqual(AgentProcessRowFormat.tier(cpuPercent: 1.9), .idle)
+        XCTAssertEqual(AgentProcessRowFormat.tier(cpuPercent: 2.0), .active)
+        XCTAssertEqual(AgentProcessRowFormat.tier(cpuPercent: 29.9), .active)
+        XCTAssertEqual(AgentProcessRowFormat.tier(cpuPercent: 30.0), .busy)
+        XCTAssertEqual(AgentProcessRowFormat.tier(cpuPercent: 312.5), .busy)
+    }
+
+    func test_tier_labelAndColor() {
+        XCTAssertEqual(AgentProcessRowFormat.ActivityTier.idle.label, "idle")
+        XCTAssertEqual(AgentProcessRowFormat.ActivityTier.active.label, "active")
+        XCTAssertEqual(AgentProcessRowFormat.ActivityTier.busy.label, "busy")
+        XCTAssertEqual(AgentProcessRowFormat.ActivityTier.idle.color, .secondary)
+        XCTAssertEqual(AgentProcessRowFormat.ActivityTier.active.color, .green)
+        XCTAssertEqual(AgentProcessRowFormat.ActivityTier.busy.color, .orange)
     }
 
     func test_visible_allOrphans_stillCapped_toggleAppears() {
