@@ -22,6 +22,7 @@ final class AwakeSupervisorTests: XCTestCase {
     /// with other suites that instantiate live supervisors / watchers /
     /// MenuBarViewModels subscribed to `NSWorkspace.shared.notificationCenter`.
     var notificationCenter: NotificationCenter!
+    var userInput: FakeUserInputMonitor!
 
     override func setUp() async throws {
         suite = "AwakeSupervisorTests-\(UUID().uuidString)"
@@ -34,6 +35,7 @@ final class AwakeSupervisorTests: XCTestCase {
         battery = FakeBatteryMonitor()
         notifier = FakeAwakeNotifier()
         notificationCenter = NotificationCenter()
+        userInput = FakeUserInputMonitor()
     }
 
     override func tearDown() async throws {
@@ -435,11 +437,111 @@ final class AwakeSupervisorTests: XCTestCase {
         XCTAssertTrue(fired)
     }
 
+    // MARK: User-idle gate
+
+    func testGate_userAtKeyboard_blocksAutoActivation() async {
+        userInput.idleSeconds = 10   // default gate is .m1 (60s)
+        let sup = makeSupervisor()
+        activity.emit()
+        await Task.yield(); await Task.yield()
+        XCTAssertEqual(sup.state, .idle)
+        XCTAssertTrue(holder.acquired.isEmpty,
+                      "no assertion while the user is actively at the Mac")
+    }
+
+    func testGate_userAway_allowsActivation() async {
+        userInput.idleSeconds = 90
+        let sup = makeSupervisor()
+        activity.emit()
+        await Task.yield(); await Task.yield()
+        if case .autoActive = sup.state {
+        } else { XCTFail("expected autoActive, got \(sup.state)") }
+        XCTAssertEqual(holder.acquired.count, 1)
+    }
+
+    func testGate_off_activatesRegardlessOfUserPresence() async {
+        var cfg = AwakeConfig.default
+        cfg.userIdleGate = .off
+        userInput.idleSeconds = 0
+        let sup = makeSupervisor(config: cfg)
+        activity.emit()
+        await Task.yield(); await Task.yield()
+        if case .autoActive = sup.state {
+        } else { XCTFail("expected autoActive, got \(sup.state)") }
+    }
+
+    func testUserReturn_releasesAutoSession_silently() async {
+        userInput.idleSeconds = 999
+        let sup = makeSupervisor()
+        activity.emit()
+        await Task.yield(); await Task.yield()
+        if case .autoActive = sup.state {
+        } else { return XCTFail("precondition: expected autoActive") }
+
+        userInput.idleSeconds = 0   // user touched the keyboard
+        try? await Task.sleep(nanoseconds: 200_000_000)   // > poll interval
+
+        XCTAssertEqual(sup.state, .idle)
+        XCTAssertNil(sup.lastActiveProvider)
+        XCTAssertEqual(holder.released.count, holder.acquired.count,
+                       "assertion must drop when the user returns")
+        XCTAssertTrue(notifier.calls.isEmpty,
+                      "user-return stop must not notify — the user caused it")
+    }
+
+    func testUserReturn_thenAwayAgain_reactivatesOnNextPulse() async {
+        userInput.idleSeconds = 999
+        let sup = makeSupervisor()
+        activity.emit()
+        await Task.yield(); await Task.yield()
+
+        userInput.idleSeconds = 0
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(sup.state, .idle)
+
+        userInput.idleSeconds = 999   // user walked away again
+        activity.emit()
+        await Task.yield(); await Task.yield()
+        if case .autoActive = sup.state {
+        } else { XCTFail("expected re-activation, got \(sup.state)") }
+        XCTAssertEqual(holder.acquired.count, 2)
+    }
+
+    func testGate_doesNotAffectManualMode() async {
+        var cfg = AwakeConfig.default
+        cfg.autoEnabled = false
+        userInput.idleSeconds = 0    // user is at the keyboard
+        let sup = makeSupervisor(config: cfg)
+        let result = sup.forceStart(options: CaffeinateOptions(
+            preventDisplaySleep: false,
+            preventIdleSleep: true,
+            preventSystemSleep: false,
+            declareUserActivity: false
+        ), timeout: nil)
+        XCTAssertNoThrow(try result.get())
+        if case .manualActive = sup.state {
+        } else { XCTFail("manual start must ignore the user-idle gate") }
+    }
+
+    func testUpdateUserIdleGate_toOff_stopsReleasePolling() async {
+        userInput.idleSeconds = 999
+        let sup = makeSupervisor()
+        activity.emit()
+        await Task.yield(); await Task.yield()
+
+        sup.updateUserIdleGate(.off)
+        userInput.idleSeconds = 0    // user returns — but gate is now off
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        if case .autoActive = sup.state {
+        } else { XCTFail("gate off must stop user-return releases, got \(sup.state)") }
+    }
+
     // MARK: Helpers
 
     func makeSupervisor(
         config: AwakeConfig = .default,
         idleWindowOverride: TimeInterval? = nil,
+        userReturnPollInterval: TimeInterval = 0.02,
         onWillSleep: ((Date, AwakeState) -> Void)? = nil,
         onDidWakeFromSleep: ((Date, AwakeState) -> Void)? = nil
     ) -> AwakeSupervisor {
@@ -451,11 +553,20 @@ final class AwakeSupervisorTests: XCTestCase {
             notifier: notifier,
             configStore: configStore,
             idleWindowOverride: idleWindowOverride,
+            userInput: userInput,
+            userReturnPollInterval: userReturnPollInterval,
             notificationCenter: notificationCenter,
             onWillSleep: onWillSleep,
             onDidWakeFromSleep: onDidWakeFromSleep
         )
     }
+}
+
+@MainActor
+final class FakeUserInputMonitor: UserInputIdleProviding {
+    /// Defaults to "away forever" so pre-gate tests keep their behavior.
+    var idleSeconds: TimeInterval = .infinity
+    func secondsSinceLastInput() -> TimeInterval { idleSeconds }
 }
 
 @MainActor

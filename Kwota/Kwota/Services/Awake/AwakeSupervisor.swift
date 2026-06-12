@@ -34,6 +34,11 @@ final class AwakeSupervisor {
     @ObservationIgnored private let notifier: AwakeNotifying
     @ObservationIgnored private let configStore: AwakeConfigStore
     @ObservationIgnored private let idleWindowOverride: TimeInterval?
+    @ObservationIgnored private let userInput: UserInputIdleProviding
+    /// Cadence of the user-return poll while `.autoActive`. Injectable so
+    /// tests run in milliseconds.
+    @ObservationIgnored private let userReturnPollInterval: TimeInterval
+    @ObservationIgnored private var userReturnPollTask: Task<Void, Never>?
     @ObservationIgnored private var bag = Set<AnyCancellable>()
     @ObservationIgnored private var idleTimerTask: Task<Void, Never>?
     /// Suppresses `onCaffeineActiveChanged` during the disable→enable swap in `forceStart`.
@@ -60,6 +65,8 @@ final class AwakeSupervisor {
         notifier: AwakeNotifying,
         configStore: AwakeConfigStore,
         idleWindowOverride: TimeInterval? = nil,
+        userInput: UserInputIdleProviding = SystemUserInputMonitor(),
+        userReturnPollInterval: TimeInterval = 2.0,
         clock: @escaping () -> Date = { Date() },
         notificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
         onWillSleep: ((Date, AwakeState) -> Void)? = nil,
@@ -71,6 +78,8 @@ final class AwakeSupervisor {
         self.notifier = notifier
         self.configStore = configStore
         self.idleWindowOverride = idleWindowOverride
+        self.userInput = userInput
+        self.userReturnPollInterval = userReturnPollInterval
         self.clock = clock
         self.notificationCenter = notificationCenter
         self.onWillSleep = onWillSleep
@@ -112,6 +121,7 @@ final class AwakeSupervisor {
 
     deinit {
         idleTimerTask?.cancel()
+        userReturnPollTask?.cancel()
         let center = self.notificationCenter
         if let wakeObserver  { center.removeObserver(wakeObserver) }
         if let sleepObserver { center.removeObserver(sleepObserver) }
@@ -134,9 +144,18 @@ final class AwakeSupervisor {
         if case .manualActive = state { return }   // manual outranks auto
 
         if case .idle = state {
+            // User-presence gate: while the user is actively at the Mac,
+            // macOS can't idle-sleep, so raising the assertion is pointless
+            // noise. Only caffeinate once they've been away long enough.
+            // Manual mode (forceStart) is intentionally not gated.
+            if let gateSeconds = config.userIdleGate.seconds,
+               userInput.secondsSinceLastInput() < gateSeconds {
+                return
+            }
             do {
                 try caffeine.enable(options: config.flags)
                 state = .autoActive(since: date)
+                startUserReturnPoll()
             } catch {
                 AppLog.shared.log("auto-awake enable failed: \(error)", level: .error)
                 return
@@ -165,8 +184,56 @@ final class AwakeSupervisor {
         state = .idle
         lastActiveProvider = nil
         caffeine.disable()
+        userReturnPollTask?.cancel()
+        userReturnPollTask = nil
         let minutes = Int(config.idleWindow.seconds / 60)
         notifier.notifyStopped(.agentIdle(minutes: minutes))
+    }
+
+    /// While `.autoActive`, watch for the user coming back to the Mac and
+    /// release the assertion the moment they do — the OS-managed idle timer
+    /// takes over. The task self-terminates as soon as the state leaves
+    /// `.autoActive`, so missed cancels at exotic exit paths only cost one
+    /// extra tick. No-op when the gate is `.off`.
+    private func startUserReturnPoll() {
+        userReturnPollTask?.cancel()
+        guard config.userIdleGate.seconds != nil else { return }
+        let interval = userReturnPollInterval
+        userReturnPollTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                } catch {
+                    return   // cancelled
+                }
+                // Re-check after the sleep: a cancel that landed mid-sleep
+                // (e.g. the gate was just switched off) must not fire one
+                // last release from the already-queued tick.
+                guard !Task.isCancelled else { return }
+                guard let self else { return }
+                guard case .autoActive = self.state else { return }
+                // "Returned" = an input event landed since (roughly) the
+                // last tick. interval + 1 absorbs Task.sleep jitter.
+                if self.userInput.secondsSinceLastInput() < interval + 1 {
+                    self.stopAutoForUserReturn()
+                    return
+                }
+            }
+        }
+    }
+
+    /// User came back mid-session: drop to `.idle` and release. Deliberately
+    /// no notification — the user is sitting at the Mac and caused this stop;
+    /// pinging them for touching the mouse would be spam. The next agent
+    /// pulse re-engages once they've been away ≥ the gate threshold again.
+    private func stopAutoForUserReturn() {
+        guard case .autoActive = state else { return }
+        state = .idle
+        lastActiveProvider = nil
+        suppressCaffeineExitReaction = true
+        caffeine.disable()
+        idleTimerTask?.cancel()
+        idleTimerTask = nil
     }
 
     @discardableResult
@@ -227,6 +294,8 @@ final class AwakeSupervisor {
             caffeine.disable()
             idleTimerTask?.cancel()
             idleTimerTask = nil
+            userReturnPollTask?.cancel()
+            userReturnPollTask = nil
         case (true, .manualActive):
             // User flipped auto back on while a manual session was running.
             // Manual outranks auto today, but in the alternative-modes model
@@ -252,6 +321,8 @@ final class AwakeSupervisor {
             } catch {
                 state = .idle
                 lastActiveProvider = nil
+                userReturnPollTask?.cancel()
+                userReturnPollTask = nil
                 AppLog.shared.log("flag-restart failed: \(error)", level: .error)
                 notifier.notifyStopped(.unexpectedExit)
             }
@@ -262,6 +333,14 @@ final class AwakeSupervisor {
         configStore.mutate { $0.idleWindow = window }
         if case .autoActive = state {
             rescheduleIdleTimer()
+        }
+    }
+
+    func updateUserIdleGate(_ gate: UserIdleGate) {
+        configStore.mutate { $0.userIdleGate = gate }
+        if case .autoActive = state {
+            // Re-arm (or stop) the return-watch under the new setting.
+            startUserReturnPoll()
         }
     }
 
@@ -322,6 +401,8 @@ final class AwakeSupervisor {
             notifier.notifyStopped(.unexpectedExit)
             idleTimerTask?.cancel()
             idleTimerTask = nil
+            userReturnPollTask?.cancel()
+            userReturnPollTask = nil
         case .idle, .batteryBlocked:
             break
         }
@@ -347,6 +428,8 @@ final class AwakeSupervisor {
                 caffeine.disable()
                 idleTimerTask?.cancel()
                 idleTimerTask = nil
+                userReturnPollTask?.cancel()
+                userReturnPollTask = nil
                 notifier.notifyStopped(.batteryBelowThreshold(
                     current: reading.percent ?? 0,
                     threshold: threshold
