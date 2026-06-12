@@ -110,8 +110,14 @@ struct UsageTabView: View {
                 // floor entirely (that's its purpose — the floor is the
                 // reason this banner exists). Only the burst throttle
                 // applies.
+                // probeEnabled tracks the real gate: this whole banner
+                // sits under a 1s TimelineView, so the button greys for
+                // the ~10s burst-throttle window right after the 429
+                // (when a click would be silently swallowed) and lights
+                // up the moment a probe can actually fire.
                 RateLimitBanner(
                     retryAt: until,
+                    probeEnabled: vm.canRefreshNow(now: now, trigger: .probe),
                     onRetry: { vm.refreshUsageNow(trigger: .probe) }
                 )
             } else if let last = vm.lastFetchedAt,

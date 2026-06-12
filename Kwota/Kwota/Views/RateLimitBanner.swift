@@ -20,6 +20,12 @@ import SwiftUI
 struct RateLimitBanner: View {
     let retryAt: Date
     var isProbing: Bool = false
+    /// False while the probe gate (the 10s burst throttle) would silently
+    /// swallow a click — the 429 that armed this banner stamped the
+    /// throttle itself, so the first ~10s after it appears are exactly
+    /// when users click. A greyed button reads "just tried, hold on";
+    /// an active one guarantees visible action (spinner) on click.
+    var probeEnabled: Bool = true
     let onRetry: () -> Void
 
     var body: some View {
@@ -36,6 +42,9 @@ struct RateLimitBanner: View {
             onAction: onRetry,
             isActionBusy: isProbing
         )
+        // .disabled reaches only the interactive control (the action
+        // Button) — the countdown text is unaffected.
+        .disabled(!probeEnabled && !isProbing)
     }
 
     private func detail(for now: Date) -> String {
