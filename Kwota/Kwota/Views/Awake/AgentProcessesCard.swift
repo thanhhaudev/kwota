@@ -8,6 +8,7 @@
 //  with a live host) carry an orange badge. Every row offers Kill.
 //
 
+import AppKit
 import SwiftUI
 
 /// Row-visibility policy for the Agent Processes card. The popover sizes
@@ -109,8 +110,12 @@ struct AgentProcessesCard: View {
     @State private var hoveredKillPID: Int32?
 
     /// Expanded-list bound: keeps the popover under screen height even with
-    /// dozens of rows; the list scrolls internally past this.
-    private let expandedMaxHeight: CGFloat = 240
+    /// dozens of rows; the list scrolls internally past this. Adaptive like
+    /// CacheTabView's `maxListHeight` (same 540/240 caps), resolved once on
+    /// appear + on `didChangeScreenParameters` instead of per-render. The
+    /// reserve is larger than Cache's 250 because the Awake tab stacks the
+    /// status card + activity chart + section headers above this list.
+    @State private var expandedMaxHeight: CGFloat = 540
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -145,6 +150,22 @@ struct AgentProcessesCard: View {
                 confirmingKillPID = nil
             }
         }
+        .onAppear { recomputeExpandedMaxHeight() }
+        .onReceive(
+            NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
+        ) { _ in
+            recomputeExpandedMaxHeight()
+        }
+    }
+
+    /// Same formula family as CacheTabView.recomputeMaxListHeight: 540pt
+    /// hard cap keeps the popover a "summary" surface; the floor matches
+    /// the old fixed 240. Reserve ~500pt covers popover chrome plus the
+    /// Awake-tab content stacked above this card (status card, activity
+    /// chart, headers) so the expanded popover stays on screen.
+    private func recomputeExpandedMaxHeight() {
+        let screenH = NSScreen.main?.visibleFrame.height ?? 900
+        expandedMaxHeight = min(540, max(240, screenH * 0.85 - 500))
     }
 
     /// Collapsed: plain stack of the first `collapsedCap` rows — short.
@@ -158,7 +179,11 @@ struct AgentProcessesCard: View {
         let visible = AgentProcessListModel.visible(vm.agentProcesses, showAll: showAllProcesses)
         if showAllProcesses && overflowing {
             ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 0) {
+                // LazyVStack (not VStack), same rationale as CacheTabView:
+                // expanding can reveal a dozen rows at once and each row is
+                // a heavy subtree (kill button + attached confirm popover).
+                // Lazy realization builds only the rows near the viewport.
+                LazyVStack(alignment: .leading, spacing: 0) {
                     rowStack(visible)
                 }
                 // Keep rows at the collapsed-state width — the bleed below
