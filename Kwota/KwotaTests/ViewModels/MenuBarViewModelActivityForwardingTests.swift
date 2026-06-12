@@ -108,6 +108,14 @@ final class MenuBarViewModelActivityForwardingTests: XCTestCase {
             codexAutoProfileCoordinator: codexCoordStub,
             antigravityAutoProfileCoordinator: antigravityCoordStub,
             autoProfileMigrator: inertMigrator,
+            // Hermetic historian: the fixture runs with the default .live
+            // startup mode, under which the VM's default historian persists
+            // to the REAL Application Support activity-events.json — the
+            // codex/antigravity events these tests emit then reappear as
+            // phantom bars on the production app's Awake chart (one pair per
+            // `make test` run). autoBackfill off keeps the test from walking
+            // the real ~/.claude/projects tree too.
+            activityHistorian: ActivityHistorian(autoBackfill: false),
             now: { Date() }
         )
     }
