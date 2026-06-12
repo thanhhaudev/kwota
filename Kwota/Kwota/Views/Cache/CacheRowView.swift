@@ -8,15 +8,17 @@ import SwiftUI
 /// Path display for cache rows: a row inside the user's home directory
 /// drops the "/Users/<name>" prefix — ~40% of the line that carries no
 /// information, every user row shares it — and signals the scope with a
-/// house glyph instead. Paths outside home pass through unchanged.
+/// person glyph instead. The display keeps its leading slash so the glyph
+/// reads as a path segment ("👤/Library/Caches/…"). Paths outside home
+/// pass through unchanged.
 enum CachePathDisplay {
     static func abbreviate(_ path: String, home: String) -> (inHome: Bool, display: String) {
         let home = home.hasSuffix("/") ? String(home.dropLast()) : home
         guard !home.isEmpty, path.hasPrefix(home + "/") else {
             return (false, path)
         }
-        let remainder = String(path.dropFirst(home.count + 1))
-        guard !remainder.isEmpty else { return (false, path) }
+        let remainder = String(path.dropFirst(home.count))
+        guard remainder.count > 1 else { return (false, path) }
         return (true, remainder)
     }
 }
@@ -98,7 +100,7 @@ struct CacheRowView: View {
         .accessibilityLabel(Text(accessibilityDescription))
     }
 
-    /// Middle info line: "💾 1.2 GB · 🏠 Library/Caches/Claude". Size leads
+    /// Middle info line: "💾 1.2 GB · 👤/Library/Caches/Claude". Size leads
     /// the line (left-anchored, monospaced) so sizes still scan vertically
     /// across rows after moving off the top line; the path truncates in the
     /// middle independently so the size never gets cut. While the row's
@@ -133,12 +135,18 @@ struct CacheRowView: View {
         }
     }
 
-    /// "· 🏠 Library/Caches/Claude" for home-relative paths, the raw path
-    /// for everything else (e.g. /Library/Caches system rows).
+    /// "· 👤/Library/Caches/Claude" for home-relative paths, the raw path
+    /// for everything else (e.g. /Library/Caches system rows). The person
+    /// glyph sits flush against the slash — no trailing space — so it
+    /// reads as the path's first segment.
     private var pathText: Text {
         let abbrev = CachePathDisplay.abbreviate(row.path.path, home: NSHomeDirectory())
         if abbrev.inHome {
-            return Text("· ") + inlineIcon("house") + Text(abbrev.display)
+            return Text("· ")
+                + Text(Image(systemName: "person.fill"))
+                    .font(.system(size: 8.5))
+                    .baselineOffset(0.5)
+                + Text(abbrev.display)
         }
         return Text("· \(abbrev.display)")
     }

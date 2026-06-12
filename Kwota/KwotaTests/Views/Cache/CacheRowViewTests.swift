@@ -11,16 +11,16 @@ final class CacheRowViewTests: XCTestCase {
 
     // MARK: - CachePathDisplay.abbreviate
 
-    func test_abbreviate_insideHome_dropsPrefix() {
+    func test_abbreviate_insideHome_dropsPrefix_keepsLeadingSlash() {
         let r = CachePathDisplay.abbreviate("/Users/hau/Library/Caches/Claude", home: "/Users/hau")
         XCTAssertTrue(r.inHome)
-        XCTAssertEqual(r.display, "Library/Caches/Claude")
+        XCTAssertEqual(r.display, "/Library/Caches/Claude")
     }
 
     func test_abbreviate_homeWithTrailingSlash() {
         let r = CachePathDisplay.abbreviate("/Users/hau/.npm", home: "/Users/hau/")
         XCTAssertTrue(r.inHome)
-        XCTAssertEqual(r.display, ".npm")
+        XCTAssertEqual(r.display, "/.npm")
     }
 
     func test_abbreviate_outsideHome_passesThrough() {
