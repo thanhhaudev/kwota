@@ -158,10 +158,8 @@ struct AgentProcessesCard: View {
         let visible = AgentProcessListModel.visible(vm.agentProcesses, showAll: showAllProcesses)
         if showAllProcesses && overflowing {
             ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(visible) { proc in
-                        row(proc)
-                    }
+                VStack(alignment: .leading, spacing: 0) {
+                    rowStack(visible)
                 }
                 // Keep rows at the collapsed-state width — the bleed below
                 // would otherwise stretch them into the card gutter.
@@ -173,9 +171,23 @@ struct AgentProcessesCard: View {
             // instead of hovering over the kill glyphs.
             .padding(.trailing, -12)
         } else {
-            ForEach(visible) { proc in
-                row(proc)
+            VStack(alignment: .leading, spacing: 0) {
+                rowStack(visible)
             }
+        }
+    }
+
+    /// Rows separated by the same hairline divider CacheTabView uses —
+    /// spacing comes from per-row vertical padding so the divider sits
+    /// centered between neighbours.
+    @ViewBuilder
+    private func rowStack(_ visible: [AgentProcessInfo]) -> some View {
+        ForEach(Array(visible.enumerated()), id: \.element.id) { idx, proc in
+            if idx > 0 {
+                Divider().opacity(0.35)
+            }
+            row(proc)
+                .padding(.vertical, 5)
         }
     }
 
