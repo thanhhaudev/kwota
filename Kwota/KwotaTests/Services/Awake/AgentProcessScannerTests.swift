@@ -107,4 +107,33 @@ final class AgentProcessScannerTests: XCTestCase {
             args: "node /Users/hau/.codex/plugins/codex-companion.mjs --port 1234", provider: .codex),
             "codex-companion.mjs")
     }
+
+    // MARK: - scan() async path
+
+    func test_scan_success_returnsParsedRows() async {
+        let scanner = AgentProcessScanner(
+            runPS: { ProcessResult(
+                stdout: "  4821     1   0.2 02:13:45 /opt/homebrew/bin/codex app-server\n",
+                stderr: "", exitCode: 0) },
+            selfPID: 99999
+        )
+        let rows = await scanner.scan()
+        XCTAssertEqual(rows?.map(\.pid), [4821])
+    }
+
+    func test_scan_nonzeroExit_returnsNil() async {
+        let scanner = AgentProcessScanner(
+            runPS: { ProcessResult(stdout: "", stderr: "boom", exitCode: 1) },
+            selfPID: 99999
+        )
+        let rows = await scanner.scan()
+        XCTAssertNil(rows)
+    }
+
+    func test_scan_throwingRunner_returnsNil() async {
+        struct Boom: Error {}
+        let scanner = AgentProcessScanner(runPS: { throw Boom() }, selfPID: 99999)
+        let rows = await scanner.scan()
+        XCTAssertNil(rows)
+    }
 }
