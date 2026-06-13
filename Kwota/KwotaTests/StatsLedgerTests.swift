@@ -90,4 +90,32 @@ final class StatsLedgerTests: XCTestCase {
         XCTAssertEqual(decoded.total(provider: .claude, sinceDay: nil), .zero)
         XCTAssertEqual(decoded.schemaVersion, 1)
     }
+
+    // MARK: - Round 4: edge cases
+
+    func test_merge_noOpsOnZeroDelta() {
+        var l = StatsLedger()
+        let now = date("2026-06-13T10:00:00.000Z")
+        l.merge(provider: .claude, day: "2026-06-13", model: "opus", delta: .zero, now: now)
+        XCTAssertEqual(l.total(provider: .claude, sinceDay: nil), .zero)
+        XCTAssertEqual(l.lastUpdate, .distantPast)   // lastUpdate untouched on no-op
+    }
+
+    func test_merge_normalizesEmptyModelToUnknown() {
+        var l = StatsLedger()
+        let now = date("2026-06-13T10:00:00.000Z")
+        l.merge(provider: .claude, day: "2026-06-13", model: "", delta: TokenBreakdown(input: 1), now: now)
+        XCTAssertEqual(l.totalsByModel(provider: .claude, sinceDay: nil)["unknown"], TokenBreakdown(input: 1))
+    }
+
+    func test_prune_appliesAcrossAllProviders() {
+        var l = StatsLedger()
+        let now = date("2026-06-13T10:00:00.000Z")
+        l.merge(provider: .claude, day: "2026-06-01", model: "opus", delta: TokenBreakdown(input: 1), now: now)
+        l.merge(provider: .codex, day: "2026-06-01", model: "gpt", delta: TokenBreakdown(input: 1), now: now)
+        l.merge(provider: .codex, day: "2026-06-13", model: "gpt", delta: TokenBreakdown(input: 2), now: now)
+        l.prune(olderThan: 7, now: now)
+        XCTAssertTrue(l.dailySeries(provider: .claude, sinceDay: nil).isEmpty)            // old claude day pruned
+        XCTAssertEqual(l.dailySeries(provider: .codex, sinceDay: nil).map(\.day), ["2026-06-13"])  // codex pruned too
+    }
 }
