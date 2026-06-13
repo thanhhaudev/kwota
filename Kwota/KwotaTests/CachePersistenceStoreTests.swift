@@ -142,6 +142,49 @@ final class CachePersistenceStoreTests: XCTestCase {
                        "missing CustomPath.isSystem should default to false")
     }
 
+    func testLoadDefaultsEngineFieldsOnLegacyFile() throws {
+        // A blob written before aiEngine / aiCodexModel existed. Decode
+        // must default to Claude + codex-default instead of failing the
+        // whole decode (which would wipe settings + evaluations).
+        let tmp = TempDirectory()
+        let target = tmp.file("cache-state.json")
+        let legacy = """
+        {
+          "settings": {"isEnabled": true, "scanInterval": "thirtyMinutes", "globalCapBytes": 60000000000, "aiLanguage": "en"},
+          "aiModel": "claude-sonnet-4-6",
+          "aiEvaluationsByPath": {},
+          "customPaths": [],
+          "autoCleanByPath": {},
+          "riskyAlertedPaths": [],
+          "sizesByPath": {},
+          "trashedItems": []
+        }
+        """
+        try Data(legacy.utf8).write(to: target)
+        let loaded = CachePersistenceStore(url: target).load()
+        XCTAssertEqual(loaded.aiEngine, .claude,
+                       "missing aiEngine should default to Claude")
+        XCTAssertEqual(loaded.aiCodexModel, .codexDefault,
+                       "missing aiCodexModel should default to codexDefault")
+        XCTAssertEqual(loaded.aiModel, .sonnet46,
+                       "legacy aiModel must keep decoding untouched")
+    }
+
+    func testRoundTripsEngineAndCodexModel() {
+        let tmp = TempDirectory()
+        let store = CachePersistenceStore(url: tmp.file("cache-state.json"))
+
+        var state = CachePersistedState.initial
+        state.aiEngine = .codex
+        state.aiCodexModel = .gpt54Mini
+
+        store.save(state)
+        let loaded = store.load()
+        XCTAssertEqual(loaded, state)
+        XCTAssertEqual(loaded.aiEngine, .codex)
+        XCTAssertEqual(loaded.aiCodexModel, .gpt54Mini)
+    }
+
     func testLoadReturnsInitialOnGarbageFile() throws {
         let tmp = TempDirectory()
         let target = tmp.file("cache-state.json")

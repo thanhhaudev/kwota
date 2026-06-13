@@ -20,6 +20,12 @@ import Foundation
 struct CachePersistedState: Codable, Equatable {
     var settings: AutoCleanSettings
     var aiModel: AIModelChoice
+    /// Which CLI engine runs evaluations. Added after `aiModel`; decode
+    /// defaults to `.claude` so pre-engine blobs keep loading.
+    var aiEngine: CacheAIEngine
+    /// Model used when `aiEngine == .codex`. Kept separate from `aiModel`
+    /// so switching engines round-trips without losing either choice.
+    var aiCodexModel: CodexModelChoice
     /// AI evaluations keyed by `URL.path` string. Decoupled from
     /// `CachePathRow.id` (which is a transient UUID generated on each
     /// process launch) so a row regenerated next launch picks up its old
@@ -98,7 +104,8 @@ struct CachePersistedState: Codable, Equatable {
     // from a build that didn't persist sizes would wipe the user's
     // settings + evaluations on first launch.
     enum CodingKeys: String, CodingKey {
-        case settings, aiModel, aiEvaluationsByPath, customPaths
+        case settings, aiModel, aiEngine, aiCodexModel
+        case aiEvaluationsByPath, customPaths
         case autoCleanByPath, riskyAlertedPaths, sizesByPath, trashedItems
         case removedDefaultPaths
     }
@@ -106,6 +113,8 @@ struct CachePersistedState: Codable, Equatable {
     init(
         settings: AutoCleanSettings,
         aiModel: AIModelChoice,
+        aiEngine: CacheAIEngine = .default,
+        aiCodexModel: CodexModelChoice = .default,
         aiEvaluationsByPath: [String: CacheAIEvaluation],
         customPaths: [CustomPath],
         autoCleanByPath: [String: Bool],
@@ -116,6 +125,8 @@ struct CachePersistedState: Codable, Equatable {
     ) {
         self.settings = settings
         self.aiModel = aiModel
+        self.aiEngine = aiEngine
+        self.aiCodexModel = aiCodexModel
         self.aiEvaluationsByPath = aiEvaluationsByPath
         self.customPaths = customPaths
         self.autoCleanByPath = autoCleanByPath
@@ -129,6 +140,8 @@ struct CachePersistedState: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.settings = try c.decode(AutoCleanSettings.self, forKey: .settings)
         self.aiModel = try c.decode(AIModelChoice.self, forKey: .aiModel)
+        self.aiEngine = (try? c.decode(CacheAIEngine.self, forKey: .aiEngine)) ?? .default
+        self.aiCodexModel = (try? c.decode(CodexModelChoice.self, forKey: .aiCodexModel)) ?? .default
         self.aiEvaluationsByPath = try c.decode([String: CacheAIEvaluation].self, forKey: .aiEvaluationsByPath)
         self.customPaths = try c.decode([CustomPath].self, forKey: .customPaths)
         self.autoCleanByPath = try c.decode([String: Bool].self, forKey: .autoCleanByPath)
