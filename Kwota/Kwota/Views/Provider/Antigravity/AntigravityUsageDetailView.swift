@@ -2,48 +2,142 @@
 //  AntigravityUsageDetailView.swift
 //  Kwota
 //
-//  Antigravity Usage tab body.
-//
-//  Layout: one credit-pool card on top with three rows (AI credits,
-//  Prompt credits, Flow credits), then a "Model quota" section below
-//  with one row per model. Every bar uses the same shaded `quotaBar`
-//  (SwiftUI Charts `BarMark` with `color.gradient`) — same pattern as
-//  the Claude and Codex provider views, so the popover feels consistent
-//  across providers. Model rows are sorted by family (Gemini Pro →
-//  Gemini Flash → Claude → GPT) with variants ordered Low → Medium →
-//  High → Thinking within each family.
+//  Antigravity Usage tab body. A group picker (Gemini / Claude+GPT) with a
+//  per-segment severity dot selects which group's quota to chart; below it the
+//  standard UsageTrendChart Session(5h) + Weekly cards render that group's two
+//  windows — same layout as the Claude/Codex tabs. The AI-credits / overage
+//  row stays at the bottom. Data source: RetrieveUserQuotaSummary (the numbers
+//  the Antigravity app itself shows), not the retired per-model quotaInfo.
 //
 
 import SwiftUI
-import Charts
+
+/// Pure view logic, factored out so selection/dot/chart-input rules are unit
+/// testable without a SwiftUI host.
+enum AntigravityUsageGroupLogic {
+    static func defaultSelection(quota: AntigravityQuotaSummary) -> String? {
+        quota.bindingGroupKey ?? quota.groups.first?.key
+    }
+
+    static func resolvedKey(selected: String?, quota: AntigravityQuotaSummary) -> String? {
+        if let selected, quota.groups.contains(where: { $0.key == selected }) { return selected }
+        return defaultSelection(quota: quota)
+    }
+
+    static func dotColor(for group: AntigravityQuotaSummary.Group) -> Color {
+        UsageLevel.tint(for: group.worstUtilization)
+    }
+
+    /// Maps a group's two windows into the provider-agnostic chart input. The
+    /// `fetchedAt != epoch` check mirrors how Claude/Codex derive `hasRealData`
+    /// (`fetchedAt != .distantPast`): a zero/epoch stamp means "never fetched"
+    /// and drives the chart's "Waiting for first fetch…" placeholder.
+    static func chartInput(
+        for group: AntigravityQuotaSummary.Group, fetchedAt: Date
+    ) -> UsageTrendChartInput {
+        UsageTrendChartInput(
+            fiveHour: group.fiveHour.map { UsageBucket(utilization: $0.utilization, resetsAt: $0.resetTime) },
+            sevenDay: group.weekly.map { UsageBucket(utilization: $0.utilization, resetsAt: $0.resetTime) },
+            hasRealData: fetchedAt.timeIntervalSince1970 != 0)
+    }
+}
 
 struct AntigravityUsageDetailView: View {
     let snapshot: AntigravityUsageSnapshot
-    let history: [UsageHistoryEntry]
+    let quota: AntigravityQuotaSummary?
+    let groupHistory: [String: [UsageHistoryEntry]]
+
+    @AppStorage(AppStorageKeys.displayChartShowAvg)      private var showAvg: Bool = true
+    @AppStorage(AppStorageKeys.displayChartShowPaceHint) private var showPaceHint: Bool = true
+    @State private var selectedKey: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if hasAnyCreditPool {
-                creditsCard
+            if let quota, !quota.groups.isEmpty {
+                quotaSection(quota)
+            } else {
+                unavailableCard
             }
-
-            if let models = snapshot.models, !models.isEmpty {
-                VStack(alignment: .leading, spacing: 0) {
-                    SectionHeader(title: "Model quota")
-                    modelsCard(sortedModels(models))
-                }
+            if Self.shouldShowCreditCard(snapshot: snapshot), let wallet = snapshot.aiCreditsWallet {
+                creditsCard(wallet: wallet)
             }
         }
     }
 
-    private var hasAnyCreditPool: Bool {
-        Self.shouldShowCreditCard(snapshot: snapshot)
+    @ViewBuilder
+    private func quotaSection(_ quota: AntigravityQuotaSummary) -> some View {
+        let resolved = AntigravityUsageGroupLogic.resolvedKey(selected: selectedKey, quota: quota)
+        let group = quota.groups.first { $0.key == resolved } ?? quota.groups[0]
+
+        groupPicker(quota: quota, resolved: resolved)
+            .onAppear {
+                if selectedKey == nil {
+                    selectedKey = AntigravityUsageGroupLogic.defaultSelection(quota: quota)
+                }
+            }
+
+        let charts = UsageTrendChart(
+            input: AntigravityUsageGroupLogic.chartInput(for: group, fetchedAt: quota.fetchedAt),
+            history: groupHistory[group.key] ?? [],
+            showAvg: showAvg,
+            showPaceHint: showPaceHint)
+
+        VStack(alignment: .leading, spacing: 0) {
+            SectionHeader(title: "Current Session")
+            charts.card(for: .session)
+        }
+        VStack(alignment: .leading, spacing: 0) {
+            SectionHeader(title: "Weekly Limit")
+            charts.weeklyCard()
+        }
     }
 
+    @ViewBuilder
+    private func groupPicker(quota: AntigravityQuotaSummary, resolved: String?) -> some View {
+        HStack(spacing: 4) {
+            ForEach(quota.groups, id: \.key) { group in
+                let isSel = (group.key == resolved)
+                Button {
+                    selectedKey = group.key
+                } label: {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(AntigravityUsageGroupLogic.dotColor(for: group))
+                            .frame(width: 7, height: 7)
+                        Text(group.displayName ?? group.key)
+                            .font(.caption)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(isSel ? Color.secondary.opacity(0.22) : Color.clear))
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(isSel ? [.isSelected] : [])
+            }
+        }
+        .padding(3)
+        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(.regularMaterial))
+    }
+
+    private var unavailableCard: some View {
+        HStack {
+            Image(systemName: "exclamationmark.triangle").font(.caption)
+            Text("Quota unavailable").font(.caption).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.regularMaterial))
+    }
+
+    // MARK: - Credit card visibility (exposed for tests)
+
     /// Visible iff wallet has a balance AND the tier exposes an AI Credits
-    /// ceiling. Free / Unknown tiers (no ceiling) suppress the card even
-    /// when the wallet is present — there's no scale to draw the bar
-    /// against. Exposed for tests; do not reach for it elsewhere.
+    /// ceiling. Free / Unknown tiers (no ceiling) suppress the card even when
+    /// the wallet is present — there's no scale to draw the bar against.
     static func shouldShowCreditCard(snapshot: AntigravityUsageSnapshot) -> Bool {
         snapshot.aiCreditsWallet != nil && snapshot.tier.aiCreditsCeiling != nil
     }
@@ -60,255 +154,59 @@ struct AntigravityUsageDetailView: View {
         snapshot.overagesEnabled == false
     }
 
-    // MARK: - Credit pools (AI + Prompt + Flow, top-down)
-
     @ViewBuilder
-    private var creditsCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let wallet = snapshot.aiCreditsWallet {
-                aiCreditsPoolRow(available: wallet)
-            }
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(.regularMaterial)
-        )
-    }
-
-    /// AI credits row. Three sub-rows, top-down:
-    ///   1. Caption ("Enable AI Credit Overages  ●  On|Off") — shown only
-    ///      when `overagesEnabled != nil`. nil keeps the row absent so a
-    ///      flaky SQLite read doesn't invent an off state.
-    ///   2. Label + balance ("AI credits  ·  423 / 1,000").
-    ///   3. Quota bar — dimmed grey gradient when overages are explicitly
-    ///      OFF, normal color otherwise.
-    @ViewBuilder
-    private func aiCreditsPoolRow(available: Int64) -> some View {
+    private func creditsCard(wallet: Int64) -> some View {
         let ceiling = snapshot.tier.aiCreditsCeiling
         let utilization: Double? = ceiling.flatMap { c -> Double? in
             guard c > 0 else { return nil }
-            return max(0, min(100, (1.0 - Double(available) / Double(c)) * 100))
+            return max(0, min(100, (1.0 - Double(wallet) / Double(c)) * 100))
         }
         VStack(alignment: .leading, spacing: 4) {
             if Self.shouldShowOverageCaption(snapshot: snapshot) {
                 let on = snapshot.overagesEnabled == true
                 HStack(spacing: 6) {
-                    Text("Enable AI Credit Overages")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    Text("Enable AI Credit Overages").font(.caption2).foregroundStyle(.secondary)
                     Spacer()
-                    Circle()
-                        .fill(on ? Color.green : Color.secondary)
-                        .frame(width: 6, height: 6)
-                    Text(on ? "On" : "Off")
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                    Circle().fill(on ? Color.green : Color.secondary).frame(width: 6, height: 6)
+                    Text(on ? "On" : "Off").font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                 }
             }
             HStack(spacing: 8) {
                 Text("AI credits").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 if let ceiling, ceiling > 0 {
-                    Text("\(formatCount(available)) / \(formatCount(ceiling))")
-                        .font(.caption.monospacedDigit())
+                    Text("\(formatCount(wallet)) / \(formatCount(ceiling))").font(.caption.monospacedDigit())
                 } else {
-                    Text(formatCount(available)).font(.caption.monospacedDigit())
+                    Text(formatCount(wallet)).font(.caption.monospacedDigit())
                 }
             }
             if let utilization {
-                quotaBar(
-                    utilization: utilization,
-                    forceDim: Self.aiCreditsBarShouldDim(snapshot: snapshot)
-                )
+                quotaBar(utilization: utilization, forceDim: Self.aiCreditsBarShouldDim(snapshot: snapshot))
             }
         }
-    }
-
-    // MARK: - Models
-
-    @ViewBuilder
-    private func modelsCard(_ models: [AntigravityUsageSnapshot.ModelQuota]) -> some View {
-        // VStack with zero spacing — each row owns its vertical padding,
-        // and a faint Divider after every row except the last produces the
-        // hairline separators in the mockup. `Divider().opacity(0.3)`
-        // matches the subtle look without overpowering the green bars.
-        VStack(spacing: 0) {
-            ForEach(Array(models.enumerated()), id: \.offset) { entry in
-                modelRow(entry.element)
-                    .padding(.vertical, 6)
-                if entry.offset < models.count - 1 {
-                    Divider().opacity(0.3)
-                }
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(.regularMaterial)
-        )
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.regularMaterial))
     }
 
     @ViewBuilder
-    private func modelRow(_ model: AntigravityUsageSnapshot.ModelQuota) -> some View {
-        // Tighter horizontal layout than before:
-        //   - HStack spacing 6 (was 10) — pulls name closer to bar and
-        //     bar closer to reset label.
-        //   - Name column 150pt (was 180) — releases 30pt to the bar.
-        //   - Reset column 50pt (was 60) — releases another 10pt.
-        // Net: bar gains ~50pt of horizontal real estate, so the 5 capsule
-        // segments fill more of the available row width and stop reading
-        // as a clustered group in the middle.
-        HStack(spacing: 6) {
-            Text(model.label ?? model.modelId ?? "Unknown")
-                .font(.caption)
-                .lineLimit(1)
-                .frame(width: 150, alignment: .leading)
-
-            // remainingFraction is 0.0-1.0 of headroom left. Flip to
-            // utilization (% consumed) so the bar fills in the same
-            // direction as every other bar in this view and the switcher.
-            quotaBar(utilization: model.remainingFraction.map { (1 - $0) * 100 })
-                .frame(maxWidth: .infinity)
-
-            Text(resetLabel(for: model.resetTime))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 50, alignment: .trailing)
-        }
-    }
-
-    // MARK: - Bar
-
-    /// Shaded continuous bar used by every row in this view (credit
-    /// pools + model rows). Mirrors `PerModelCard.bar` and
-    /// `CodexPerCategoryCard.bar`: SwiftUI Charts `BarMark` filled with
-    /// `color.gradient`, which gives a subtle top-to-bottom shading
-    /// that reads as "3D" against the neutral track.
-    ///
-    /// `utilization` follows the codebase-wide `UsageBucket.utilization`
-    /// convention: 0-100 where higher = more consumed. The bar is rendered
-    /// in **battery view**: starts at 100% width when utilization is 0
-    /// (full quota), drains toward 0 width as utilization rises (near the
-    /// cap). Color is still driven by utilization (`barColor` thresholds
-    /// unchanged) so a near-empty bar fires red as expected. `nil`
-    /// renders as the empty track only.
-    @ViewBuilder
-    private func quotaBar(utilization: Double?, forceDim: Bool = false) -> some View {
-        let clamped = max(0, min(100, utilization ?? 0))
+    private func quotaBar(utilization: Double, forceDim: Bool) -> some View {
+        let clamped = max(0, min(100, utilization))
         let remaining = 100 - clamped
-        // forceDim takes precedence over utilization-derived color: the
-        // wallet may have headroom but be inactive (overages off), and
-        // a green bar in that case would lie about the state.
-        let color: Color = forceDim ? .secondary : barColor(utilization: clamped)
-        Chart {
-            BarMark(
-                xStart: .value("Start", 0),
-                xEnd:   .value("End", utilization == nil ? 0 : remaining),
-                y:      .value("Track", "")
-            )
-            .foregroundStyle(color.gradient)
-            .cornerRadius(4)
-        }
-        .chartXScale(domain: 0...100)
-        .chartXAxis(.hidden)
-        .chartYAxis(.hidden)
-        .chartPlotStyle { plotArea in
-            plotArea
-                .background(Color.secondary.opacity(0.12))
-                .cornerRadius(4)
+        let color: Color = forceDim ? .secondary : UsageLevel.tint(for: clamped)
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.12))
+                RoundedRectangle(cornerRadius: 4).fill(color.gradient)
+                    .frame(width: geo.size.width * CGFloat(remaining / 100))
+            }
         }
         .frame(height: 8)
     }
 
-    /// Green below 75% utilization, yellow at 75-90%, red above 90%.
-    /// Matches the threshold direction used elsewhere in the popover
-    /// (PerModelCard / CodexPerCategoryCard / UsageLevel.tint) — high
-    /// utilization = near the cap = red warning.
-    private func barColor(utilization: Double) -> Color {
-        if utilization > 90 { return .red }
-        if utilization > 75 { return .yellow }
-        return .green
-    }
-
-    // MARK: - Reset label
-
-    /// Formats a reset time as "Nh Mm" / "Md Nh" / "now" / "<1m".
-    private func resetLabel(for reset: Date?) -> String {
-        guard let reset else { return "—" }
-        let delta = reset.timeIntervalSinceNow
-        if delta <= 0 { return "now" }
-        let seconds = Int(delta)
-        let minutes = seconds / 60
-        let hours = minutes / 60
-        let days = hours / 24
-        if days >= 1 { return "\(days)d \(hours % 24)h" }
-        if hours >= 1 { return "\(hours)h \(minutes % 60)m" }
-        if minutes >= 1 { return "\(minutes)m" }
-        return "<1m"
-    }
-
-    // MARK: - Model sort
-
-    /// Stable sort: family bucket ascending (Gemini Pro → Gemini Flash →
-    /// Claude → GPT → other) then effort tier ascending (Low → Medium →
-    /// High → Thinking → unknown) within each family. Ties fall back to
-    /// the original label for a deterministic order.
-    fileprivate func sortedModels(
-        _ models: [AntigravityUsageSnapshot.ModelQuota]
-    ) -> [AntigravityUsageSnapshot.ModelQuota] {
-        models.sorted { a, b in
-            let ka = AntigravityModelSortKey.from(label: a.label)
-            let kb = AntigravityModelSortKey.from(label: b.label)
-            if ka.family != kb.family { return ka.family < kb.family }
-            if ka.effort != kb.effort { return ka.effort < kb.effort }
-            return (a.label ?? "") < (b.label ?? "")
-        }
-    }
-
-    // MARK: - Formatting
-
     private func formatCount(_ value: Int64?) -> String {
         guard let value else { return "—" }
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        f.groupingSeparator = ","
+        let f = NumberFormatter(); f.numberStyle = .decimal; f.groupingSeparator = ","
         return f.string(from: NSNumber(value: value)) ?? "\(value)"
-    }
-}
-
-/// Sort key used by `AntigravityUsageDetailView.sortedModels`. Exposed at
-/// file scope (not nested in the view) so unit tests can pin the comparator
-/// behavior without instantiating the SwiftUI view.
-struct AntigravityModelSortKey: Equatable {
-    /// Family bucket — lower comes first.
-    let family: Int
-    /// Effort tier within the family — lower comes first.
-    let effort: Int
-
-    static func from(label: String?) -> AntigravityModelSortKey {
-        let lower = (label ?? "").lowercased()
-        let family: Int
-        if lower.contains("gemini") {
-            family = lower.contains("flash") ? 1 : 0
-        } else if lower.contains("claude") {
-            family = 2
-        } else if lower.contains("gpt") {
-            family = 3
-        } else {
-            family = 99
-        }
-
-        let effort: Int
-        if lower.contains("(low)")        { effort = 0 }
-        else if lower.contains("(medium)") { effort = 1 }
-        else if lower.contains("(high)")   { effort = 2 }
-        else if lower.contains("(thinking)") { effort = 3 }
-        else                                 { effort = 99 }
-
-        return AntigravityModelSortKey(family: family, effort: effort)
     }
 }

@@ -95,9 +95,8 @@ final class AntigravityProviderEndToEndTests: XCTestCase {
             profile: active
         )
         XCTAssertEqual(summary.providerID, .antigravity)
-        let snap = try XCTUnwrap(summary.payload as? AntigravityUsageSnapshot)
-        XCTAssertEqual(snap.email, "test@example.com")
-        XCTAssertEqual(snap.models?.count, 1)
+        let payload = try XCTUnwrap(summary.payload as? AntigravityUsagePayload)
+        XCTAssertEqual(payload.snapshot.email, "test@example.com")
 
         let afterFetch = try XCTUnwrap(profileStore.profiles.first(where: { $0.id == active.id }))
         XCTAssertEqual(afterFetch.email, "test@example.com")

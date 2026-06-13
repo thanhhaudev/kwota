@@ -199,7 +199,8 @@ final class AntigravityProvider: AccountProvider {
         }
         return AnyView(AntigravityUsageDetailView(
             snapshot: payload.snapshot,
-            history: history))
+            quota: payload.quota,
+            groupHistory: groupHistoryProvider(profile.id)))
     }
 
     func planBadgeView(profile: Profile) -> AnyView {

@@ -4,9 +4,11 @@
 //
 //  Decoded shape of GetUserStatus from the Antigravity language_server's
 //  local Connect-RPC endpoint. Antigravity uses a credit-based quota model
-//  with separate Prompt and Flow credit pools, plus per-model rate-limit
-//  quotaInfo. Proto3-aware: missing remainingFraction inside an existing
-//  quotaInfo object means 0%, while an absent quotaInfo means no-limit.
+//  with separate Prompt and Flow credit pools, plus an AI-credits wallet.
+//  The authoritative per-group weekly/5h quota the app's "Model Quota" page
+//  displays lives in RetrieveUserQuotaSummary (see AntigravityQuotaSummary),
+//  not here — the per-model quotaInfo this used to parse measured a
+//  different (internal) throttle and is no longer decoded.
 //
 
 import Foundation
@@ -28,7 +30,6 @@ struct AntigravityUsageSnapshot: Decodable, Equatable, Sendable {
     let planInfo: PlanInfo?
     let availablePromptCredits: Int64?
     let availableFlowCredits: Int64?
-    let models: [ModelQuota]?
     /// Cross-product Google AI Pro / Ultra credit wallet entries, decoded
     /// from `userTier.availableCredits`. The balance in each entry is
     /// shared across Antigravity, Google Flow (video gen), and other
@@ -71,8 +72,8 @@ struct AntigravityUsageSnapshot: Decodable, Equatable, Sendable {
             // `creditAmount` is omitted, the balance is 0 (not unknown). A
             // nil here would let `aiCreditsWallet` fall back to the stale
             // state.vscdb sentinel, lying that the wallet is full when it's
-            // actually drained. Mirrors `ModelQuota.remainingFraction`'s
-            // `?? 0` for the same proto3 reason.
+            // actually drained. Proto3 zero-elision: a present container with
+            // an omitted scalar means 0, not unknown.
             self.creditAmount = (try Self.flexibleInt64(c, .creditAmount)) ?? 0
             self.minimumCreditAmountForUsage = try Self.flexibleInt64(c, .minimumCreditAmountForUsage)
         }
@@ -125,53 +126,13 @@ struct AntigravityUsageSnapshot: Decodable, Equatable, Sendable {
         }
     }
 
-    struct ModelQuota: Decodable, Equatable, Sendable {
-        let label: String?
-        let modelId: String?
-        /// 0.0-1.0. Per proto3 zero-elision: when quotaInfo container exists
-        /// but this field is absent, the value is 0 (exhausted). When the
-        /// entire quotaInfo container is absent, set this nil (no limit).
-        let remainingFraction: Double?
-        let resetTime: Date?
-
-        enum CodingKeys: String, CodingKey {
-            case label, modelOrAlias, quotaInfo
-        }
-        enum AliasKeys: String, CodingKey { case model }
-        enum QuotaKeys: String, CodingKey { case remainingFraction, resetTime }
-
-        init(from decoder: Decoder) throws {
-            let c = try decoder.container(keyedBy: CodingKeys.self)
-            self.label = try c.decodeIfPresent(String.self, forKey: .label)
-            if let alias = try? c.nestedContainer(keyedBy: AliasKeys.self, forKey: .modelOrAlias) {
-                self.modelId = try alias.decodeIfPresent(String.self, forKey: .model)
-            } else { self.modelId = nil }
-            if let q = try? c.nestedContainer(keyedBy: QuotaKeys.self, forKey: .quotaInfo) {
-                // quotaInfo container present
-                self.remainingFraction = (try? q.decodeIfPresent(Double.self, forKey: .remainingFraction)) ?? 0
-                if let s = try? q.decodeIfPresent(String.self, forKey: .resetTime) {
-                    self.resetTime = ISO8601DateFormatter().date(from: s)
-                } else { self.resetTime = nil }
-            } else {
-                // quotaInfo container absent — no rate limit
-                self.remainingFraction = nil
-                self.resetTime = nil
-            }
-        }
-        init(label: String?, modelId: String?, remainingFraction: Double?, resetTime: Date?) {
-            self.label = label; self.modelId = modelId
-            self.remainingFraction = remainingFraction; self.resetTime = resetTime
-        }
-    }
-
     enum CodingKeys: String, CodingKey { case userStatus, schemaVersion }
     enum UserStatusKeys: String, CodingKey {
-        case name, email, planStatus, cascadeModelConfigData, userTier
+        case name, email, planStatus, userTier
     }
     enum PlanStatusKeys: String, CodingKey {
         case planInfo, availablePromptCredits, availableFlowCredits
     }
-    enum ModelConfigDataKeys: String, CodingKey { case clientModelConfigs }
     enum UserTierKeys: String, CodingKey { case availableCredits, name }
 
     init(from decoder: Decoder) throws {
@@ -182,7 +143,6 @@ struct AntigravityUsageSnapshot: Decodable, Equatable, Sendable {
             self.name = nil; self.email = nil
             self.planInfo = nil
             self.availablePromptCredits = nil; self.availableFlowCredits = nil
-            self.models = nil
             self.availableCredits = []
             self.userTierName = nil
             self.overagesEnabled = nil
@@ -198,12 +158,6 @@ struct AntigravityUsageSnapshot: Decodable, Equatable, Sendable {
             self.availableFlowCredits = try Self.flexibleInt64Outer(ps, .availableFlowCredits)
         } else {
             self.planInfo = nil; self.availablePromptCredits = nil; self.availableFlowCredits = nil
-        }
-
-        if let md = try? us.nestedContainer(keyedBy: ModelConfigDataKeys.self, forKey: .cascadeModelConfigData) {
-            self.models = try md.decodeIfPresent([ModelQuota].self, forKey: .clientModelConfigs)
-        } else {
-            self.models = nil
         }
 
         if let ut = try? us.nestedContainer(keyedBy: UserTierKeys.self, forKey: .userTier) {
@@ -222,7 +176,7 @@ struct AntigravityUsageSnapshot: Decodable, Equatable, Sendable {
         fetchedAt: Date, name: String? = nil, email: String? = nil,
         planInfo: PlanInfo? = nil,
         availablePromptCredits: Int64? = nil, availableFlowCredits: Int64? = nil,
-        models: [ModelQuota]? = nil, availableCredits: [WalletEntry] = [],
+        availableCredits: [WalletEntry] = [],
         userTierName: String? = nil,
         overagesEnabled: Bool? = nil,
         aiCreditsFallback: Int64? = nil,
@@ -232,7 +186,7 @@ struct AntigravityUsageSnapshot: Decodable, Equatable, Sendable {
         self.planInfo = planInfo
         self.availablePromptCredits = availablePromptCredits
         self.availableFlowCredits = availableFlowCredits
-        self.models = models; self.availableCredits = availableCredits
+        self.availableCredits = availableCredits
         self.userTierName = userTierName
         self.overagesEnabled = overagesEnabled
         self.aiCreditsFallback = aiCreditsFallback
@@ -270,93 +224,6 @@ struct AntigravityUsageSnapshot: Decodable, Equatable, Sendable {
     /// otherwise-healthy fetch that happened to omit the wallet.
     var aiCreditsWallet: Int64? { availableCredits.first?.creditAmount ?? aiCreditsFallback }
 
-    /// Worst-among-still-usable utilization (0–100). Excludes models
-    /// that are already exhausted (`remainingFraction == 0`) so the
-    /// switcher bar reflects the headroom on a model the user can
-    /// actually invoke — not a dead model with a tooltip pointing at
-    /// "0% remaining". Special cases:
-    ///
-    /// - Returns `100` when every model with quota is exhausted: bar
-    ///   renders fully capped (red) and tooltip surfaces the next reset.
-    /// - Returns `nil` when no model carries quota information at all
-    ///   (rate-limit fields absent in the live response).
-    /// - When some models are exhausted and others are still usable,
-    ///   returns the highest utilization AMONG the still-usable set.
-    ///   The bar "switches" to a model with headroom; tooltip stays
-    ///   plain ("Worst usable: <label> · N% remaining") — popover
-    ///   carries the per-model breakdown for users who want detail.
-    var worstModelUtilization: Double? {
-        let modelsWithQuota = (models ?? []).filter { $0.remainingFraction != nil }
-        guard !modelsWithQuota.isEmpty else { return nil }
-        if allModelsExhausted { return 100 }
-        let usable = modelsWithQuota.filter { ($0.remainingFraction ?? 0) > 0 }
-        guard let minRemaining = usable.compactMap({ $0.remainingFraction }).min() else {
-            return nil
-        }
-        return max(0, min(100, (1 - minRemaining) * 100))
-    }
-
-    /// The single model the "worst" surface points at. The bar label and
-    /// the switcher reset both derive from this, so they can never disagree
-    /// about which model they describe. Picks the worst-still-usable
-    /// (lowest remaining) normally; when every model is exhausted, picks
-    /// the one with the earliest `resetTime` (the next to come back online
-    /// — the most actionable piece in the all-capped case). Nil when no
-    /// model carries quota information (or, in the all-exhausted case, when
-    /// none carries a `resetTime`).
-    var worstModel: ModelQuota? {
-        let modelsWithQuota = (models ?? []).filter { $0.remainingFraction != nil }
-        guard !modelsWithQuota.isEmpty else { return nil }
-        if allModelsExhausted {
-            return modelsWithQuota
-                .compactMap { m in m.resetTime.map { ($0, m) } }
-                .min(by: { $0.0 < $1.0 })?
-                .1
-        }
-        return modelsWithQuota
-            .compactMap { m -> (Double, ModelQuota)? in
-                guard let r = m.remainingFraction, r > 0 else { return nil }
-                return (r, m)
-            }
-            .min(by: { $0.0 < $1.0 })?
-            .1
-    }
-
-    /// Label of the model that drives `worstModelUtilization` — see
-    /// `worstModel` for the selection rule.
-    var worstModelLabel: String? { worstModel?.label }
-
-    /// Reset time of the worst model — the one the switcher bar visualises.
-    /// The switcher subtitle uses this so "Resets in …" describes the same
-    /// model shown on the bar, not the soonest-resetting model overall
-    /// (`earliestModelReset`). Nil when the worst model carries no reset
-    /// window (e.g. every model fresh), letting the subtitle fall back to
-    /// the credit cycle.
-    var worstModelReset: Date? { worstModel?.resetTime }
-
-    /// True when at least one model has quota data AND every such
-    /// model is exhausted (`remainingFraction == 0`).
-    var allModelsExhausted: Bool {
-        let withQuota = (models ?? []).compactMap { $0.remainingFraction }
-        guard !withQuota.isEmpty else { return false }
-        return withQuota.allSatisfy { $0 == 0 }
-    }
-
-    /// True when at least one model has quota data AND every such
-    /// model is at full headroom (`remainingFraction == 1`). Used by
-    /// the tooltip to differentiate "fresh week" from "midway through".
-    var allModelsFresh: Bool {
-        let withQuota = (models ?? []).compactMap { $0.remainingFraction }
-        guard !withQuota.isEmpty else { return false }
-        return withQuota.allSatisfy { $0 >= 1 }
-    }
-
-    /// Earliest `resetTime` across models that carry one. Used to build
-    /// "next reset in <time>" copy when every model is exhausted.
-    var earliestModelReset: Date? {
-        (models ?? []).compactMap { $0.resetTime }.min()
-    }
-
     /// AI Credits utilization (0–100). nil when no wallet entry OR the
     /// current tier has no ceiling (Free / Unknown).
     var aiCreditsUtilization: Double? {
@@ -369,11 +236,11 @@ struct AntigravityUsageSnapshot: Decodable, Equatable, Sendable {
     // MARK: - Reset cadence note
     //
     // The `GetUserStatus` endpoint does NOT expose a reset timestamp for
-    // the Prompt / Flow credit pools. Only per-model `quotaInfo.resetTime`
-    // (rate-limit cooldown for each model) is available, surfaced via
-    // `ModelQuota.resetTime`. If a reset cadence for the credit pools is
-    // needed in the UI, that information has to come from elsewhere
-    // (a second endpoint, or hard-coded knowledge of the plan's cycle).
+    // the Prompt / Flow credit pools. If a reset cadence for the credit
+    // pools is needed in the UI, that information has to come from elsewhere
+    // (a second endpoint, or hard-coded knowledge of the plan's cycle). The
+    // authoritative per-group weekly/5h reset windows live in
+    // `RetrieveUserQuotaSummary` — see `AntigravityQuotaSummary`.
 
     /// Percent of the baseline prompt-credit window remaining (0-100).
     /// Antigravity's baseline quota is a rate-limit window, not a strict
