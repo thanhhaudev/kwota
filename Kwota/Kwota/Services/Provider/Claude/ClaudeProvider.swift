@@ -161,6 +161,10 @@ final class ClaudeProvider: AccountProvider {
         ))
     }
 
+    func statsDetailView(store: StatsStore, profile: Profile) -> AnyView {
+        AnyView(ClaudeStatsDetailView(store: store, profile: profile))
+    }
+
     func planBadgeView(profile: Profile) -> AnyView {
         AnyView(PlanTextBadge(plan: profile.subscriptionPlan))
     }
