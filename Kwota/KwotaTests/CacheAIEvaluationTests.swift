@@ -12,11 +12,11 @@
 import XCTest
 @testable import Kwota
 
-/// Test double for `ClaudeCLIInvocation`. Either returns a canned
+/// Test double for `AgentCLIInvocation`. Either returns a canned
 /// `structured_output` JSON string or throws a canned error — covers the
 /// `EvaluationError` paths plus the happy path without spawning a
 /// subprocess.
-private final class StubCLIRunner: ClaudeCLIInvocation, @unchecked Sendable {
+private final class StubCLIRunner: AgentCLIInvocation, @unchecked Sendable {
     enum Outcome {
         case success(String)
         case failure(Error)
@@ -189,7 +189,7 @@ final class CacheAIEvaluationTests: XCTestCase {
     }
 
     func testEvaluateSurfacesCLINotInstalled() async {
-        let runner = StubCLIRunner(outcome: .failure(ClaudeCLIRunner.InvocationError.notInstalled))
+        let runner = StubCLIRunner(outcome: .failure(CLIInvocationError.notInstalled))
         let evaluator = CacheEvaluator(cliRunner: runner)
         let result = await evaluator.evaluate(row: makeRow(handCurated: .safe, eval: nil),
                                               model: .sonnet46, language: .english)
@@ -201,7 +201,7 @@ final class CacheAIEvaluationTests: XCTestCase {
         // The "Not logged in" path: runner throws .cliReportedError, the
         // evaluator should fold it into .cliFailed for the inline alert.
         let runner = StubCLIRunner(outcome: .failure(
-            ClaudeCLIRunner.InvocationError.cliReportedError("Not logged in · Please run /login")
+            CLIInvocationError.cliReportedError("Not logged in · Please run /login")
         ))
         let evaluator = CacheEvaluator(cliRunner: runner)
         let result = await evaluator.evaluate(row: makeRow(handCurated: .safe, eval: nil),
@@ -271,7 +271,7 @@ final class CacheAIEvaluationTests: XCTestCase {
     func testEvaluateBulkOnEmptyRowsReturnsEmptyWithoutInvokingCLI() async {
         // Even a misbehaving CLI shouldn't be touched when there's nothing
         // to evaluate — the early return guards the user's quota.
-        let runner = StubCLIRunner(outcome: .failure(ClaudeCLIRunner.InvocationError.notInstalled))
+        let runner = StubCLIRunner(outcome: .failure(CLIInvocationError.notInstalled))
         let evaluator = CacheEvaluator(cliRunner: runner)
         let result = await evaluator.evaluateBulk(rows: [], model: .sonnet46, language: .english)
         if case .success(let byURL) = result {

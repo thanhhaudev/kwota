@@ -210,7 +210,7 @@ final class MenuBarViewModel {
     /// Spawns `claude -p` for Cache → AI evaluation. CLI route is the
     /// only auth path that actually works for `/v1/messages`-style
     /// generation today (third-party OAuth Bearer is gated).
-    private let cliRunner: ClaudeCLIInvocation
+    private let cliRunner: AgentCLIInvocation
     let privilegedHelper: PrivilegedHelperManager
     private var historyStore: UsageHistoryStore?
     /// Maps a profile id to its usage-history file. Defaults to the live
@@ -564,7 +564,7 @@ final class MenuBarViewModel {
         profileUsageFetcher: (any ProfileUsageFetching)? = nil,
         apiClient: ClaudeAPIClient? = nil,
         cliRefresher: CLITokenRefresher? = nil,
-        cliRunner: ClaudeCLIInvocation? = nil,
+        cliRunner: AgentCLIInvocation? = nil,
         privilegedHelper: PrivilegedHelperManager? = nil,
         registry: ProviderRegistry? = nil,
         shortcutCoordinator: ShortcutCoordinator? = nil,

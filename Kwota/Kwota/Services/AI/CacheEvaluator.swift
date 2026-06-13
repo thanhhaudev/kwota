@@ -18,13 +18,13 @@
 import Foundation
 
 final class CacheEvaluator {
-    let cliRunner: ClaudeCLIInvocation
+    let cliRunner: AgentCLIInvocation
     /// Generous default — a 15-row bulk on Sonnet, going through the CLI's
     /// multi-turn structured-output loop, can run well past a minute.
     /// Timing out is recoverable: the user just retries.
     let timeout: TimeInterval
 
-    init(cliRunner: ClaudeCLIInvocation, timeout: TimeInterval = 180) {
+    init(cliRunner: AgentCLIInvocation, timeout: TimeInterval = 180) {
         self.cliRunner = cliRunner
         self.timeout = timeout
     }
@@ -193,17 +193,17 @@ final class CacheEvaluator {
                 timeout: timeout
             )
             return .success(out)
-        } catch ClaudeCLIRunner.InvocationError.notInstalled {
+        } catch CLIInvocationError.notInstalled {
             return .failure(.cliNotInstalled)
-        } catch ClaudeCLIRunner.InvocationError.timeout {
+        } catch CLIInvocationError.timeout {
             return .failure(.timeout)
-        } catch ClaudeCLIRunner.InvocationError.cliReportedError(let msg) {
+        } catch CLIInvocationError.cliReportedError(let msg) {
             return .failure(.cliFailed(msg))
-        } catch ClaudeCLIRunner.InvocationError.nonZeroExit(_, let msg) {
+        } catch CLIInvocationError.nonZeroExit(_, let msg) {
             return .failure(.cliFailed(msg))
-        } catch ClaudeCLIRunner.InvocationError.launchFailed(let msg) {
+        } catch CLIInvocationError.launchFailed(let msg) {
             return .failure(.cliFailed(msg))
-        } catch ClaudeCLIRunner.InvocationError.malformedOutput(let msg) {
+        } catch CLIInvocationError.malformedOutput(let msg) {
             return .failure(.parseFailed(msg))
         } catch {
             return .failure(.cliFailed(String(describing: error)))

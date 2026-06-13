@@ -30,44 +30,7 @@
 
 import Foundation
 
-/// Headless invocation of the Claude Code CLI.
-protocol ClaudeCLIInvocation: Sendable {
-    /// Runs `claude -p` headless and returns the model's answer as a JSON
-    /// string. When `jsonSchema` is non-nil the returned string is the
-    /// CLI's `structured_output` object (guaranteed to match the schema);
-    /// when nil it's the plain `result` text. Throws
-    /// `ClaudeCLIRunner.InvocationError` on any failure.
-    func ask(
-        systemPrompt: String,
-        userPrompt: String,
-        model: String?,
-        jsonSchema: String?,
-        timeout: TimeInterval
-    ) async throws -> String
-}
-
-final class ClaudeCLIRunner: ClaudeCLIInvocation {
-    /// Failure modes the cache evaluator wants to distinguish in the UI.
-    enum InvocationError: Error, Equatable {
-        /// `claude` binary not found in any candidate location.
-        case notInstalled
-        /// `Process.run()` itself threw before the CLI started.
-        case launchFailed(String)
-        /// Process exited non-zero and stdout wasn't a parseable envelope.
-        case nonZeroExit(status: Int32, message: String)
-        /// The CLI ran but its JSON envelope reported `is_error: true`
-        /// (auth failure, quota, etc.) — carries the envelope's message.
-        case cliReportedError(String)
-        /// Envelope couldn't be parsed, or `structured_output` was missing
-        /// when a schema was requested.
-        case malformedOutput(String)
-        /// Process took longer than the configured timeout.
-        case timeout
-        /// The caller's Task was cancelled; the child process has been
-        /// terminated (SIGTERM + SIGKILL escalation after 1 s).
-        case cancelled
-    }
-
+final class ClaudeCLIRunner: AgentCLIInvocation {
     /// Candidate locations to probe for the `claude` binary, in priority
     /// order. Covers the install footprints we see in the wild:
     /// Anthropic's installer (`~/.local/bin`), npm globals
@@ -109,7 +72,7 @@ final class ClaudeCLIRunner: ClaudeCLIInvocation {
         timeout: TimeInterval
     ) async throws -> String {
         guard let binary = resolveBinary() else {
-            throw InvocationError.notInstalled
+            throw CLIInvocationError.notInstalled
         }
 
         // Environment-isolation flags. `--bare` would do all of this in
@@ -174,7 +137,7 @@ final class ClaudeCLIRunner: ClaudeCLIInvocation {
         stderr: String,
         exitCode: Int32,
         jsonSchemaUsed: Bool
-    ) -> Result<String, InvocationError> {
+    ) -> Result<String, CLIInvocationError> {
         guard
             let root = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any]
         else {
@@ -225,7 +188,7 @@ final class ClaudeCLIRunner: ClaudeCLIInvocation {
     ///
     /// If the caller's `Task` is cancelled, the child process is terminated
     /// (SIGTERM + SIGKILL after 1 s) and the continuation throws
-    /// `InvocationError.cancelled`.
+    /// `CLIInvocationError.cancelled`.
     private func runProcess(
         binary: String,
         args: [String],
@@ -317,7 +280,7 @@ final class ClaudeCLIRunner: ClaudeCLIInvocation {
                         let cancelled = wasCancelled
                         cancelLock.unlock()
                         if cancelled {
-                            resumeOnce(.failure(InvocationError.cancelled))
+                            resumeOnce(.failure(CLIInvocationError.cancelled))
                         } else {
                             resumeOnce(.success((out, err, proc.terminationStatus)))
                         }
@@ -326,7 +289,7 @@ final class ClaudeCLIRunner: ClaudeCLIInvocation {
                     do {
                         try process.run()
                     } catch {
-                        resumeOnce(.failure(InvocationError.launchFailed(String(describing: error))))
+                        resumeOnce(.failure(CLIInvocationError.launchFailed(String(describing: error))))
                         return
                     }
 
@@ -344,7 +307,7 @@ final class ClaudeCLIRunner: ClaudeCLIInvocation {
                     DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
                         guard process.isRunning else { return }
                         process.terminate()                  // SIGTERM first
-                        resumeOnce(.failure(InvocationError.timeout))
+                        resumeOnce(.failure(CLIInvocationError.timeout))
 
                         // Give the child 1 second to honor SIGTERM, then SIGKILL.
                         // The `claude` CLI is well-behaved Node and responds to
