@@ -13,10 +13,12 @@
 //      can only be *requested* in the prompt, so the schema is embedded
 //      in the prompt text and the response is run through a tolerant
 //      `extractJSON` (the model may wrap it in a ```json fence or prose).
-//   2. No `--model` flag — agy uses Antigravity's default model, so the
-//      `model` parameter is ignored and provenance stamps a fixed label.
+//   2. The runner forwards the caller's `model` to `agy --model` when set;
+//      provenance is request-based because agy `-p` doesn't echo the
+//      resolved model. Omitting the flag lets agy use its configured default.
 //
-//  Invocation: `agy -p <merged-prompt> --sandbox --print-timeout <N>s`.
+//  Invocation: `agy -p <merged-prompt> --sandbox --print-timeout <N>s
+//  [--model <display-string>]`.
 //  `--sandbox` plus a prompt that forbids tool use keeps the run a pure
 //  one-shot classification; `--print-timeout` is the CLI-side backstop.
 //
@@ -81,7 +83,7 @@ final class AntigravityCLIRunner: AgentCLIInvocation {
             userPrompt: userPrompt,
             jsonSchema: jsonSchema ?? ""
         )
-        let args = Self.buildArguments(prompt: prompt, timeoutSeconds: Int(timeout))
+        let args = Self.buildArguments(prompt: prompt, model: model, timeoutSeconds: Int(timeout))
 
         let (stdoutData, stderrData, exitCode) = try await CLIProcess.run(
             binary: binary,
@@ -108,9 +110,14 @@ final class AntigravityCLIRunner: AgentCLIInvocation {
 
     /// `agy -p` argument list. Pure + static for direct test coverage.
     /// `-p` takes the prompt as its value; `--sandbox` restricts the run;
-    /// `--print-timeout` is the CLI-side wait backstop.
-    static func buildArguments(prompt: String, timeoutSeconds: Int) -> [String] {
-        ["-p", prompt, "--sandbox", "--print-timeout", "\(timeoutSeconds)s"]
+    /// `--print-timeout` is the CLI-side wait backstop; `--model` selects a
+    /// model when one was chosen (omitted → agy's configured default).
+    static func buildArguments(prompt: String, model: String?, timeoutSeconds: Int) -> [String] {
+        var args = ["-p", prompt, "--sandbox", "--print-timeout", "\(timeoutSeconds)s"]
+        if let model {
+            args.append(contentsOf: ["--model", model])
+        }
+        return args
     }
 
     /// Build the single prompt agy runs. Since agy can't enforce a schema,

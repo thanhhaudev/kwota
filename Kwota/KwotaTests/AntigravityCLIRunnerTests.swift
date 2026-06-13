@@ -14,15 +14,24 @@ final class AntigravityCLIRunnerTests: XCTestCase {
 
     // MARK: - buildArguments
 
-    func testBuildArgumentsRunsHeadlessSandboxed() {
-        let args = AntigravityCLIRunner.buildArguments(prompt: "hi", timeoutSeconds: 90)
+    func testBuildArgumentsRunsHeadlessSandboxedWithoutModel() {
+        let args = AntigravityCLIRunner.buildArguments(prompt: "hi", model: nil, timeoutSeconds: 90)
         XCTAssertTrue(args.contains("--sandbox"), "must run sandboxed")
+        XCTAssertFalse(args.contains("--model"), "nil model omits --model")
         if let i = args.firstIndex(of: "-p") {
             XCTAssertEqual(args[i + 1], "hi", "the prompt is the value of -p")
         } else { XCTFail("missing -p") }
         if let i = args.firstIndex(of: "--print-timeout") {
             XCTAssertEqual(args[i + 1], "90s", "timeout passed as <N>s")
         } else { XCTFail("missing --print-timeout") }
+    }
+
+    func testBuildArgumentsIncludesModelWhenSet() {
+        let args = AntigravityCLIRunner.buildArguments(
+            prompt: "hi", model: "Gemini 3.5 Flash (Low)", timeoutSeconds: 90)
+        if let i = args.firstIndex(of: "--model") {
+            XCTAssertEqual(args[i + 1], "Gemini 3.5 Flash (Low)", "model is the value of --model")
+        } else { XCTFail("missing --model") }
     }
 
     // MARK: - mergedPrompt
