@@ -20,12 +20,24 @@ import Observation
 @Observable
 final class StatsStore {
     private(set) var ledger: StatsLedger
+    /// Hourly rollup keyed by "yyyy-MM-dd HH" (UTC), pruned to a recent window.
+    /// Drives the Today view's by-hour chart; the daily `ledger` is kept forever.
+    private(set) var hourly: StatsLedger
     /// Bumped on every merge so SwiftUI views observing the store re-render.
     private(set) var revision: Int = 0
+
+    /// How far back hourly buckets are retained. Today's view only needs today;
+    /// 48h keeps the window intact across the UTC midnight boundary.
+    private static let hourlyRetention: TimeInterval = 48 * 3600
 
     private let reader: JSONLogReader
     private let ledgerURL: URL
     private let clock: () -> Date
+    /// Calendar/timezone for the hourly rollup + "today" key. Defaults to the
+    /// viewer's LOCAL calendar so the Today by-hour chart reads in their own
+    /// time (the daily ledger stays UTC). Injected as UTC in tests for
+    /// determinism.
+    private let calendar: Calendar
     private let persistDebounce: TimeInterval
     private let persistQueue = DispatchQueue(label: "com.thanhhaudev.kwota.stats-persist", qos: .utility)
     private var pendingPersist: DispatchWorkItem?
@@ -45,13 +57,16 @@ final class StatsStore {
     init(reader: JSONLogReader,
          ledgerURL: URL = StatsStore.defaultLedgerURL(),
          clock: @escaping () -> Date = { Date() },
+         calendar: Calendar = .current,
          persistDebounce: TimeInterval = 1.0) {
         self.reader = reader
         self.ledgerURL = ledgerURL
         self.clock = clock
+        self.calendar = calendar
         self.persistDebounce = persistDebounce
-        let (loaded, readerState) = Self.loadEnvelope(at: ledgerURL)
+        let (loaded, loadedHourly, readerState) = Self.loadEnvelope(at: ledgerURL)
         self.ledger = loaded
+        self.hourly = loadedHourly
         reader.restore(readerState)
     }
 
@@ -110,10 +125,19 @@ final class StatsStore {
     func ingest(_ events: [UsageEvent], provider: ProviderID) {
         guard !events.isEmpty else { return }
         let now = clock()
+        let hourCutoffDate = now.addingTimeInterval(-Self.hourlyRetention)
         for e in events {
+            let model = e.model ?? "unknown"
             let day = ledger.dayKey(for: e.timestamp)
-            ledger.merge(provider: provider, day: day, model: e.model ?? "unknown", delta: e.tokens, now: now)
+            ledger.merge(provider: provider, day: day, model: model, delta: e.tokens, now: now)
+            // Hourly only tracks the recent window — skip old backfill events so
+            // we don't churn buckets that prune would immediately drop.
+            if e.timestamp >= hourCutoffDate {
+                hourly.merge(provider: provider, day: ledger.hourKey(for: e.timestamp, calendar: calendar),
+                             model: model, delta: e.tokens, now: now)
+            }
         }
+        hourly.prune(beforeKey: ledger.hourKey(for: hourCutoffDate, calendar: calendar))
         revision &+= 1
         schedulePersist()
     }
@@ -121,7 +145,9 @@ final class StatsStore {
     /// Wipe one provider's rollup (user-triggered). Reader offsets are kept, so
     /// cleared history is NOT re-ingested — counting resumes from new activity.
     func clear(provider: ProviderID) {
-        ledger.clear(provider: provider, now: clock())
+        let now = clock()
+        ledger.clear(provider: provider, now: now)
+        hourly.clear(provider: provider, now: now)
         revision &+= 1
         schedulePersist()
     }
@@ -137,6 +163,24 @@ final class StatsStore {
     func dailySeries(provider: ProviderID, sinceDay: String?) -> [(day: String, byModel: [String: TokenBreakdown])] {
         ledger.dailySeries(provider: provider, sinceDay: sinceDay)
     }
+    /// Hour-of-day (0–23) buckets for `dayKey` ("yyyy-MM-dd", UTC), ascending.
+    /// Drives the Today by-hour chart. Empty once the day ages out of the
+    /// hourly retention window.
+    func hourlySeries(provider: ProviderID, dayKey: String) -> [(hour: Int, byModel: [String: TokenBreakdown])] {
+        hourly.dailySeries(provider: provider, sinceDay: nil)
+            .compactMap { entry in
+                guard entry.day.hasPrefix(dayKey + " "),
+                      let hour = Int(entry.day.suffix(2)) else { return nil }
+                return (hour: hour, byModel: entry.byModel)
+            }
+            .sorted { $0.hour < $1.hour }
+    }
+    /// Today's "yyyy-MM-dd" key in the store's (local) calendar — the day the
+    /// hourly buckets are filed under, for the Today by-hour chart.
+    func currentDayKey() -> String {
+        ledger.dayKey(for: clock(), calendar: calendar)
+    }
+
     /// "yyyy-MM-dd" key for `daysAgo` days before now, UTC. nil for "All".
     func sinceDayKey(daysAgo: Int?) -> String? {
         guard let daysAgo else { return nil }
@@ -152,11 +196,14 @@ final class StatsStore {
     private struct Envelope: Codable {
         var ledger: StatsLedger
         var readerState: ReaderState
+        /// Optional so envelopes written before the hourly rollup decode cleanly
+        /// (they simply start with an empty hourly window).
+        var hourly: StatsLedger?
     }
 
     private func schedulePersist() {
         pendingPersist?.cancel()
-        let snapshot = Envelope(ledger: ledger, readerState: reader.state())
+        let snapshot = Envelope(ledger: ledger, readerState: reader.state(), hourly: hourly)
         let url = ledgerURL
         let action = { Self.write(snapshot, to: url) }
         if persistDebounce <= 0 { persistQueue.async(execute: action); return }
@@ -171,7 +218,7 @@ final class StatsStore {
     /// ordering.
     func flush() {
         pendingPersist?.cancel()
-        let snapshot = Envelope(ledger: ledger, readerState: reader.state())
+        let snapshot = Envelope(ledger: ledger, readerState: reader.state(), hourly: hourly)
         persistQueue.sync { Self.write(snapshot, to: self.ledgerURL) }
     }
 
@@ -186,11 +233,11 @@ final class StatsStore {
         }
     }
 
-    nonisolated private static func loadEnvelope(at url: URL) -> (StatsLedger, ReaderState) {
+    nonisolated private static func loadEnvelope(at url: URL) -> (StatsLedger, StatsLedger, ReaderState) {
         guard let data = try? Data(contentsOf: url),
               let env = try? JSONDecoder().decode(Envelope.self, from: data) else {
-            return (StatsLedger(), ReaderState())
+            return (StatsLedger(), StatsLedger(), ReaderState())
         }
-        return (env.ledger, env.readerState)
+        return (env.ledger, env.hourly ?? StatsLedger(), env.readerState)
     }
 }

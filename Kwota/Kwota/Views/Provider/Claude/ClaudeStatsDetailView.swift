@@ -33,14 +33,30 @@ struct ClaudeStatsDetailView: View {
     }
 
     @State private var range: Range = .week
-    @State private var showClearConfirm = false
 
     private var sinceDay: String? { store.sinceDayKey(daysAgo: range.daysAgo) }
 
     private var modelRows: [(model: String, tokens: TokenBreakdown)] {
-        store.totalsByModel(provider: .claude, sinceDay: sinceDay)
+        // Today is derived from the LOCAL hourly rollup so the per-model cards
+        // match the by-hour chart and the viewer's own clock. Wider ranges read
+        // the UTC daily ledger.
+        let byModel = range == .today
+            ? hourlyTotalsByModel
+            : store.totalsByModel(provider: .claude, sinceDay: sinceDay)
+        return byModel
             .map { (model: $0.key, tokens: $0.value) }
             .sorted { $0.tokens.billable > $1.tokens.billable }
+    }
+
+    /// Per-model totals for the local "today" summed from the hourly rollup.
+    private var hourlyTotalsByModel: [String: TokenBreakdown] {
+        var out: [String: TokenBreakdown] = [:]
+        for entry in store.hourlySeries(provider: .claude, dayKey: store.currentDayKey()) {
+            for (model, tokens) in entry.byModel {
+                out[model] = (out[model] ?? .zero) + tokens
+            }
+        }
+        return out
     }
 
     /// Provider has recorded usage in *some* range (all-time, range-independent).
@@ -48,6 +64,13 @@ struct ClaudeStatsDetailView: View {
     private var hasAnyData: Bool {
         store.total(provider: .claude, sinceDay: nil) != .zero
     }
+
+    /// Two equal columns for the per-model mini-card grid. Two (not three) so a
+    /// card is wide enough to show the `↓ ↑ ⚡` breakdown on one row.
+    private let gridColumns = [
+        GridItem(.flexible(), spacing: 8),
+        GridItem(.flexible(), spacing: 8)
+    ]
 
     var body: some View {
         // Reading store.revision forces re-render when the rollup changes.
@@ -63,186 +86,354 @@ struct ClaudeStatsDetailView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
-                        summaryCard
-                        dailyCard
+                        VStack(alignment: .leading, spacing: 0) {
+                            // The range picker doubles as this section's header.
+                            rangeMenu
+                                .padding(.leading, 4)
+                                .padding(.bottom, 6)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            dailyCard
+                        }
+                        VStack(alignment: .leading, spacing: 0) {
+                            SectionHeader(title: "By Model")
+                            summaryCard
+                        }
                     }
                     .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
-        .confirmationDialog("Clear all Claude token stats?",
-                            isPresented: $showClearConfirm, titleVisibility: .visible) {
-            Button("Clear", role: .destructive) { store.clear(provider: .claude) }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("This permanently removes recorded Claude token usage. It can't be undone.")
-        }
     }
 
     // MARK: Cards
 
+    @ViewBuilder
     private var summaryCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            cardHeader
-            if modelRows.isEmpty {
-                VStack(spacing: 6) {
-                    Image(systemName: "chart.bar.xaxis")
-                        .font(.title2).foregroundStyle(.secondary)
-                    Text("No usage in \(range.menuLabel.lowercased())")
-                        .font(.callout).fontWeight(.semibold)
-                    Text("Try a wider range, or come back after using Claude.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
-            } else {
-                ForEach(Array(modelRows.enumerated()), id: \.element.model) { idx, row in
-                    if idx > 0 {
-                        Rectangle().fill(Color.secondary.opacity(0.1))
-                            .frame(height: 0.5)
-                            .padding(.vertical, 2)
-                    }
-                    StatsModelRow(model: row.model, tokens: row.tokens)
+        if modelRows.isEmpty {
+            VStack(spacing: 6) {
+                Image(systemName: "chart.bar.xaxis")
+                    .font(.title2).foregroundStyle(.secondary)
+                Text("No usage in \(range.menuLabel.lowercased())")
+                    .font(.callout).fontWeight(.semibold)
+                Text("Try a wider range, or come back after using Claude.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 14)
+            .kwotaCard()
+        } else {
+            LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 8) {
+                ForEach(modelRows, id: \.model) { row in
+                    StatsModelMiniCard(model: row.model, tokens: row.tokens)
                 }
             }
         }
-        .kwotaCard()
     }
 
     private var dailyCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Daily usage")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
-                .tracking(1.5)
-                .textCase(.uppercase)
+        Group {
             if modelRows.isEmpty {
                 StatsDailySkeletonChart().frame(height: 96)
+            } else if range == .today {
+                if hourlyPoints.isEmpty {
+                    hourlyCollectingNote
+                } else {
+                    StatsTimeChart(points: hourlyPoints, mode: .hourly)
+                }
             } else {
-                StatsDailyChart(series: store.dailySeries(provider: .claude, sinceDay: sinceDay))
-                    .frame(height: 96)
+                StatsTimeChart(points: dailyPoints, mode: .daily)
             }
         }
         .kwotaCard()
     }
 
-    /// Range dropdown as the card title + overflow (⋯) Clear menu.
-    private var cardHeader: some View {
-        HStack(spacing: 8) {
-            Menu {
-                ForEach(Range.allCases) { r in
-                    Button(r.menuLabel) { range = r }
-                }
-            } label: {
-                HStack(spacing: 4) {
-                    Text(range.menuLabel)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.primary)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-
-            Spacer()
-
-            Menu {
-                Button("Clear Claude Stats…", role: .destructive) { showClearConfirm = true }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Claude stats options")
+    /// Today has daily totals but no hourly buckets yet — hourly capture only
+    /// starts going forward (already-read events can't be re-bucketed).
+    private var hourlyCollectingNote: some View {
+        VStack(spacing: 6) {
+            Image(systemName: "clock.badge")
+                .font(.title3).foregroundStyle(.secondary)
+            Text("Hourly breakdown starts from your next Claude activity today.")
+                .font(.caption).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
         }
-        .padding(.bottom, 2)
+        .frame(maxWidth: .infinity).frame(height: 96)
+    }
+
+    private var dailyPoints: [StatsTimeChart.Point] {
+        store.dailySeries(provider: .claude, sinceDay: sinceDay).compactMap { e in
+            guard let (y, m, d) = StatsTimeChart.parseDayKey(e.day),
+                  let date = StatsTimeChart.date(year: y, month: m, day: d) else { return nil }
+            return .init(date: date, key: e.day, byModel: e.byModel)
+        }
+    }
+
+    private var hourlyPoints: [StatsTimeChart.Point] {
+        let today = store.currentDayKey()
+        guard let (y, m, d) = StatsTimeChart.parseDayKey(today) else { return [] }
+        return store.hourlySeries(provider: .claude, dayKey: today).compactMap { e in
+            guard let date = StatsTimeChart.date(year: y, month: m, day: d, hour: e.hour) else { return nil }
+            return .init(date: date, key: "\(today) \(e.hour)", byModel: e.byModel)
+        }
+    }
+
+    /// Range dropdown rendered as the trailing control of the top section
+    /// header. Scopes both the chart and the per-model grid. (Clearing stats
+    /// now lives in Settings → Data & Storage.)
+    private var rangeMenu: some View {
+        Menu {
+            ForEach(Range.allCases) { r in
+                Button(r.menuLabel) { range = r }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(range.menuLabel)
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(1.5)
+                    .textCase(.uppercase)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+            }
+            .foregroundStyle(.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
     }
 }
 
-/// One per-model row: color dot + name + total billable on the primary line,
-/// with an indented `In · Out · Cache` secondary line.
-private struct StatsModelRow: View {
+/// One per-model mini-card for the 3-column grid: color dot + name, a prominent
+/// billable total, and a compact stacked `In / Out / Cache` breakdown. Uses the
+/// shared `kwotaCard` chrome so it matches the rest of the popover.
+private struct StatsModelMiniCard: View {
     let model: String
     let tokens: TokenBreakdown
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
                 Circle()
                     .fill(StatsModelPalette.color(for: model))
-                    .frame(width: 8, height: 8)
+                    .frame(width: 7, height: 7)
                 Text(StatsModelPalette.label(for: model))
-                    .font(.system(size: 13, weight: .semibold))
-                Spacer(minLength: 8)
-                Text(StatsFormat.tokens(tokens.billable))
-                    .font(.system(size: 13, weight: .semibold))
-                    .monospacedDigit()
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
-            HStack(spacing: 6) {
-                // Indent under the model name (8pt dot + 8pt gap).
-                Color.clear.frame(width: 16, height: 0)
-                subMetric("In", tokens.input)
-                dot
-                subMetric("Out", tokens.output)
-                dot
-                subMetric("Cache", tokens.cacheRead)
-                Spacer(minLength: 0)
+            Text(StatsFormat.tokens(tokens.billable))
+                .font(.system(size: 16, weight: .semibold))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+
+            HStack(spacing: 0) {
+                miniMetric(icon: "arrow.down", value: tokens.input)
+                Spacer(minLength: 6)
+                miniMetric(icon: "arrow.up", value: tokens.output)
+                Spacer(minLength: 6)
+                miniMetric(icon: "bolt", value: tokens.cacheRead)
             }
+            .help("Input \(StatsFormat.full(tokens.input))   ·   Output \(StatsFormat.full(tokens.output))   ·   Cache read \(StatsFormat.full(tokens.cacheRead))")
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Input \(tokens.input), Output \(tokens.output), Cache read \(tokens.cacheRead) tokens")
         }
-        .padding(.vertical, 3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .kwotaCard()
     }
 
-    private var dot: some View {
-        Text("·").font(.caption2).foregroundStyle(.tertiary)
-    }
-
-    private func subMetric(_ label: String, _ value: Int) -> some View {
-        HStack(spacing: 4) {
-            Text(label).font(.caption2).foregroundStyle(.secondary)
-            Text(StatsFormat.tokens(value)).font(.caption2)
-                .foregroundStyle(.secondary).monospacedDigit()
+    private func miniMetric(icon: String, value: Int) -> some View {
+        HStack(spacing: 2) {
+            Image(systemName: icon)
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(StatsFormat.tokens(value))
+                .font(.caption2).foregroundStyle(.secondary)
+                .monospacedDigit()
+                .lineLimit(1).minimumScaleFactor(0.6)
         }
     }
 }
 
-/// Daily stacked bars: billable tokens per model per day, colored by model.
-struct StatsDailyChart: View {
-    let series: [(day: String, byModel: [String: TokenBreakdown])]
+/// Token chart in the Screen Time idiom: stacked bars by model on a real time
+/// axis with tap-to-select highlighting. Serves both the multi-day view (one
+/// bar per day + a dashed daily-average rule) and the Today view (one bar per
+/// hour). The caller supplies pre-built points so date parsing stays out of the
+/// chart.
+struct StatsTimeChart: View {
+    enum Mode { case daily, hourly }
+
+    struct Point: Identifiable {
+        let date: Date
+        let key: String
+        let byModel: [String: TokenBreakdown]
+        var id: String { key }
+    }
+
+    let points: [Point]
+    let mode: Mode
+
+    @State private var selectedDate: Date?
 
     private struct Bar: Identifiable {
-        var id: String { "\(day)|\(model)" }
-        let day: String
+        var id: String { "\(key)|\(model)" }
+        let date: Date
+        let key: String
         let model: String
         let billable: Int
     }
 
+    private struct Total {
+        let date: Date
+        let key: String
+        let total: Int
+    }
+
+    /// "yyyy-MM-dd" → (year, month, day).
+    static func parseDayKey(_ key: String) -> (Int, Int, Int)? {
+        let p = key.split(separator: "-").compactMap { Int($0) }
+        guard p.count == 3 else { return nil }
+        return (p[0], p[1], p[2])
+    }
+
+    /// Local wall-clock Date from explicit components, so Swift Charts bins and
+    /// labels each bucket by the key's own numbers (the data is UTC; we render
+    /// those numbers directly instead of re-projecting timezones).
+    static func date(year: Int, month: Int, day: Int, hour: Int = 0) -> Date? {
+        Calendar.current.date(from: DateComponents(year: year, month: month, day: day, hour: hour))
+    }
+
     private var bars: [Bar] {
-        series.flatMap { entry in
-            entry.byModel.map { Bar(day: entry.day, model: $0.key, billable: $0.value.billable) }
+        points.flatMap { p in
+            p.byModel.map { Bar(date: p.date, key: p.key, model: $0.key, billable: $0.value.billable) }
         }
     }
 
-    var body: some View {
-        Chart(bars) { bar in
-            BarMark(
-                x: .value("Day", String(bar.day.suffix(5))),   // "MM-dd"
-                y: .value("Tokens", bar.billable)
-            )
-            .cornerRadius(2)
-            .foregroundStyle(by: .value("Model", bar.model))
+    private var totals: [Total] {
+        points.map { Total(date: $0.date, key: $0.key,
+                           total: $0.byModel.values.reduce(0) { $0 + $1.billable }) }
+    }
+
+    private var average: Double {
+        let t = totals.map(\.total)
+        guard !t.isEmpty else { return 0 }
+        return Double(t.reduce(0, +)) / Double(t.count)
+    }
+
+    private var dayTotal: Int { totals.reduce(0) { $0 + $1.total } }
+
+    /// The bucket nearest the current selection point (nil when none selected).
+    private var selected: Total? {
+        guard let selectedDate else { return nil }
+        return totals.min {
+            abs($0.date.timeIntervalSince(selectedDate)) < abs($1.date.timeIntervalSince(selectedDate))
         }
-        .chartLegend(.hidden)
-        .chartForegroundStyleScale { (model: String) in StatsModelPalette.color(for: model) }
+    }
+
+    /// Pretty model label → color, built from the data so colors match the
+    /// per-model cards (and stay consistent if a model is missing on some days).
+    private var labelColors: [String: Color] {
+        var map: [String: Color] = [:]
+        for p in points {
+            for model in p.byModel.keys {
+                map[StatsModelPalette.label(for: model)] = StatsModelPalette.color(for: model)
+            }
+        }
+        return map
+    }
+
+    private func isDimmed(_ bar: Bar) -> Bool {
+        guard let selected else { return false }
+        return bar.key != selected.key
+    }
+
+    /// Weekday letters for a short daily range (Screen Time week style).
+    private var isWeekScale: Bool { mode == .daily && totals.count <= 8 }
+    /// The daily-average rule only belongs on the multi-day view.
+    private var showsAverage: Bool { mode == .daily && average > 0 }
+    private var unit: Calendar.Component { mode == .hourly ? .hour : .day }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            readout
+                .lineLimit(1)
+                .frame(height: 18, alignment: .leading)   // fixed so selection doesn't resize the card
+            chartWithScale.frame(height: 120)
+        }
+    }
+
+    /// Hourly mode pins the x-axis to the full day so a single hour renders as a
+    /// small bar at its position (Screen Time dayChart), not one giant bar.
+    @ViewBuilder
+    private var chartWithScale: some View {
+        if mode == .hourly, let domain = hourDomain {
+            chart.chartXScale(domain: domain)
+        } else {
+            chart
+        }
+    }
+
+    private var hourDomain: ClosedRange<Date>? {
+        guard mode == .hourly, let anchor = points.first?.date else { return nil }
+        let start = Calendar.current.startOfDay(for: anchor)
+        let end = Calendar.current.date(byAdding: .day, value: 1, to: start) ?? start.addingTimeInterval(86_400)
+        return start...end
+    }
+
+    @ViewBuilder
+    private var readout: some View {
+        HStack(spacing: 5) {
+            if let selected {
+                Text(selectedLabel(for: selected.date))
+                    .font(.caption).fontWeight(.semibold)
+                Text("·").foregroundStyle(.secondary)
+                Text("\(StatsFormat.tokens(selected.total)) tokens")
+                    .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+            } else if mode == .hourly {
+                Text("\(StatsFormat.tokens(dayTotal)) tokens today")
+                    .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+            } else if average > 0 {
+                Text("Avg \(StatsFormat.tokens(Int(average.rounded())))/day")
+                    .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// "3 PM" for the hourly (Today) view, "Jun 13" for the daily view.
+    private func selectedLabel(for date: Date) -> String {
+        let f = DateFormatter()
+        f.locale = .current
+        f.dateFormat = mode == .hourly ? "h a" : "MMM d"
+        return f.string(from: date)
+    }
+
+    private var chart: some View {
+        Chart {
+            ForEach(bars) { bar in
+                BarMark(
+                    x: .value("Time", bar.date, unit: unit),
+                    y: .value("Tokens", bar.billable)
+                )
+                .cornerRadius(3)
+                .foregroundStyle(by: .value("Model", StatsModelPalette.label(for: bar.model)))
+                .opacity(isDimmed(bar) ? 0.18 : 1)
+            }
+            if showsAverage {
+                RuleMark(y: .value("Average", average))
+                    .foregroundStyle(.green)
+                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [3, 5]))
+                    .annotation(position: .trailing, alignment: .leading) {
+                        Text("avg").font(.caption2).foregroundStyle(.green)
+                    }
+            }
+        }
+        .chartXSelection(value: $selectedDate)
+        .chartForegroundStyleScale { (label: String) in labelColors[label] ?? Color.gray }
+        .chartLegend(.hidden)   // the BY MODEL grid below already shows the color key
         .chartYAxis {
-            AxisMarks { value in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
+            AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { value in
+                AxisGridLine()
                 AxisValueLabel {
                     if let n = value.as(Int.self) {
                         Text(StatsFormat.tokens(n)).font(.caption2).foregroundStyle(.secondary)
@@ -251,11 +442,23 @@ struct StatsDailyChart: View {
             }
         }
         .chartXAxis {
-            AxisMarks { value in
-                AxisValueLabel {
-                    if let s = value.as(String.self) {
-                        Text(s).font(.caption2).foregroundStyle(.secondary)
-                    }
+            if mode == .hourly {
+                AxisMarks(values: .stride(by: .hour, count: 6)) { _ in
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel(format: .dateTime.hour())
+                }
+            } else if isWeekScale {
+                AxisMarks(values: .stride(by: .day)) { _ in
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel(format: .dateTime.weekday(.narrow))
+                }
+            } else {
+                AxisMarks(values: .automatic(desiredCount: 6)) { _ in
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel(format: .dateTime.month(.twoDigits).day(.twoDigits))
                 }
             }
         }

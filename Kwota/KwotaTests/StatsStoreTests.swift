@@ -113,4 +113,56 @@ final class StatsStoreTests: XCTestCase {
                        TokenBreakdown(input: 80, output: 5))
         XCTAssertEqual(fake.readFullCount, 1, "expected exactly one full-walk read")
     }
+
+    // MARK: Hourly rollup
+
+    func test_ingest_bucketsRecentEventsByHour() {
+        let store = StatsStore(reader: FakeJSONLogReader(),
+                               ledgerURL: URL(fileURLWithPath: "/dev/null"),
+                               clock: { self.date("2026-06-13T10:00:00.000Z") },
+                               calendar: StatsLedger.utcCalendarForKeys,
+                               persistDebounce: 0)
+        store.ingest([
+            UsageEvent(uuid: "h1", sessionId: "s", timestamp: date("2026-06-13T01:30:00.000Z"),
+                       tokens: TokenBreakdown(input: 100), model: "claude-opus-4-8"),
+            UsageEvent(uuid: "h2", sessionId: "s", timestamp: date("2026-06-13T02:15:00.000Z"),
+                       tokens: TokenBreakdown(input: 20), model: "claude-opus-4-8"),
+            UsageEvent(uuid: "h3", sessionId: "s", timestamp: date("2026-06-13T02:45:00.000Z"),
+                       tokens: TokenBreakdown(input: 5), model: "claude-opus-4-8"),
+        ], provider: .claude)
+        let series = store.hourlySeries(provider: .claude, dayKey: "2026-06-13")
+        XCTAssertEqual(series.map(\.hour), [1, 2])
+        XCTAssertEqual(series.first(where: { $0.hour == 2 })?.byModel["claude-opus-4-8"],
+                       TokenBreakdown(input: 25))   // 02:15 + 02:45 merged
+    }
+
+    func test_hourly_dropsEventsOlderThanWindow_butDailyKeepsThem() {
+        let store = StatsStore(reader: FakeJSONLogReader(),
+                               ledgerURL: URL(fileURLWithPath: "/dev/null"),
+                               clock: { self.date("2026-06-13T10:00:00.000Z") },
+                               calendar: StatsLedger.utcCalendarForKeys,
+                               persistDebounce: 0)
+        // 3 days ago — outside the 48h hourly window.
+        store.ingest([UsageEvent(uuid: "old", sessionId: "s",
+                                 timestamp: date("2026-06-10T05:00:00.000Z"),
+                                 tokens: TokenBreakdown(input: 9), model: "opus")],
+                     provider: .claude)
+        XCTAssertEqual(store.total(provider: .claude, sinceDay: nil), TokenBreakdown(input: 9))   // daily kept
+        XCTAssertTrue(store.hourlySeries(provider: .claude, dayKey: "2026-06-10").isEmpty)         // hourly dropped
+    }
+
+    func test_hourly_persistsAcrossReload() {
+        let dir = TempDirectory()
+        let url = dir.url.appendingPathComponent("stats-ledger.json")
+        let s1 = StatsStore(reader: FakeJSONLogReader(), ledgerURL: url,
+                            clock: { self.date("2026-06-13T10:00:00.000Z") },
+                            calendar: StatsLedger.utcCalendarForKeys, persistDebounce: 0)
+        s1.ingest([UsageEvent(uuid: "h", sessionId: "s", timestamp: date("2026-06-13T03:00:00.000Z"),
+                              tokens: TokenBreakdown(input: 11), model: "opus")], provider: .claude)
+        s1.flush()
+        let s2 = StatsStore(reader: FakeJSONLogReader(), ledgerURL: url,
+                            clock: { self.date("2026-06-13T10:00:00.000Z") },
+                            calendar: StatsLedger.utcCalendarForKeys, persistDebounce: 0)
+        XCTAssertEqual(s2.hourlySeries(provider: .claude, dayKey: "2026-06-13").first?.hour, 3)
+    }
 }

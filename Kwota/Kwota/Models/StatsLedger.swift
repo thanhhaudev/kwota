@@ -69,6 +69,17 @@ struct StatsLedger: Codable, Equatable {
         return f.string(from: date)
     }
 
+    /// Hour bucket key "yyyy-MM-dd HH" (UTC). Same lexical = chronological
+    /// ordering as `dayKey`, and `hasPrefix(dayKey + " ")` selects one day.
+    func hourKey(for date: Date, calendar: Calendar = StatsLedger.utcCalendarForKeys) -> String {
+        let f = DateFormatter()
+        f.calendar = calendar
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = calendar.timeZone
+        f.dateFormat = "yyyy-MM-dd HH"
+        return f.string(from: date)
+    }
+
     /// Days >= `sinceDay` (nil = all), ascending by day key. Each entry maps
     /// model → tokens for that day. Drives the daily chart.
     func dailySeries(provider: ProviderID, sinceDay: String?) -> [(day: String, byModel: [String: TokenBreakdown])] {
@@ -101,6 +112,15 @@ struct StatsLedger: Codable, Equatable {
                 if let d = parser.date(from: key), d < cutoff { kept.removeValue(forKey: key) }
             }
             byProvider[provider] = kept
+        }
+    }
+
+    /// Drops buckets whose key sorts strictly before `key` (lexicographic). The
+    /// hourly rollup uses this to keep a bounded recent window — "yyyy-MM-dd HH"
+    /// keys sort chronologically as plain strings.
+    mutating func prune(beforeKey key: String) {
+        for (provider, buckets) in byProvider {
+            byProvider[provider] = buckets.filter { $0.key >= key }
         }
     }
 }

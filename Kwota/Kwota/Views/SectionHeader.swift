@@ -7,9 +7,13 @@
 
 import SwiftUI
 
-struct SectionHeader: View {
+struct SectionHeader<Trailing: View>: View {
     let title: String
     var info: [String]? = nil
+    /// Optional control rendered flush-right on the header row (e.g. a range
+    /// picker). Defaults to `EmptyView` via the convenience init below, so
+    /// existing `SectionHeader(title:)` call sites are unchanged.
+    @ViewBuilder var trailing: () -> Trailing
 
     @State private var showingInfo = false
 
@@ -46,9 +50,17 @@ struct SectionHeader: View {
             }
 
             Spacer(minLength: 0)
+
+            trailing()
         }
         .padding(.leading, 4)
         .padding(.bottom, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+extension SectionHeader where Trailing == EmptyView {
+    init(title: String, info: [String]? = nil) {
+        self.init(title: title, info: info, trailing: { EmptyView() })
     }
 }
