@@ -21,7 +21,7 @@ final class MenuBarViewModel {
     // MARK: - Tabs
 
     enum Tab: String, CaseIterable, Identifiable {
-        case usage, awake, cache, stats
+        case usage, stats, awake, cache
         var id: String { rawValue }
         var label: String {
             switch self {

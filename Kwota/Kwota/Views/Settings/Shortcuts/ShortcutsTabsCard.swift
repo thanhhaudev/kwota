@@ -6,6 +6,7 @@
 import SwiftUI
 
 struct ShortcutsTabsCard: View {
+    @AppStorage(AppStorageKeys.displayPopoverShowStats) private var showStats: Bool = true
     @AppStorage(AppStorageKeys.displayPopoverShowAwake) private var showAwake: Bool = true
     @AppStorage(AppStorageKeys.displayPopoverShowCache) private var showCache: Bool = true
 
@@ -62,6 +63,7 @@ struct ShortcutsTabsCard: View {
         }
         .settingsCard()
         .onAppear(perform: reload)
+        .onChange(of: showStats) { _, _ in reload() }
         .onChange(of: showAwake) { _, _ in reload() }
         .onChange(of: showCache) { _, _ in reload() }
     }

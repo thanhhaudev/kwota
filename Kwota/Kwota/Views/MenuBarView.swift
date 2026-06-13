@@ -24,12 +24,14 @@ struct MenuBarView: View {
     let vm: MenuBarViewModel
     @Environment(\.openWindow) private var openWindow
     @AppStorage(AppStorageKeys.displayTheme) private var themeRaw: String = DisplayTheme.system.rawValue
+    @AppStorage(AppStorageKeys.displayPopoverShowStats) private var showStats: Bool = true
     @AppStorage(AppStorageKeys.displayPopoverShowAwake) private var showAwake: Bool = true
     @AppStorage(AppStorageKeys.displayPopoverShowCache) private var showCache: Bool = true
     @State private var localShortcutMonitor: Any?
     private let hotKeyStore = HotKeyStore()
 
     private var visibleTabs: [MenuBarViewModel.Tab] {
+        _ = showStats
         _ = showAwake
         _ = showCache
         return PopoverTabVisibility().visibleTabs
@@ -69,6 +71,7 @@ struct MenuBarView: View {
         // Lets nested overlays (e.g. the switcher bar tooltip) measure their
         // position within the fixed-width popover so they can clamp to its edges.
         .coordinateSpace(.named(Self.popoverCoordinateSpace))
+        .onChange(of: showStats) { _, _ in resetSelectionIfHidden() }
         .onChange(of: showAwake) { _, _ in resetSelectionIfHidden() }
         .onChange(of: showCache) { _, _ in resetSelectionIfHidden() }
         .onAppear {
