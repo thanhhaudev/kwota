@@ -108,6 +108,16 @@ final class StatsLedgerTests: XCTestCase {
         XCTAssertEqual(l.totalsByModel(provider: .claude, sinceDay: nil)["unknown"], TokenBreakdown(input: 1))
     }
 
+    func test_clear_removesOnlyThatProvider() {
+        var l = StatsLedger()
+        let now = date("2026-06-13T10:00:00.000Z")
+        l.merge(provider: .claude, day: "2026-06-13", model: "opus", delta: TokenBreakdown(input: 5), now: now)
+        l.merge(provider: .codex, day: "2026-06-13", model: "gpt", delta: TokenBreakdown(input: 9), now: now)
+        l.clear(provider: .claude, now: now)
+        XCTAssertEqual(l.total(provider: .claude, sinceDay: nil), .zero)
+        XCTAssertEqual(l.total(provider: .codex, sinceDay: nil), TokenBreakdown(input: 9))
+    }
+
     func test_prune_appliesAcrossAllProviders() {
         var l = StatsLedger()
         let now = date("2026-06-13T10:00:00.000Z")

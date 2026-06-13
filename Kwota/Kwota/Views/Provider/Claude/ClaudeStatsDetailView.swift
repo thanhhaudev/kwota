@@ -23,6 +23,7 @@ struct ClaudeStatsDetailView: View {
         }
     }
     @State private var range: Range = .week
+    @State private var showClearConfirm = false
 
     private var sinceDay: String? { store.sinceDayKey(daysAgo: range.daysAgo) }
 
@@ -37,10 +38,27 @@ struct ClaudeStatsDetailView: View {
         let _ = store.revision
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                Picker("Range", selection: $range) {
-                    ForEach(Range.allCases) { Text($0.rawValue).tag($0) }
+                HStack(spacing: 8) {
+                    Picker("Range", selection: $range) {
+                        ForEach(Range.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+
+                    if !modelRows.isEmpty {
+                        Button(role: .destructive) { showClearConfirm = true } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Clear Claude stats")
+                    }
                 }
-                .pickerStyle(.segmented)
+                .confirmationDialog("Clear all Claude token stats?",
+                                    isPresented: $showClearConfirm, titleVisibility: .visible) {
+                    Button("Clear", role: .destructive) { store.clear(provider: .claude) }
+                    Button("Cancel", role: .cancel) { }
+                } message: {
+                    Text("This permanently removes recorded Claude token usage. It can't be undone.")
+                }
 
                 if modelRows.isEmpty {
                     Text("No usage recorded in this range yet.")

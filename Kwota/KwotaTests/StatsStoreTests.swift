@@ -64,6 +64,36 @@ final class StatsStoreTests: XCTestCase {
         XCTAssertEqual(store2.total(provider: .claude, sinceDay: nil), TokenBreakdown(input: 100))
     }
 
+    func test_ingest_retainsOldDataWithoutPruning() {
+        let store = StatsStore(reader: FakeJSONLogReader(),
+                               ledgerURL: URL(fileURLWithPath: "/dev/null"),
+                               clock: { self.date("2026-06-13T10:00:00.000Z") },
+                               persistDebounce: 0)
+        // A day far older than any prior 90-day window:
+        store.ingest([UsageEvent(uuid: "old", sessionId: "s",
+                                 timestamp: date("2024-01-01T00:00:00.000Z"),
+                                 tokens: TokenBreakdown(input: 3), model: "opus")],
+                     provider: .claude)
+        XCTAssertEqual(store.total(provider: .claude, sinceDay: nil), TokenBreakdown(input: 3))  // not pruned
+    }
+
+    func test_clear_emptiesProviderAndPersists() throws {
+        let dir = TempDirectory()
+        let url = dir.url.appendingPathComponent("stats-ledger.json")
+        let store = StatsStore(reader: FakeJSONLogReader(), ledgerURL: url,
+                               clock: { self.date("2026-06-13T10:00:00.000Z") }, persistDebounce: 0)
+        store.ingest([UsageEvent(uuid: "u", sessionId: "s",
+                                 timestamp: date("2026-06-13T01:00:00.000Z"),
+                                 tokens: TokenBreakdown(input: 50), model: "opus")],
+                     provider: .claude)
+        store.clear(provider: .claude)
+        XCTAssertEqual(store.total(provider: .claude, sinceDay: nil), .zero)
+        store.flush()
+        let reloaded = StatsStore(reader: FakeJSONLogReader(), ledgerURL: url,
+                                  clock: { self.date("2026-06-13T10:00:00.000Z") }, persistDebounce: 0)
+        XCTAssertEqual(reloaded.total(provider: .claude, sinceDay: nil), .zero)   // clear survived reload
+    }
+
     func test_readChanged_ingestsEventsEndToEnd() async {
         // Verify the read→ingest path through the new serialized loop: seed
         // FakeJSONLogReader with one batch, call readChanged(nil), assert events land.

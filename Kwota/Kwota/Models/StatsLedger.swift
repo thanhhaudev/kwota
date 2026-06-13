@@ -79,6 +79,13 @@ struct StatsLedger: Codable, Equatable {
             .map { (day: $0.key, byModel: $0.value) }
     }
 
+    /// Drops all recorded data for one provider (user-triggered clear). Other
+    /// providers are untouched.
+    mutating func clear(provider: ProviderID, now: Date) {
+        byProvider[provider.rawValue] = nil
+        lastUpdate = now
+    }
+
     /// Drops day buckets older than `days` across every provider. Cutoff is
     /// computed in `calendar`'s timezone (UTC by default, matching `dayKey`).
     mutating func prune(olderThan days: Int, now: Date, calendar: Calendar = StatsLedger.utcCalendarForKeys) {

@@ -26,8 +26,6 @@ final class StatsStore {
     private let reader: JSONLogReader
     private let ledgerURL: URL
     private let clock: () -> Date
-    private let pruneDays: Int
-
     private let persistDebounce: TimeInterval
     private let persistQueue = DispatchQueue(label: "com.thanhhaudev.kwota.stats-persist", qos: .utility)
     private var pendingPersist: DispatchWorkItem?
@@ -47,12 +45,10 @@ final class StatsStore {
     init(reader: JSONLogReader,
          ledgerURL: URL = StatsStore.defaultLedgerURL(),
          clock: @escaping () -> Date = { Date() },
-         pruneDays: Int = 90,
          persistDebounce: TimeInterval = 1.0) {
         self.reader = reader
         self.ledgerURL = ledgerURL
         self.clock = clock
-        self.pruneDays = pruneDays
         self.persistDebounce = persistDebounce
         let (loaded, readerState) = Self.loadEnvelope(at: ledgerURL)
         self.ledger = loaded
@@ -118,7 +114,14 @@ final class StatsStore {
             let day = ledger.dayKey(for: e.timestamp)
             ledger.merge(provider: provider, day: day, model: e.model ?? "unknown", delta: e.tokens, now: now)
         }
-        ledger.prune(olderThan: pruneDays, now: now)
+        revision &+= 1
+        schedulePersist()
+    }
+
+    /// Wipe one provider's rollup (user-triggered). Reader offsets are kept, so
+    /// cleared history is NOT re-ingested — counting resumes from new activity.
+    func clear(provider: ProviderID) {
+        ledger.clear(provider: provider, now: clock())
         revision &+= 1
         schedulePersist()
     }
