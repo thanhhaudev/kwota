@@ -551,6 +551,33 @@ final class CacheAIEvaluationTests: XCTestCase {
         XCTAssertEqual(picked, [on.path])
     }
 
+    func testEvaluateRejectsOutOfEnumSafety() async {
+        // An out-of-enum safety must NOT silently become .unknown — that
+        // would suppress the risky-transition alert. It surfaces as a
+        // parse failure instead.
+        let runner = StubCLIRunner(json: #"{"safety":"moderate","warning":null,"purpose":"p","detail":null}"#)
+        let evaluator = CacheEvaluator(cliRunner: runner)
+        let result = await evaluator.evaluate(
+            row: makeRow(handCurated: .safe, eval: nil),
+            model: nil, modelLabel: "antigravity-default", language: .english)
+        if case .failure(.parseFailed) = result { return }
+        XCTFail("expected .parseFailed for out-of-enum safety, got \(result)")
+    }
+
+    func testEvaluateAcceptsLegitimateUnknownSafety() async {
+        // "unknown" is a real enum case (model genuinely can't tell) — it
+        // must still succeed, not be confused with a garbage token.
+        let runner = StubCLIRunner(json: #"{"safety":"unknown","warning":null,"purpose":"p","detail":null}"#)
+        let evaluator = CacheEvaluator(cliRunner: runner)
+        let result = await evaluator.evaluate(
+            row: makeRow(handCurated: .safe, eval: nil),
+            model: nil, modelLabel: "antigravity-default", language: .english)
+        guard case .success(let eval) = result else {
+            return XCTFail("expected success, got \(result)")
+        }
+        XCTAssertEqual(eval.safety, .unknown)
+    }
+
     // MARK: - Helpers
 
     private func makeRow(
