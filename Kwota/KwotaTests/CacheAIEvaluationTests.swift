@@ -176,7 +176,12 @@ final class CacheAIEvaluationTests: XCTestCase {
         let evaluator = CacheEvaluator(cliRunner: runner)
         let row = makeRow(handCurated: .caution, eval: nil)
 
-        let result = await evaluator.evaluate(row: row, model: .sonnet46, language: .english)
+        let result = await evaluator.evaluate(
+            row: row,
+            model: AIModelChoice.sonnet46.rawValue,
+            modelLabel: AIModelChoice.sonnet46.rawValue,
+            language: .english
+        )
         switch result {
         case .success(let eval):
             XCTAssertEqual(eval.safety, .caution)
@@ -191,8 +196,12 @@ final class CacheAIEvaluationTests: XCTestCase {
     func testEvaluateSurfacesCLINotInstalled() async {
         let runner = StubCLIRunner(outcome: .failure(CLIInvocationError.notInstalled))
         let evaluator = CacheEvaluator(cliRunner: runner)
-        let result = await evaluator.evaluate(row: makeRow(handCurated: .safe, eval: nil),
-                                              model: .sonnet46, language: .english)
+        let result = await evaluator.evaluate(
+            row: makeRow(handCurated: .safe, eval: nil),
+            model: AIModelChoice.sonnet46.rawValue,
+            modelLabel: AIModelChoice.sonnet46.rawValue,
+            language: .english
+        )
         if case .failure(.cliNotInstalled) = result { return }
         XCTFail("expected .cliNotInstalled, got \(result)")
     }
@@ -204,8 +213,12 @@ final class CacheAIEvaluationTests: XCTestCase {
             CLIInvocationError.cliReportedError("Not logged in · Please run /login")
         ))
         let evaluator = CacheEvaluator(cliRunner: runner)
-        let result = await evaluator.evaluate(row: makeRow(handCurated: .safe, eval: nil),
-                                              model: .sonnet46, language: .english)
+        let result = await evaluator.evaluate(
+            row: makeRow(handCurated: .safe, eval: nil),
+            model: AIModelChoice.sonnet46.rawValue,
+            modelLabel: AIModelChoice.sonnet46.rawValue,
+            language: .english
+        )
         if case .failure(.cliFailed(let msg)) = result {
             XCTAssertEqual(msg, "Not logged in · Please run /login")
             return
@@ -216,10 +229,56 @@ final class CacheAIEvaluationTests: XCTestCase {
     func testEvaluateSurfacesParseFailureWhenOutputIsNotJSON() async {
         let runner = StubCLIRunner(outcome: .success("not json at all"))
         let evaluator = CacheEvaluator(cliRunner: runner)
-        let result = await evaluator.evaluate(row: makeRow(handCurated: .safe, eval: nil),
-                                              model: .sonnet46, language: .english)
+        let result = await evaluator.evaluate(
+            row: makeRow(handCurated: .safe, eval: nil),
+            model: AIModelChoice.sonnet46.rawValue,
+            modelLabel: AIModelChoice.sonnet46.rawValue,
+            language: .english
+        )
         if case .failure(.parseFailed) = result { return }
         XCTFail("expected .parseFailed, got \(result)")
+    }
+
+    func testEvaluateStampsModelLabelNotModelArg() async {
+        // Codex-default: nil model arg (engine decides) but a stable label
+        // for provenance. The two must not be conflated.
+        let runner = StubCLIRunner(outcome: .success(
+            #"{"safety": "safe", "warning": null, "purpose": "p", "detail": null}"#
+        ))
+        let evaluator = CacheEvaluator(cliRunner: runner)
+        let result = await evaluator.evaluate(
+            row: makeRow(handCurated: .safe, eval: nil),
+            model: nil,
+            modelLabel: "codex-default",
+            language: .english
+        )
+        guard case .success(let eval) = result else {
+            return XCTFail("expected success, got \(result)")
+        }
+        XCTAssertEqual(eval.modelUsed, "codex-default")
+    }
+
+    func testEvaluationModelSelectionMapsEngineToArgs() {
+        // Claude: model arg and label are both the Anthropic ID.
+        let claude = MenuBarViewModel.evaluationModelSelection(
+            engine: .claude, claudeModel: .haiku45, codexModel: .gpt54Mini
+        )
+        XCTAssertEqual(claude.model, AIModelChoice.haiku45.rawValue)
+        XCTAssertEqual(claude.label, AIModelChoice.haiku45.rawValue)
+
+        // Codex explicit: slug for both.
+        let codex = MenuBarViewModel.evaluationModelSelection(
+            engine: .codex, claudeModel: .haiku45, codexModel: .gpt54Mini
+        )
+        XCTAssertEqual(codex.model, "gpt-5.4-mini")
+        XCTAssertEqual(codex.label, "gpt-5.4-mini")
+
+        // Codex default: nil arg (CLI config decides), placeholder label.
+        let codexDefault = MenuBarViewModel.evaluationModelSelection(
+            engine: .codex, claudeModel: .haiku45, codexModel: .codexDefault
+        )
+        XCTAssertNil(codexDefault.model)
+        XCTAssertEqual(codexDefault.label, "codex-default")
     }
 
     // MARK: - Bulk evaluate
@@ -238,9 +297,12 @@ final class CacheAIEvaluationTests: XCTestCase {
         let runner = StubCLIRunner(outcome: .success(cliOutput))
         let evaluator = CacheEvaluator(cliRunner: runner)
 
-        let result = await evaluator.evaluateBulk(rows: [rowA, rowB],
-                                                  model: .sonnet46,
-                                                  language: .english)
+        let result = await evaluator.evaluateBulk(
+            rows: [rowA, rowB],
+            model: AIModelChoice.sonnet46.rawValue,
+            modelLabel: AIModelChoice.sonnet46.rawValue,
+            language: .english
+        )
         switch result {
         case .success(let byURL):
             XCTAssertEqual(byURL.count, 2)
@@ -260,7 +322,12 @@ final class CacheAIEvaluationTests: XCTestCase {
         let runner = StubCLIRunner(outcome: .success(cliOutput))
         let evaluator = CacheEvaluator(cliRunner: runner)
 
-        let result = await evaluator.evaluateBulk(rows: [rowA], model: .sonnet46, language: .english)
+        let result = await evaluator.evaluateBulk(
+            rows: [rowA],
+            model: AIModelChoice.sonnet46.rawValue,
+            modelLabel: AIModelChoice.sonnet46.rawValue,
+            language: .english
+        )
         if case .success(let byURL) = result {
             XCTAssertTrue(byURL.isEmpty, "unknown path should not land on any row")
         } else {
@@ -273,7 +340,12 @@ final class CacheAIEvaluationTests: XCTestCase {
         // to evaluate — the early return guards the user's quota.
         let runner = StubCLIRunner(outcome: .failure(CLIInvocationError.notInstalled))
         let evaluator = CacheEvaluator(cliRunner: runner)
-        let result = await evaluator.evaluateBulk(rows: [], model: .sonnet46, language: .english)
+        let result = await evaluator.evaluateBulk(
+            rows: [],
+            model: AIModelChoice.sonnet46.rawValue,
+            modelLabel: AIModelChoice.sonnet46.rawValue,
+            language: .english
+        )
         if case .success(let byURL) = result {
             XCTAssertTrue(byURL.isEmpty)
         } else {
