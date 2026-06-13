@@ -370,24 +370,41 @@ final class CacheAIEvaluationTests: XCTestCase {
         XCTAssertEqual(eval.modelUsed, "codex-default")
     }
 
+    func testEvaluationModelSelectionAntigravity() {
+        let def = MenuBarViewModel.evaluationModelSelection(
+            engine: .antigravity, claudeModel: .haiku,
+            codexModel: .codexDefault, antigravityModel: .agyDefault)
+        XCTAssertNil(def.model, "agyDefault omits --model")
+        XCTAssertEqual(def.label, "antigravity-default")
+
+        let flash = MenuBarViewModel.evaluationModelSelection(
+            engine: .antigravity, claudeModel: .haiku,
+            codexModel: .codexDefault, antigravityModel: .gemini35FlashLow)
+        XCTAssertEqual(flash.model, "Gemini 3.5 Flash (Low)")
+        XCTAssertEqual(flash.label, "Gemini 3.5 Flash (Low)")
+    }
+
     func testEvaluationModelSelectionMapsEngineToArgs() {
         // Claude: model arg and label are both the Anthropic ID.
         let claude = MenuBarViewModel.evaluationModelSelection(
-            engine: .claude, claudeModel: .haiku, codexModel: .gpt54Mini
+            engine: .claude, claudeModel: .haiku, codexModel: .gpt54Mini,
+            antigravityModel: .agyDefault
         )
         XCTAssertEqual(claude.model, AIModelChoice.haiku.rawValue)
         XCTAssertEqual(claude.label, AIModelChoice.haiku.rawValue)
 
         // Codex explicit: slug for both.
         let codex = MenuBarViewModel.evaluationModelSelection(
-            engine: .codex, claudeModel: .haiku, codexModel: .gpt54Mini
+            engine: .codex, claudeModel: .haiku, codexModel: .gpt54Mini,
+            antigravityModel: .agyDefault
         )
         XCTAssertEqual(codex.model, "gpt-5.4-mini")
         XCTAssertEqual(codex.label, "gpt-5.4-mini")
 
         // Codex default: nil arg (CLI config decides), placeholder label.
         let codexDefault = MenuBarViewModel.evaluationModelSelection(
-            engine: .codex, claudeModel: .haiku, codexModel: .codexDefault
+            engine: .codex, claudeModel: .haiku, codexModel: .codexDefault,
+            antigravityModel: .agyDefault
         )
         XCTAssertNil(codexDefault.model)
         XCTAssertEqual(codexDefault.label, "codex-default")
@@ -532,6 +549,33 @@ final class CacheAIEvaluationTests: XCTestCase {
         // gate means only `on` is eligible. Returns full eligible set
         // when it can't fully cover.
         XCTAssertEqual(picked, [on.path])
+    }
+
+    func testEvaluateRejectsOutOfEnumSafety() async {
+        // An out-of-enum safety must NOT silently become .unknown — that
+        // would suppress the risky-transition alert. It surfaces as a
+        // parse failure instead.
+        let runner = StubCLIRunner(json: #"{"safety":"moderate","warning":null,"purpose":"p","detail":null}"#)
+        let evaluator = CacheEvaluator(cliRunner: runner)
+        let result = await evaluator.evaluate(
+            row: makeRow(handCurated: .safe, eval: nil),
+            model: nil, modelLabel: "antigravity-default", language: .english)
+        if case .failure(.parseFailed) = result { return }
+        XCTFail("expected .parseFailed for out-of-enum safety, got \(result)")
+    }
+
+    func testEvaluateAcceptsLegitimateUnknownSafety() async {
+        // "unknown" is a real enum case (model genuinely can't tell) — it
+        // must still succeed, not be confused with a garbage token.
+        let runner = StubCLIRunner(json: #"{"safety":"unknown","warning":null,"purpose":"p","detail":null}"#)
+        let evaluator = CacheEvaluator(cliRunner: runner)
+        let result = await evaluator.evaluate(
+            row: makeRow(handCurated: .safe, eval: nil),
+            model: nil, modelLabel: "antigravity-default", language: .english)
+        guard case .success(let eval) = result else {
+            return XCTFail("expected success, got \(result)")
+        }
+        XCTAssertEqual(eval.safety, .unknown)
     }
 
     // MARK: - Helpers

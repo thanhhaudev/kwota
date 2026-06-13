@@ -26,6 +26,9 @@ struct CachePersistedState: Codable, Equatable {
     /// Model used when `aiEngine == .codex`. Kept separate from `aiModel`
     /// so switching engines round-trips without losing either choice.
     var aiCodexModel: CodexModelChoice
+    /// Model used when `aiEngine == .antigravity`. Mirrors the per-engine
+    /// model fields; decode defaults to `.agyDefault` for pre-field blobs.
+    var aiAntigravityModel: AntigravityModelChoice
     /// AI evaluations keyed by `URL.path` string. Decoupled from
     /// `CachePathRow.id` (which is a transient UUID generated on each
     /// process launch) so a row regenerated next launch picks up its old
@@ -104,7 +107,7 @@ struct CachePersistedState: Codable, Equatable {
     // from a build that didn't persist sizes would wipe the user's
     // settings + evaluations on first launch.
     enum CodingKeys: String, CodingKey {
-        case settings, aiModel, aiEngine, aiCodexModel
+        case settings, aiModel, aiEngine, aiCodexModel, aiAntigravityModel
         case aiEvaluationsByPath, customPaths
         case autoCleanByPath, riskyAlertedPaths, sizesByPath, trashedItems
         case removedDefaultPaths
@@ -115,6 +118,7 @@ struct CachePersistedState: Codable, Equatable {
         aiModel: AIModelChoice,
         aiEngine: CacheAIEngine = .default,
         aiCodexModel: CodexModelChoice = .default,
+        aiAntigravityModel: AntigravityModelChoice = .default,
         aiEvaluationsByPath: [String: CacheAIEvaluation],
         customPaths: [CustomPath],
         autoCleanByPath: [String: Bool],
@@ -127,6 +131,7 @@ struct CachePersistedState: Codable, Equatable {
         self.aiModel = aiModel
         self.aiEngine = aiEngine
         self.aiCodexModel = aiCodexModel
+        self.aiAntigravityModel = aiAntigravityModel
         self.aiEvaluationsByPath = aiEvaluationsByPath
         self.customPaths = customPaths
         self.autoCleanByPath = autoCleanByPath
@@ -142,6 +147,7 @@ struct CachePersistedState: Codable, Equatable {
         self.aiModel = try c.decode(AIModelChoice.self, forKey: .aiModel)
         self.aiEngine = (try? c.decode(CacheAIEngine.self, forKey: .aiEngine)) ?? .default
         self.aiCodexModel = (try? c.decode(CodexModelChoice.self, forKey: .aiCodexModel)) ?? .default
+        self.aiAntigravityModel = (try? c.decode(AntigravityModelChoice.self, forKey: .aiAntigravityModel)) ?? .default
         self.aiEvaluationsByPath = try c.decode([String: CacheAIEvaluation].self, forKey: .aiEvaluationsByPath)
         self.customPaths = try c.decode([CustomPath].self, forKey: .customPaths)
         self.autoCleanByPath = try c.decode([String: Bool].self, forKey: .autoCleanByPath)

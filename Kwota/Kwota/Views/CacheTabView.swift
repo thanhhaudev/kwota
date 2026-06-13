@@ -202,7 +202,12 @@ struct CacheTabView: View {
         let cmd = engine.cliCommand
         switch error {
         case .cliNotInstalled:
-            let product = engine == .claude ? "Claude Code" : "Codex"
+            let product: String
+            switch engine {
+            case .claude:      product = "Claude Code"
+            case .codex:       product = "Codex"
+            case .antigravity: product = "Antigravity"
+            }
             return (
                 .orange,
                 "terminal",

@@ -224,6 +224,7 @@ final class CachePersistenceStoreTests: XCTestCase {
           "aiModel": "claude-sonnet-4-6",
           "aiEngine": "gemini",
           "aiCodexModel": "gpt-99-turbo",
+          "aiAntigravityModel": "gemini-99-ultra",
           "aiEvaluationsByPath": {},
           "customPaths": [],
           "autoCleanByPath": {},
@@ -238,8 +239,38 @@ final class CachePersistenceStoreTests: XCTestCase {
                        "unrecognized aiEngine rawValue should fall back to default")
         XCTAssertEqual(loaded.aiCodexModel, .codexDefault,
                        "unrecognized aiCodexModel rawValue should fall back to default")
+        XCTAssertEqual(loaded.aiAntigravityModel, .agyDefault,
+                       "unrecognized aiAntigravityModel rawValue should fall back to default")
         XCTAssertEqual(loaded.aiModel, .sonnet,
                        "legacy aiModel maps to the sonnet tier")
+    }
+
+    func testRoundTripsAntigravityModel() {
+        let tmp = TempDirectory()
+        let store = CachePersistenceStore(url: tmp.file("cache-state.json"))
+        var state = CachePersistedState.initial
+        state.aiAntigravityModel = .gemini35FlashLow
+        store.save(state)
+        let loaded = store.load()
+        XCTAssertEqual(loaded, state)
+        XCTAssertEqual(loaded.aiAntigravityModel, .gemini35FlashLow)
+    }
+
+    func testLoadDefaultsAntigravityModelOnLegacyFile() throws {
+        let tmp = TempDirectory()
+        let target = tmp.file("cache-state.json")
+        let legacy = """
+        {
+          "settings": {"isEnabled": true, "scanInterval": "thirtyMinutes", "globalCapBytes": 60000000000, "aiLanguage": "en"},
+          "aiModel": "haiku", "aiEngine": "antigravity",
+          "aiEvaluationsByPath": {}, "customPaths": [], "autoCleanByPath": {},
+          "riskyAlertedPaths": [], "sizesByPath": {}, "trashedItems": []
+        }
+        """
+        try Data(legacy.utf8).write(to: target)
+        let loaded = CachePersistenceStore(url: target).load()
+        XCTAssertEqual(loaded.aiAntigravityModel, .agyDefault,
+                       "missing aiAntigravityModel should default to agyDefault")
     }
 
     func testLoadReturnsInitialOnGarbageFile() throws {

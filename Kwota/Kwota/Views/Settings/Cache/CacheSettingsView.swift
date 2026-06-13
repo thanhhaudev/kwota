@@ -97,7 +97,7 @@ struct CacheSettingsView: View {
                     title: { $0.displayName }
                 )
             }
-        } else {
+        } else if vm.cacheState.aiEngine == .codex {
             SettingsRow(
                 title: "Model",
                 subtitle: vm.cacheState.aiCodexModel.caption
@@ -108,6 +108,20 @@ struct CacheSettingsView: View {
                         set: { vm.cacheSetCodexModel($0) }
                     ),
                     options: CodexModelChoice.allCases,
+                    title: { $0.displayName }
+                )
+            }
+        } else if vm.cacheState.aiEngine == .antigravity {
+            SettingsRow(
+                title: "Model",
+                subtitle: vm.cacheState.aiAntigravityModel.caption
+            ) {
+                CompactInlinePicker(
+                    selection: Binding(
+                        get: { vm.cacheState.aiAntigravityModel },
+                        set: { vm.cacheSetAntigravityModel($0) }
+                    ),
+                    options: AntigravityModelChoice.allCases,
                     title: { $0.displayName }
                 )
             }
@@ -168,6 +182,8 @@ struct CacheSettingsView: View {
             return "Evaluations run through the claude CLI and consume your Claude subscription quota."
         case .codex:
             return "Evaluations run through the codex CLI and consume your ChatGPT subscription quota."
+        case .antigravity:
+            return "Evaluations run through the agy CLI and consume your Antigravity subscription quota."
         }
     }
 

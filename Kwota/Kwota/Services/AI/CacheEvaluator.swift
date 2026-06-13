@@ -118,7 +118,12 @@ final class CacheEvaluator {
                     )
                     continue
                 }
-                let safety = CacheAIEvaluation.Safety(rawValue: item.safety) ?? .unknown
+                let safety: CacheAIEvaluation.Safety
+                do {
+                    safety = try Self.parseSafety(item.safety)
+                } catch {
+                    return .failure(.parseFailed("bulk row '\(item.path)': unrecognized safety '\(item.safety)'"))
+                }
                 out[row.path] = CacheAIEvaluation(
                     safety: safety,
                     warning: item.warning?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
@@ -163,7 +168,12 @@ final class CacheEvaluator {
             } catch {
                 return .failure(.parseFailed(String(describing: error)))
             }
-            let safety = CacheAIEvaluation.Safety(rawValue: parsed.safety) ?? .unknown
+            let safety: CacheAIEvaluation.Safety
+            do {
+                safety = try Self.parseSafety(parsed.safety)
+            } catch {
+                return .failure(.parseFailed("unrecognized safety '\(parsed.safety)'"))
+            }
             let eval = CacheAIEvaluation(
                 safety: safety,
                 warning: parsed.warning?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
@@ -211,6 +221,17 @@ final class CacheEvaluator {
         } catch {
             return .failure(.cliFailed(String(describing: error)))
         }
+    }
+
+    /// Map a raw `safety` string to the enum, treating an out-of-enum value
+    /// as a hard parse error rather than silently coercing to `.unknown`
+    /// (which would suppress the risky-transition alert). `"unknown"` is a
+    /// legitimate case and decodes normally.
+    static func parseSafety(_ raw: String) throws -> CacheAIEvaluation.Safety {
+        guard let safety = CacheAIEvaluation.Safety(rawValue: raw) else {
+            throw EvaluationError.parseFailed("unrecognized safety '\(raw)'")
+        }
+        return safety
     }
 
     /// Decode the runner's `structured_output` JSON string into `T`. The
