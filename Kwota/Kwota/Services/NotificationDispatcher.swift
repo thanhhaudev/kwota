@@ -154,19 +154,19 @@ final class NotificationDispatcher {
         switch rule {
         case .session(let pct):
             return antigravity
-                ? "Top model rate limit at \(pct)%."
+                ? "5-hour limit at \(pct)%."
                 : "Short-window quota at \(pct)%."
         case .weekly(let pct):
             return antigravity
-                ? "AI Credits at \(pct)%."
+                ? "Weekly limit at \(pct)%."
                 : "Long-window quota at \(pct)%."
         case .reset(.session):
             return antigravity
-                ? "Model rate limits cleared. All models full."
+                ? "5-hour limit reset. Full quota available."
                 : "Short-window quota reset. Full quota available."
         case .reset(.weekly):
             return antigravity
-                ? "AI Credits refilled."
+                ? "Weekly limit reset. Full quota available."
                 : "Long-window quota reset. Full quota available."
         case .tokenExpiry(let at):
             let hours = max(1, Int(at.timeIntervalSinceNow / 3600))

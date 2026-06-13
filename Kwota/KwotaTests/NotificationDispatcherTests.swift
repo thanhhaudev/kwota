@@ -114,23 +114,23 @@ final class NotificationDispatcherTests: XCTestCase {
         let preShort = summary(primary: 70, primaryReset: baseReset, secondary: 0, secondaryReset: baseReset)
         let crossShort = summary(primary: 95, primaryReset: baseReset, secondary: 0, secondaryReset: baseReset)
         let shortIntents = d.evaluate(profile: p, settings: s, current: crossShort, previous: preShort, now: now)
-        XCTAssertEqual(shortIntents.first?.body, "P: Top model rate limit at 90%.")
+        XCTAssertEqual(shortIntents.first?.body, "P: 5-hour limit at 90%.")
 
-        // Threshold cross — long window (AI Credits)
+        // Threshold cross — long window (worst-group weekly quota)
         let preLong = summary(primary: 95, primaryReset: baseReset, secondary: 50, secondaryReset: baseReset)
         let crossLong = summary(primary: 95, primaryReset: baseReset, secondary: 100, secondaryReset: baseReset)
         let longIntents = d.evaluate(profile: p, settings: s, current: crossLong, previous: preLong, now: now)
-        XCTAssertEqual(longIntents.first?.body, "P: AI Credits at 100%.")
+        XCTAssertEqual(longIntents.first?.body, "P: Weekly limit at 100%.")
 
-        // Reset detection — short window (rate-limit clears)
+        // Reset detection — short window (5-hour limit clears)
         let resetShort = summary(primary: 0, primaryReset: baseReset, secondary: 100, secondaryReset: baseReset)
         let resetShortIntents = d.evaluate(profile: p, settings: s, current: resetShort, previous: crossLong, now: now)
-        XCTAssertTrue(resetShortIntents.contains(where: { $0.body == "P: Model rate limits cleared. All models full." }))
+        XCTAssertTrue(resetShortIntents.contains(where: { $0.body == "P: 5-hour limit reset. Full quota available." }))
 
-        // Reset detection — long window (AI Credits refilled)
+        // Reset detection — long window (weekly limit resets)
         let resetLong = summary(primary: 0, primaryReset: baseReset, secondary: 0, secondaryReset: baseReset)
         let resetLongIntents = d.evaluate(profile: p, settings: s, current: resetLong, previous: resetShort, now: now)
-        XCTAssertTrue(resetLongIntents.contains(where: { $0.body == "P: AI Credits refilled." }))
+        XCTAssertTrue(resetLongIntents.contains(where: { $0.body == "P: Weekly limit reset. Full quota available." }))
     }
 
     func test_title_includesProviderAndPlan() {
