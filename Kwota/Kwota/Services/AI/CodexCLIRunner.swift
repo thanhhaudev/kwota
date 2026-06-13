@@ -11,7 +11,7 @@
 //  Invocation shape (codex-cli ≥ 0.137):
 //
 //      codex exec --ephemeral --skip-git-repo-check --sandbox read-only
-//                 -c mcp_servers={} --color never
+//                 -c mcp_servers={} -c plugins={} --color never
 //                 -o <tmp>/last-message.json
 //                 [--output-schema <tmp>/schema.json] [-m <model>] -
 //
@@ -20,7 +20,8 @@
 //  message to a file so we never scrape the event stream on stdout.
 //  `--ignore-user-config` is deliberately NOT used: the "Codex default"
 //  model choice resolves from the user's config.toml, and auth must keep
-//  working. MCP servers are suppressed via the `-c` override instead.
+//  working. MCP servers and the user's plugins are suppressed via `-c`
+//  overrides instead.
 //
 //  There is no `--system-prompt` flag — system + user prompts are merged
 //  into one stdin payload with an explicit <instructions> block.
@@ -50,11 +51,33 @@ final class CodexCLIRunner: AgentCLIInvocation {
     }
 
     /// First candidate path that is executable, or nil if none match.
-    /// Tests inject their own resolver to bypass disk probing.
+    /// Checks the fixed footprints first, then nvm's versioned node bins
+    /// (`~/.nvm/versions/node/<ver>/bin/codex`) — a common install method
+    /// the fixed list can't enumerate. Tests inject their own resolver to
+    /// bypass disk probing.
     static let defaultBinaryResolver: @Sendable () -> String? = {
         let fm = FileManager.default
         for path in candidatePaths where fm.isExecutableFile(atPath: path) {
             return path
+        }
+        return nvmCandidate(fileManager: fm)
+    }
+
+    /// Newest nvm-installed `codex`, or nil. Sorted descending by the
+    /// version directory name so the latest node version wins; falls back
+    /// to lexicographic order, which is good enough for picking *a*
+    /// working binary.
+    static func nvmCandidate(fileManager fm: FileManager) -> String? {
+        let home = fm.homeDirectoryForCurrentUser.path
+        let versionsDir = "\(home)/.nvm/versions/node"
+        guard let versions = try? fm.contentsOfDirectory(atPath: versionsDir) else {
+            return nil
+        }
+        for version in versions.sorted(by: >) {
+            let candidate = "\(versionsDir)/\(version)/bin/codex"
+            if fm.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
         }
         return nil
     }
@@ -138,6 +161,7 @@ final class CodexCLIRunner: AgentCLIInvocation {
             "--skip-git-repo-check",
             "--sandbox", "read-only",
             "-c", "mcp_servers={}",
+            "-c", "plugins={}",
             "--color", "never",
             "-o", outputFile,
         ]

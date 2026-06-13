@@ -49,10 +49,14 @@ final class CodexCLIRunnerTests: XCTestCase {
         if let i = args.firstIndex(of: "--sandbox") {
             XCTAssertEqual(args[i + 1], "read-only")
         } else { XCTFail("missing --sandbox") }
-        if let i = args.firstIndex(of: "-c") {
-            XCTAssertEqual(args[i + 1], "mcp_servers={}",
-                           "user MCP servers must not load into an evaluation")
-        } else { XCTFail("missing -c mcp_servers override") }
+        // Two -c overrides now; assert both values are present as
+        // flag/value adjacencies.
+        let cIndices = args.indices.filter { args[$0] == "-c" }
+        let cValues = cIndices.map { args[$0 + 1] }
+        XCTAssertTrue(cValues.contains("mcp_servers={}"),
+                      "user MCP servers must not load into an evaluation")
+        XCTAssertTrue(cValues.contains("plugins={}"),
+                      "user plugins must not load into an evaluation")
         XCTAssertFalse(args.contains("--ignore-user-config"),
                        "config must load — codexDefault resolves its model there")
     }
