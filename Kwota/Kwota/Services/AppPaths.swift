@@ -53,6 +53,13 @@ enum AppPaths {
         profileDirectory(id: id).appendingPathComponent("usage-history.json")
     }
 
+    /// Per-group usage history (Antigravity). Distinct from the shared
+    /// `usage-history.json` so a group's weekly/5h trend persists on its own.
+    static func usageHistoryFile(id: UUID, groupKey: String) -> URL {
+        profileDirectory(id: id)
+            .appendingPathComponent("usage-history-\(groupKey).json")
+    }
+
     /// Persisted Cache-tab state: settings (cap, interval, language),
     /// AI model choice, AI evaluations keyed by path, custom paths the
     /// user added, per-path auto-clean toggles, and the once-per-path

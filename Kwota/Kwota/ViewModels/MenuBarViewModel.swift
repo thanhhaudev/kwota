@@ -59,6 +59,12 @@ final class MenuBarViewModel {
     let notificationDispatcher = NotificationDispatcher()
     let notificationSettingsStore = NotificationSettingsStore()
     private(set) var history: [UsageHistoryEntry] = []
+    /// Per-group history for the ACTIVE Antigravity profile, keyed by group
+    /// key. Read by AntigravityProvider.groupHistoryProvider for the picker's
+    /// trend. Empty for non-Antigravity profiles.
+    private(set) var antigravityGroupHistory: [String: [UsageHistoryEntry]] = [:]
+    /// Live per-group stores for the active Antigravity profile (lazily made).
+    private var antigravityGroupStores: [String: UsageHistoryStore] = [:]
     private(set) var lastFetchedAt: Date?
     private(set) var lastError: String?
     private(set) var isSwitchingProfile: Bool = false
@@ -968,6 +974,13 @@ final class MenuBarViewModel {
             self.rebindUsageMonitorOwnership()
         }
 
+        if let agp = self.registry.provider(for: .antigravity) as? AntigravityProvider {
+            agp.groupHistoryProvider = { [weak self] id in
+                guard let self, id == self.profileStore.activeProfileId else { return [:] }
+                return self.antigravityGroupHistory
+            }
+        }
+
         bindAwakeStateToLog()
     }
 
@@ -1409,6 +1422,8 @@ final class MenuBarViewModel {
         guard let id = profileId else {
             historyStore = nil
             history = []
+            antigravityGroupStores = [:]
+            antigravityGroupHistory = [:]
             snapshot = nil
             lastFetchedAt = nil
             // Signed out — no provider on screen, so no rate-limit banner.
@@ -1437,6 +1452,8 @@ final class MenuBarViewModel {
         guard let profile = profileStore.profiles.first(where: { $0.id == id }) else {
             historyStore = nil
             history = []
+            antigravityGroupStores = [:]
+            antigravityGroupHistory = [:]
             snapshot = nil
             lastFetchedAt = nil
             authState = .authenticated
@@ -1460,6 +1477,12 @@ final class MenuBarViewModel {
         let store = UsageHistoryStore(historyFile: historyFileProvider(id))
         historyStore = store
         history = (try? store.load()) ?? []
+        antigravityGroupStores = [:]
+        antigravityGroupHistory = [:]
+        if profile.providerID == .antigravity {
+            loadAntigravityGroupHistory(
+                profileDir: historyFileProvider(id).deletingLastPathComponent(), id: id)
+        }
         let cached = profile.lastSnapshot
         if let cached {
             self.snapshot = cached
@@ -1526,6 +1549,40 @@ final class MenuBarViewModel {
         if lastFetchAttemptAt == nil {
             authState = .authenticated
             isSwitchingProfile = false
+        }
+    }
+
+    /// Scan a profile dir for `usage-history-<key>.json` files and load each
+    /// into the in-memory per-group history + store map. Best-effort; absent
+    /// dir / unreadable files just yield no entries.
+    private func loadAntigravityGroupHistory(profileDir: URL, id: UUID) {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: profileDir.path) else { return }
+        for name in names where name.hasPrefix("usage-history-") && name.hasSuffix(".json") {
+            let key = String(name.dropFirst("usage-history-".count).dropLast(".json".count))
+            guard !key.isEmpty else { continue }
+            let store = UsageHistoryStore(
+                historyFile: historyFileProvider(id).deletingLastPathComponent()
+                    .appendingPathComponent("usage-history-\(key).json"))
+            antigravityGroupStores[key] = store
+            antigravityGroupHistory[key] = (try? store.load()) ?? []
+        }
+    }
+
+    /// Persist one entry per quota group + update the in-memory map (active
+    /// profile only). Stores are created lazily by group key.
+    private func appendAntigravityGroupHistory(
+        quota: AntigravityQuotaSummary, profileId: UUID, at: Date
+    ) {
+        let isActive = (profileId == profileStore.activeProfileId)
+        for (key, entry) in AntigravityGroupHistoryBuilder.entries(from: quota, at: at) {
+            let store = antigravityGroupStores[key]
+                ?? UsageHistoryStore(
+                    historyFile: historyFileProvider(profileId).deletingLastPathComponent()
+                        .appendingPathComponent("usage-history-\(key).json"))
+            if isActive { antigravityGroupStores[key] = store }
+            try? store.append(entry)
+            if isActive { antigravityGroupHistory[key] = (try? store.load()) ?? [] }
         }
     }
 
@@ -1864,6 +1921,12 @@ final class MenuBarViewModel {
                         )
                         try? historyStore.append(entry)
                         self.history.append(entry)
+                    }
+
+                    if profile.providerID == .antigravity,
+                       let quota = (summary.payload as? AntigravityUsagePayload)?.quota {
+                        appendAntigravityGroupHistory(
+                            quota: quota, profileId: profile.id, at: summary.fetchedAt)
                     }
 
                     // Provider-agnostic: evaluate the provider's credit cycle
