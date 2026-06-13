@@ -146,6 +146,45 @@ final class ProfileSwitcherFetchCoordinatorTests: XCTestCase {
         )
     }
 
+    func test_startFetching_refetchesFreshRow_whenCachedSummaryHasNoBucketData() async {
+        // A degraded-but-successful fetch (e.g. Antigravity's quota
+        // sub-fetch missed at cold start → both bars nil) must NOT be
+        // treated as "fresh enough" by the SWR gate. Otherwise the empty
+        // row sticks for the whole freshness window and only heals on a
+        // manual profile switch (which seeds past the coordinator). A
+        // cached summary with no bucket data always refetches so the row
+        // self-heals on the next expand/poll.
+        let clock = Date(timeIntervalSince1970: 1_700_000_000)
+        let p = claudeProfile("a@x.com")
+        let fetcher = MockFetcher()
+        fetcher.queueSequence([p.id: [
+            .success(summary(.claude, primary: nil, secondary: nil,
+                             fetchedAt: clock.addingTimeInterval(-5))),
+            .success(summary(.claude, primary: 0.4, secondary: 0.3,
+                             fetchedAt: clock)),
+        ]])
+        let c = ProfileSwitcherFetchCoordinator(
+            fetcher: fetcher,
+            rowFreshnessWindow: 60,
+            now: { clock }
+        )
+
+        await c.startFetching(profiles: [p], skip: nil)
+        XCTAssertEqual(fetcher.callsFor(p.id), 1, "first pass caches the empty (no-bucket) summary")
+
+        c.reset()
+        await c.startFetching(profiles: [p], skip: nil)
+
+        XCTAssertEqual(
+            fetcher.callsFor(p.id), 2,
+            "cached row 5s old but with NO bucket data must refetch despite the SWR window"
+        )
+        guard case let .loaded(s) = c.row(for: p.id) else {
+            return XCTFail("expected .loaded after the healing refetch")
+        }
+        XCTAssertEqual(s.primary?.utilization, 0.4)
+    }
+
     func test_droppedProfile_evictsCachedSummary() async {
         // Models a profile being archived or removed while the popover
         // is open: a successful summary cached for that profile must

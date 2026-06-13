@@ -49,13 +49,17 @@ final class AntigravityProviderTests: XCTestCase {
         transport: @escaping AntigravityAPIClient.Transport,
         watcher: StubAntigravityProcessWatcher,
         readOveragesEnabled: @escaping @MainActor () -> Bool? = { nil },
-        readModelCredits: (@MainActor () -> AntigravityModelCredits?)? = nil
+        readModelCredits: (@MainActor () -> AntigravityModelCredits?)? = nil,
+        quotaRetryAttempts: Int = 3,
+        quotaRetryDelay: TimeInterval = 0
     ) -> AntigravityProvider {
         AntigravityProvider(
             apiClient: AntigravityAPIClient(transport: transport),
             watcher: watcher,
             profileStore: profileStore,
-            readModelCredits: readModelCredits ?? { .overages(readOveragesEnabled()) }
+            readModelCredits: readModelCredits ?? { .overages(readOveragesEnabled()) },
+            quotaRetryAttempts: quotaRetryAttempts,
+            quotaRetryDelay: quotaRetryDelay
         )
     }
 
@@ -256,6 +260,37 @@ final class AntigravityProviderTests: XCTestCase {
         XCTAssertEqual(payload.snapshot.email, "u@b.com")
         XCTAssertNil(summary.primary)
         XCTAssertEqual(profileStore.profiles.first(where: { $0.id == profile.id })?.email, "u@b.com")
+    }
+
+    func test_fetchUsage_quotaRetries_recoversFromColdStartMiss() async throws {
+        // The quota endpoint 503s on the first fetch attempt (cold-start
+        // backend warmup — both http+https probes inside one fetchQuotaSummary
+        // call fail), then 200s. The provider must retry and end with a
+        // populated quota instead of degrading to empty bars.
+        let watcher = StubAntigravityProcessWatcher()
+        watcher.emit(AntigravityIdentity(csrfToken: "tk", port: 49838, credentialFingerprint: "fp"))
+        var quotaHits = 0
+        let transport: AntigravityAPIClient.Transport = { [quotaJSON] req in
+            let path = req.url?.path ?? ""
+            if path.hasSuffix("RetrieveUserQuotaSummary") {
+                quotaHits += 1
+                // First fetchQuotaSummary probes http then https (2 hits) —
+                // fail both so attempt 1 throws; succeed from the 3rd hit.
+                let status = quotaHits <= 2 ? 503 : 200
+                let r = HTTPURLResponse(url: req.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+                return (status == 200 ? Data(quotaJSON.utf8) : Data(), r)
+            }
+            let r = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (Data(#"{"userStatus":{"email":"u@b.com"}}"#.utf8), r)
+        }
+        let provider = makeProvider(transport: transport, watcher: watcher)  // 3 attempts, 0 delay
+        let profile = makeProfile(); try profileStore.add(profile)
+
+        let summary = try await provider.fetchUsage(credential: makeCredential(), profile: profile)
+        let payload = try XCTUnwrap(summary.payload as? AntigravityUsagePayload)
+        XCTAssertNotNil(payload.quota, "quota recovered via retry after a cold-start miss")
+        XCTAssertGreaterThanOrEqual(quotaHits, 3, "provider retried the quota sub-fetch past the first failed attempt")
+        XCTAssertEqual(summary.primary?.utilization ?? -1, 80, accuracy: 0.001)
     }
 
     func test_fetchUsage_attachesOveragesEnabled_fromReader() async throws {

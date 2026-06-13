@@ -230,7 +230,17 @@ final class ProfileSwitcherFetchCoordinator {
                     // The active path applies the same window via
                     // MenuBarViewModelSWRGate; keeping both surfaces in sync
                     // means the whole popover speaks one freshness dialect.
-                    if now().timeIntervalSince(cached.fetchedAt) < rowFreshnessWindow {
+                    //
+                    // Gated on `hasBucketData`: a degraded-but-successful
+                    // summary (both bars nil — e.g. Antigravity's quota
+                    // sub-fetch missed at cold start, or Codex's
+                    // `rate_limit: null` 200) is not "fresh data" to protect.
+                    // Treating it as fresh would freeze an empty row for the
+                    // whole window, only healing on a manual profile switch
+                    // (which seeds past the coordinator). An empty cached row
+                    // always refetches so it self-heals on the next expand.
+                    if cached.hasBucketData,
+                       now().timeIntervalSince(cached.fetchedAt) < rowFreshnessWindow {
                         continue
                     }
                 } else {

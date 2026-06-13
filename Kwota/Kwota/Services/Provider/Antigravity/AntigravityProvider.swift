@@ -30,6 +30,15 @@ final class AntigravityProvider: AccountProvider {
     /// state.vscdb — and tests swap in a stub closure.
     private let readModelCredits: @MainActor () -> AntigravityModelCredits?
 
+    /// Cold-start hardening for the quota sub-fetch. RetrieveUserQuotaSummary
+    /// can transiently miss while a freshly-launched language_server is still
+    /// warming its quota backend, even though GetUserStatus already answers —
+    /// which would leave the switcher row showing empty bars until the profile
+    /// is made active. Retry a few times (short delay between) before degrading
+    /// to nil. `quotaRetryDelay` is injectable so tests run instantly.
+    private let quotaRetryAttempts: Int
+    private let quotaRetryDelay: TimeInterval
+
     /// Per-group usage history for the active Antigravity profile, keyed by
     /// group key. Assigned by MenuBarViewModel after construction; defaults to
     /// empty so unit tests and cold start render the chart skeletons.
@@ -41,12 +50,16 @@ final class AntigravityProvider: AccountProvider {
         profileStore: ProfileStore,
         readModelCredits: @MainActor @escaping () -> AntigravityModelCredits? = {
             AntigravityOverageReader().readModelCredits()
-        }
+        },
+        quotaRetryAttempts: Int = 3,
+        quotaRetryDelay: TimeInterval = 0.25
     ) {
         self.apiClient = apiClient
         self.watcher = watcher
         self.profileStore = profileStore
         self.readModelCredits = readModelCredits
+        self.quotaRetryAttempts = max(1, quotaRetryAttempts)
+        self.quotaRetryDelay = quotaRetryDelay
     }
 
     var supportedAuthMethods: [any ProviderAuthMethod] {
@@ -123,13 +136,27 @@ final class AntigravityProvider: AccountProvider {
 
         // Authoritative quota (the Model Quota page). A miss degrades to nil —
         // identity/plan still render; the switcher + tab show "unavailable".
+        // Retried because the quota backend can lag GetUserStatus on a cold
+        // language_server start; a one-shot fetch there would strand the
+        // switcher row on empty bars (see quotaRetryAttempts).
         var quota: AntigravityQuotaSummary?
-        do {
-            quota = try await apiClient.fetchQuotaSummary(
-                port: identity.port, csrfToken: identity.csrfToken)
-        } catch {
-            AppLog.shared.log("AntigravityProvider: quota fetch failed: \(error)", level: .warn)
-            quota = nil
+        for attempt in 1...quotaRetryAttempts {
+            do {
+                quota = try await apiClient.fetchQuotaSummary(
+                    port: identity.port, csrfToken: identity.csrfToken)
+                break
+            } catch {
+                guard attempt < quotaRetryAttempts else {
+                    AppLog.shared.log(
+                        "AntigravityProvider: quota fetch failed after \(attempt) attempts: \(error)",
+                        level: .warn)
+                    quota = nil
+                    break
+                }
+                if quotaRetryDelay > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(quotaRetryDelay * 1_000_000_000))
+                }
+            }
         }
 
         let credits = readModelCredits()
