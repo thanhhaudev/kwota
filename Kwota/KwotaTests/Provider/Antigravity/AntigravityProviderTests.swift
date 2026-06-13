@@ -59,6 +59,36 @@ final class AntigravityProviderTests: XCTestCase {
         )
     }
 
+    /// Transport that answers BY URL PATH: a RetrieveUserQuotaSummary request
+    /// returns the quota JSON (or 503 when `quotaJSON` is nil), everything else
+    /// returns the GetUserStatus snapshot JSON. `fetchUsage` now hits two RPC
+    /// paths, so a single-body stub can't serve both.
+    private func dualTransport(snapshotJSON: String, quotaJSON: String?) -> AntigravityAPIClient.Transport {
+        { req in
+            let path = req.url?.path ?? ""
+            if path.hasSuffix("RetrieveUserQuotaSummary") {
+                if let quotaJSON {
+                    let r = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                    return (Data(quotaJSON.utf8), r)
+                }
+                let r = HTTPURLResponse(url: req.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!
+                return (Data(), r)
+            }
+            let r = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (Data(snapshotJSON.utf8), r)
+        }
+    }
+
+    private let quotaJSON = """
+    {"response":{"groups":[
+      {"displayName":"Gemini Models","buckets":[
+        {"bucketId":"gemini-weekly","window":"weekly","remainingFraction":1,"resetTime":"2026-06-20T10:40:07Z"},
+        {"bucketId":"gemini-5h","window":"5h","remainingFraction":0.2,"resetTime":"2026-06-13T15:40:07Z"}]},
+      {"displayName":"Claude and GPT models","buckets":[
+        {"bucketId":"3p-weekly","window":"weekly","remainingFraction":0.08,"resetTime":"2026-06-20T10:40:07Z"},
+        {"bucketId":"3p-5h","window":"5h","remainingFraction":1,"resetTime":"2026-06-13T15:40:07Z"}]}]}}
+    """
+
     func testSupportedProfileDetailFieldsIsEmailAndPlan() {
         let provider = makeProvider(
             transport: { _ in throw URLError(.unknown) },
@@ -126,7 +156,7 @@ final class AntigravityProviderTests: XCTestCase {
         )
 
         XCTAssertEqual(summary.providerID, .antigravity)
-        XCTAssertNotNil(summary.payload as? AntigravityUsageSnapshot)
+        XCTAssertNotNil(summary.payload as? AntigravityUsagePayload)
         // primary = worst-model utilization. No models in this snapshot
         // → primary is nil. secondary = AI Credits utilization. No wallet
         // → secondary is nil. The bucket assertions for Prompt / Flow
@@ -195,59 +225,37 @@ final class AntigravityProviderTests: XCTestCase {
         XCTAssertEqual(updated?.name, "Preserved")
     }
 
-    // MARK: - New bucket mapping (worst-model + AI credits)
+    // MARK: - New bucket mapping (worst-group 5h + weekly from quota)
 
-    func test_fetchUsage_buildsPrimary_fromWorstModelUtilization() async throws {
-        // Worst remainingFraction = 0.10 → utilization 90
-        let body = #"""
-        {"userStatus":{
-          "cascadeModelConfigData":{"clientModelConfigs":[
-            {"label":"GPT-5","modelOrAlias":{"model":"gpt"}},
-            {"label":"Gemini Pro","modelOrAlias":{"model":"gem"},
-             "quotaInfo":{"remainingFraction":0.10}},
-            {"label":"Claude","modelOrAlias":{"model":"cla"},
-             "quotaInfo":{"remainingFraction":0.5}}
-          ]}
-        }}
-        """#
-        let stubTransport: AntigravityAPIClient.Transport = { req in
-            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (Data(body.utf8), resp)
-        }
+    func test_fetchUsage_buildsCompositePayloadAndWorstGroupBuckets() async throws {
         let watcher = StubAntigravityProcessWatcher()
         watcher.emit(AntigravityIdentity(csrfToken: "tk", port: 49838, credentialFingerprint: "fp"))
-        let profile = makeProfile()
-        try profileStore.add(profile)
-
-        let provider = makeProvider(transport: stubTransport, watcher: watcher,
-                                     readOveragesEnabled: { true })
+        let provider = makeProvider(
+            transport: dualTransport(snapshotJSON: #"{"userStatus":{"email":"u@b.com"}}"#, quotaJSON: quotaJSON),
+            watcher: watcher)
+        let profile = makeProfile(); try profileStore.add(profile)
         let summary = try await provider.fetchUsage(credential: makeCredential(), profile: profile)
-        XCTAssertEqual(summary.primary?.utilization ?? -1, 90, accuracy: 0.0001)
+        let payload = try XCTUnwrap(summary.payload as? AntigravityUsagePayload)
+        XCTAssertEqual(payload.quota?.groups.count, 2)
+        XCTAssertEqual(summary.primary?.utilization ?? -1, 80, accuracy: 0.001)   // Gemini 5h worst
+        XCTAssertEqual(summary.secondary?.utilization ?? -1, 92, accuracy: 0.001) // Claude+GPT weekly worst
+        XCTAssertNotNil(summary.primary?.resetsAt)
+        XCTAssertNotNil(summary.secondary?.resetsAt)
     }
 
-    func test_fetchUsage_buildsSecondary_fromAICreditsUtilization() async throws {
-        // Pro tier ceiling = 1000. Wallet = 250. util = 75.
-        let body = #"""
-        {"userStatus":{
-          "planStatus":{"planInfo":{"planName":"Google AI Pro","monthlyPromptCredits":5000}},
-          "userTier":{"name":"Google AI Pro","availableCredits":[
-            {"creditType":"GOOGLE_ONE_AI","creditAmount":250}
-          ]}
-        }}
-        """#
-        let stubTransport: AntigravityAPIClient.Transport = { req in
-            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (Data(body.utf8), resp)
-        }
+    func test_fetchUsage_quotaMiss_degradesButKeepsIdentity() async throws {
         let watcher = StubAntigravityProcessWatcher()
         watcher.emit(AntigravityIdentity(csrfToken: "tk", port: 49838, credentialFingerprint: "fp"))
-        let profile = makeProfile()
-        try profileStore.add(profile)
-
-        let provider = makeProvider(transport: stubTransport, watcher: watcher,
-                                     readOveragesEnabled: { false })
+        let provider = makeProvider(
+            transport: dualTransport(snapshotJSON: #"{"userStatus":{"email":"u@b.com"}}"#, quotaJSON: nil),
+            watcher: watcher)
+        let profile = makeProfile(); try profileStore.add(profile)
         let summary = try await provider.fetchUsage(credential: makeCredential(), profile: profile)
-        XCTAssertEqual(summary.secondary?.utilization ?? -1, 75, accuracy: 0.0001)
+        let payload = try XCTUnwrap(summary.payload as? AntigravityUsagePayload)
+        XCTAssertNil(payload.quota)
+        XCTAssertEqual(payload.snapshot.email, "u@b.com")
+        XCTAssertNil(summary.primary)
+        XCTAssertEqual(profileStore.profiles.first(where: { $0.id == profile.id })?.email, "u@b.com")
     }
 
     func test_fetchUsage_attachesOveragesEnabled_fromReader() async throws {
@@ -266,16 +274,16 @@ final class AntigravityProviderTests: XCTestCase {
         let provider = makeProvider(transport: stubTransport, watcher: watcher,
                                      readOveragesEnabled: { false })
         let summary = try await provider.fetchUsage(credential: makeCredential(), profile: profile)
-        let payload = summary.payload as? AntigravityUsageSnapshot
+        let payload = (summary.payload as? AntigravityUsagePayload)?.snapshot
         XCTAssertEqual(payload?.overagesEnabled, false)
     }
 
     func test_fetchUsage_usesSQLiteCreditFallback_whenAPIWalletEmpty() async throws {
         // API returns a healthy Pro snapshot but with NO wallet entry.
-        // state.vscdb carries 1000 available credits. Pro ceiling = 1000
-        // → secondary utilization 0. Without the fallback the wallet is
-        // nil, the AI Credits card (and its On/Off caption) never render,
-        // and the secondary bucket is nil.
+        // state.vscdb carries 1000 available credits. Without the fallback
+        // the wallet is nil and the AI Credits card (and its On/Off caption)
+        // never render. The secondary switcher bucket now tracks the weekly
+        // quota, not AI credits, so it's no longer asserted here.
         let body = #"""
         {"userStatus":{
           "planStatus":{"planInfo":{"planName":"Google AI Pro","monthlyPromptCredits":5000}},
@@ -298,10 +306,9 @@ final class AntigravityProviderTests: XCTestCase {
             }
         )
         let summary = try await provider.fetchUsage(credential: makeCredential(), profile: profile)
-        let payload = summary.payload as? AntigravityUsageSnapshot
+        let payload = (summary.payload as? AntigravityUsagePayload)?.snapshot
         XCTAssertEqual(payload?.aiCreditsFallback, 1000)
         XCTAssertEqual(payload?.aiCreditsWallet, 1000)
-        XCTAssertEqual(summary.secondary?.utilization ?? -1, 0, accuracy: 0.0001)
     }
 
     func test_fetchUsage_apiWalletWins_overSQLiteFallback() async throws {
@@ -331,205 +338,86 @@ final class AntigravityProviderTests: XCTestCase {
             }
         )
         let summary = try await provider.fetchUsage(credential: makeCredential(), profile: profile)
-        let payload = summary.payload as? AntigravityUsageSnapshot
+        let payload = (summary.payload as? AntigravityUsagePayload)?.snapshot
         XCTAssertEqual(payload?.aiCreditsWallet, 250)
     }
 
-    // MARK: - Tooltip strings
+    // MARK: - Tooltip strings (worst-group)
 
-    func test_switcherBarTooltips_returnsWorstModelString() {
-        let stubTransport: AntigravityAPIClient.Transport = { _ in
-            (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
-                                     statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    /// Builds a quota-payload summary from the class `quotaJSON` fixture so the
+    /// switcher hooks can be exercised without a full fetch.
+    private func quotaSummary() throws -> ProviderUsageSummary {
+        let quota = try AntigravityQuotaSummary.decoder.decode(
+            AntigravityQuotaSummary.self, from: Data(quotaJSON.utf8))
+        let payload = AntigravityUsagePayload(
+            snapshot: AntigravityUsageSnapshot(fetchedAt: .distantPast), quota: quota)
+        return ProviderUsageSummary(
+            providerID: .antigravity, fetchedAt: .distantPast,
+            primary: nil, secondary: nil, payload: payload)
+    }
+
+    /// Builds a quota-payload summary with a single group carrying the given
+    /// 5h / weekly reset times (remaining fixed at 0.5 so utilization is
+    /// non-nil). Used by the renewal-estimate tests.
+    private func quotaSummary(fiveHourReset: Date?, weeklyReset: Date?) -> ProviderUsageSummary {
+        var buckets: [AntigravityQuotaSummary.Bucket] = []
+        if let fiveHourReset {
+            buckets.append(.init(bucketId: "g-5h", displayName: nil, window: .fiveHour,
+                                 remainingFraction: 0.5, resetTime: fiveHourReset))
         }
-        let provider = makeProvider(
-            transport: stubTransport,
-            watcher: StubAntigravityProcessWatcher(),
-            readOveragesEnabled: { true }
-        )
-        let snapshot = AntigravityUsageSnapshot(
+        if let weeklyReset {
+            buckets.append(.init(bucketId: "g-weekly", displayName: nil, window: .weekly,
+                                 remainingFraction: 0.5, resetTime: weeklyReset))
+        }
+        let quota = AntigravityQuotaSummary(
             fetchedAt: .distantPast,
-            planInfo: .init(planName: "Google AI Pro", monthlyPromptCredits: 5000),
-            models: [
-                .init(label: "Gemini Pro (High)", modelId: "g", remainingFraction: 0.03, resetTime: nil),
-                .init(label: "Claude",            modelId: "c", remainingFraction: 0.8,  resetTime: nil)
-            ],
-            availableCredits: [.init(creditType: "GOOGLE_ONE_AI", creditAmount: 423)],
-            userTierName: "Google AI Pro",
-            overagesEnabled: true
-        )
+            groups: [.init(displayName: "Models", description: nil, buckets: buckets)])
+        let payload = AntigravityUsagePayload(
+            snapshot: AntigravityUsageSnapshot(fetchedAt: .distantPast), quota: quota)
+        return ProviderUsageSummary(
+            providerID: .antigravity, fetchedAt: .distantPast,
+            primary: nil, secondary: nil, payload: payload)
+    }
+
+    func test_switcherBarTooltips_namesWorstGroupPerWindow() throws {
+        let provider = makeProvider(
+            transport: { _ in throw URLError(.unknown) },
+            watcher: StubAntigravityProcessWatcher())
+        let tips = provider.switcherBarTooltips(summary: try quotaSummary())
+        // Worst 5h is the Gemini group (20% remaining → 80% util); worst weekly
+        // is the Claude+GPT group (8% remaining → 92% util).
+        let primary = try XCTUnwrap(tips.primary)
+        XCTAssertTrue(primary.hasPrefix("5-hour · "), "got \(primary)")
+        XCTAssertTrue(primary.contains("Gemini"), "got \(primary)")
+        XCTAssertTrue(primary.contains("20% remaining"), "got \(primary)")
+        let secondary = try XCTUnwrap(tips.secondary)
+        XCTAssertTrue(secondary.hasPrefix("Weekly · "), "got \(secondary)")
+        XCTAssertTrue(secondary.contains("Claude"), "got \(secondary)")
+    }
+
+    func test_switcherBarTooltips_quotaNil_showsUnavailable() {
+        let provider = makeProvider(
+            transport: { _ in throw URLError(.unknown) },
+            watcher: StubAntigravityProcessWatcher())
+        let payload = AntigravityUsagePayload(
+            snapshot: AntigravityUsageSnapshot(fetchedAt: .distantPast), quota: nil)
         let summary = ProviderUsageSummary(
             providerID: .antigravity, fetchedAt: .distantPast,
-            primary: nil, secondary: nil, payload: snapshot
-        )
+            primary: nil, secondary: nil, payload: payload)
         let tips = provider.switcherBarTooltips(summary: summary)
-        XCTAssertEqual(tips.primary,   "Worst usable: Gemini Pro (High) · 3% remaining")
-        XCTAssertEqual(tips.secondary, "AI Credits: 423/1,000 · Overages on")
-    }
-
-    // MARK: - New bar-1 tooltip cases (exhausted-aware)
-
-    func test_switcherBarTooltips_allModelsFresh() {
-        // Every model at 100% remaining → tooltip says "all" instead of
-        // singling out a tied "worst".
-        let stubTransport: AntigravityAPIClient.Transport = { _ in
-            (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
-                                     statusCode: 200, httpVersion: nil, headerFields: nil)!)
-        }
-        let provider = makeProvider(
-            transport: stubTransport,
-            watcher: StubAntigravityProcessWatcher(),
-            readOveragesEnabled: { true }
-        )
-        let snapshot = AntigravityUsageSnapshot(
-            fetchedAt: .distantPast,
-            models: [
-                .init(label: "Opus",       modelId: "opus",  remainingFraction: 1.0, resetTime: nil),
-                .init(label: "Gemini Pro", modelId: "pro",   remainingFraction: 1.0, resetTime: nil),
-                .init(label: "Sonnet",     modelId: "son",   remainingFraction: 1.0, resetTime: nil)
-            ]
-        )
-        let summary = ProviderUsageSummary(
-            providerID: .antigravity, fetchedAt: .distantPast,
-            primary: nil, secondary: nil, payload: snapshot
-        )
-        XCTAssertEqual(provider.switcherBarTooltips(summary: summary).primary,
-                       "All models at full quota")
-    }
-
-    func test_switcherBarTooltips_allModelsCapped_surfacesEarliestReset() {
-        // Every model exhausted with varying reset times. Tooltip uses
-        // the earliest reset's countdown — the next model to come back.
-        let stubTransport: AntigravityAPIClient.Transport = { _ in
-            (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
-                                     statusCode: 200, httpVersion: nil, headerFields: nil)!)
-        }
-        let provider = makeProvider(
-            transport: stubTransport,
-            watcher: StubAntigravityProcessWatcher(),
-            readOveragesEnabled: { true }
-        )
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        let snapshot = AntigravityUsageSnapshot(
-            fetchedAt: .distantPast,
-            models: [
-                .init(label: "Opus",   modelId: "opus", remainingFraction: 0, resetTime: now.addingTimeInterval(7_200)),
-                .init(label: "Sonnet", modelId: "son",  remainingFraction: 0, resetTime: now.addingTimeInterval(3_600)),
-                .init(label: "Gemini", modelId: "g",    remainingFraction: 0, resetTime: now.addingTimeInterval(7_200))
-            ]
-        )
-        let summary = ProviderUsageSummary(
-            providerID: .antigravity, fetchedAt: .distantPast,
-            primary: nil, secondary: nil, payload: snapshot
-        )
-        let tip = provider.switcherBarTooltips(summary: summary).primary ?? ""
-        XCTAssertTrue(tip.hasPrefix("All models capped · next reset in "),
-                      "got \(tip)")
-    }
-
-    func test_switcherBarTooltips_oneExhaustedFallsBackToWorstUsable() {
-        // Mirrors the user-reported pivot scenario: Opus exhausted, the
-        // user has moved on to Gemini Pro (60% util). Tooltip points at
-        // Pro — plain text, no exhausted-hint suffix (popover carries
-        // the per-model breakdown).
-        let stubTransport: AntigravityAPIClient.Transport = { _ in
-            (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
-                                     statusCode: 200, httpVersion: nil, headerFields: nil)!)
-        }
-        let provider = makeProvider(
-            transport: stubTransport,
-            watcher: StubAntigravityProcessWatcher(),
-            readOveragesEnabled: { true }
-        )
-        let snapshot = AntigravityUsageSnapshot(
-            fetchedAt: .distantPast,
-            models: [
-                .init(label: "Opus",         modelId: "opus",  remainingFraction: 0,    resetTime: nil),
-                .init(label: "Gemini Flash", modelId: "flash", remainingFraction: 0.7,  resetTime: nil),
-                .init(label: "Gemini Pro",   modelId: "pro",   remainingFraction: 0.4,  resetTime: nil)
-            ]
-        )
-        let summary = ProviderUsageSummary(
-            providerID: .antigravity, fetchedAt: .distantPast,
-            primary: nil, secondary: nil, payload: snapshot
-        )
-        XCTAssertEqual(provider.switcherBarTooltips(summary: summary).primary,
-                       "Worst usable: Gemini Pro · 40% remaining")
-    }
-
-    func test_switcherBarTooltips_handlesEmptyAndOffStates() {
-        let stubTransport: AntigravityAPIClient.Transport = { _ in
-            (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
-                                     statusCode: 200, httpVersion: nil, headerFields: nil)!)
-        }
-        let provider = makeProvider(
-            transport: stubTransport,
-            watcher: StubAntigravityProcessWatcher(),
-            readOveragesEnabled: { false }
-        )
-        let snapshot = AntigravityUsageSnapshot(
-            fetchedAt: .distantPast,
-            availableCredits: [.init(creditType: "GOOGLE_ONE_AI", creditAmount: 100)],
-            userTierName: "",                    // → tier .unknown
-            overagesEnabled: false
-        )
-        let summary = ProviderUsageSummary(
-            providerID: .antigravity, fetchedAt: .distantPast,
-            primary: nil, secondary: nil, payload: snapshot
-        )
-        let tips = provider.switcherBarTooltips(summary: summary)
-        XCTAssertEqual(tips.primary,   "No model rate limits reported")
-        XCTAssertEqual(tips.secondary, "AI Credits: not tracked on this plan")
+        XCTAssertEqual(tips.primary, "Quota unavailable")
+        XCTAssertEqual(tips.secondary, "Quota unavailable")
     }
 
     // MARK: - Dimming
 
-    func test_switcherBarDimming_secondaryTrue_whenOveragesOff() {
-        let stubTransport: AntigravityAPIClient.Transport = { _ in
-            (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
-                                     statusCode: 200, httpVersion: nil, headerFields: nil)!)
-        }
+    func test_switcherBarDimming_alwaysFalse_regardlessOfOverageState() throws {
         let provider = makeProvider(
-            transport: stubTransport,
-            watcher: StubAntigravityProcessWatcher(),
-            readOveragesEnabled: { false }
-        )
-        let snapshot = AntigravityUsageSnapshot(
-            fetchedAt: .distantPast,
-            overagesEnabled: false
-        )
-        let summary = ProviderUsageSummary(
-            providerID: .antigravity, fetchedAt: .distantPast,
-            primary: nil, secondary: nil, payload: snapshot
-        )
-        let dim = provider.switcherBarDimming(summary: summary)
+            transport: { _ in throw URLError(.unknown) },
+            watcher: StubAntigravityProcessWatcher())
+        let dim = provider.switcherBarDimming(summary: try quotaSummary())
         XCTAssertFalse(dim.primary)
-        XCTAssertTrue(dim.secondary)
-    }
-
-    func test_switcherBarDimming_allFalse_whenOveragesOnOrNil() {
-        let stubTransport: AntigravityAPIClient.Transport = { _ in
-            (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
-                                     statusCode: 200, httpVersion: nil, headerFields: nil)!)
-        }
-        let provider = makeProvider(
-            transport: stubTransport,
-            watcher: StubAntigravityProcessWatcher(),
-            readOveragesEnabled: { true }
-        )
-        for state: Bool? in [Optional<Bool>.some(true), Optional<Bool>.none] {
-            let snapshot = AntigravityUsageSnapshot(
-                fetchedAt: .distantPast,
-                overagesEnabled: state
-            )
-            let summary = ProviderUsageSummary(
-                providerID: .antigravity, fetchedAt: .distantPast,
-                primary: nil, secondary: nil, payload: snapshot
-            )
-            let dim = provider.switcherBarDimming(summary: summary)
-            XCTAssertFalse(dim.primary,   "state=\(state as Any)")
-            XCTAssertFalse(dim.secondary, "state=\(state as Any)")
-        }
+        XCTAssertFalse(dim.secondary)
     }
 
     // MARK: - renewalEstimate / evaluateCreditCycle
@@ -549,109 +437,83 @@ final class AntigravityProviderTests: XCTestCase {
         XCTAssertEqual(est?.absolute, true)
     }
 
-    func test_renewalEstimate_fallsBackToEarliestModelReset() {
+    func test_renewalEstimate_fallsBackToSoonestQuotaReset() {
         // Header estimate, pre-observation: with no observed cycle yet, fall
-        // back to the soonest model reset we know.
+        // back to the soonest quota-bucket reset across all groups/windows.
         let provider = makeProvider(transport: { _ in
             (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
                                      statusCode: 200, httpVersion: nil, headerFields: nil)!)
         }, watcher: StubAntigravityProcessWatcher())
-        let reset = ISO8601DateFormatter().date(from: "2026-05-29T02:00:00Z")!
-        let snapshot = AntigravityUsageSnapshot(
-            fetchedAt: .distantPast,
-            models: [.init(label: "Opus", modelId: "opus", remainingFraction: 0, resetTime: reset)]
-        )
-        let summary = ProviderUsageSummary(
-            providerID: .antigravity, fetchedAt: .distantPast,
-            primary: nil, secondary: nil, payload: snapshot)
+        let fiveHour = ISO8601DateFormatter().date(from: "2026-05-29T02:00:00Z")!
+        let weekly = ISO8601DateFormatter().date(from: "2026-06-02T00:00:00Z")!
+        let summary = quotaSummary(fiveHourReset: fiveHour, weeklyReset: weekly)
         let est = provider.renewalEstimate(
             profile: makeProfile(), summary: summary, now: .distantPast)
-        XCTAssertEqual(est?.date, reset)
+        XCTAssertEqual(est?.date, fiveHour, "soonest of the two bucket resets")
         XCTAssertEqual(est?.prefix, "Resets")
         XCTAssertEqual(est?.absolute, false)
     }
 
-    func test_renewalEstimate_observedAnchorWins_overModelReset() {
+    func test_renewalEstimate_observedAnchorWins_overQuotaReset() {
         // Header estimate must keep the stable credit cycle once observed —
-        // a transient model cooldown in the summary must NOT replace it.
+        // a transient quota cooldown in the summary must NOT replace it.
         let provider = makeProvider(transport: { _ in
             (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
                                      statusCode: 200, httpVersion: nil, headerFields: nil)!)
         }, watcher: StubAntigravityProcessWatcher())
-        let modelReset = ISO8601DateFormatter().date(from: "2026-05-29T04:00:00Z")!
-        let snapshot = AntigravityUsageSnapshot(
-            fetchedAt: .distantPast,
-            models: [.init(label: "Sonnet", modelId: "son", remainingFraction: 0.2, resetTime: modelReset)]
-        )
-        let summary = ProviderUsageSummary(
-            providerID: .antigravity, fetchedAt: .distantPast,
-            primary: nil, secondary: nil, payload: snapshot)
+        let quotaReset = ISO8601DateFormatter().date(from: "2026-05-29T04:00:00Z")!
+        let summary = quotaSummary(fiveHourReset: quotaReset, weeklyReset: nil)
         var profile = makeProfile()
         profile.observedCreditResetAt = ISO8601DateFormatter().date(from: "2026-04-18T00:00:00Z")
         let est = provider.renewalEstimate(
             profile: profile, summary: summary,
             now: ISO8601DateFormatter().date(from: "2026-05-29T00:00:00Z")!)
         XCTAssertEqual(est?.date, ISO8601DateFormatter().date(from: "2026-06-18T00:00:00Z"),
-                       "observed cycle must win over the model cooldown")
+                       "observed cycle must win over the quota cooldown")
         XCTAssertEqual(est?.prefix, "Est. resets")
         XCTAssertEqual(est?.absolute, true)
     }
 
-    func test_renewalEstimate_nilWhenNoAnchorAndNoReset() {
+    func test_renewalEstimate_nilWhenNoAnchorAndNoQuota() {
         let provider = makeProvider(transport: { _ in
             (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
                                      statusCode: 200, httpVersion: nil, headerFields: nil)!)
         }, watcher: StubAntigravityProcessWatcher())
-        let snapshot = AntigravityUsageSnapshot(fetchedAt: .distantPast)
+        let payload = AntigravityUsagePayload(
+            snapshot: AntigravityUsageSnapshot(fetchedAt: .distantPast), quota: nil)
         let summary = ProviderUsageSummary(
             providerID: .antigravity, fetchedAt: .distantPast,
-            primary: nil, secondary: nil, payload: snapshot)
+            primary: nil, secondary: nil, payload: payload)
         XCTAssertNil(provider.renewalEstimate(profile: makeProfile(), summary: summary, now: Date()))
     }
 
     // MARK: - switcherRenewalEstimate
 
-    func test_switcherRenewalEstimate_followsWorstModel_notEarliestReset() {
-        // The screenshot bug: the row text showed the soonest model's reset,
-        // contradicting the worst-model bar beside it. The switcher estimate
-        // must track the worst usable model's own reset.
+    func test_switcherRenewalEstimate_followsWorstFiveHourGroupReset() {
+        // The switcher row text sits beside the 5h bar (worst-group 5h window),
+        // so it must track that bucket's own reset.
         let provider = makeProvider(transport: { _ in
             (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
                                      statusCode: 200, httpVersion: nil, headerFields: nil)!)
         }, watcher: StubAntigravityProcessWatcher())
         let now = ISO8601DateFormatter().date(from: "2026-05-29T00:00:00Z")!
-        let sonnetReset = now.addingTimeInterval(5 * 86_400)
-        let geminiReset = now.addingTimeInterval(4 * 3_600)
-        let snapshot = AntigravityUsageSnapshot(
-            fetchedAt: .distantPast,
-            models: [
-                .init(label: "Sonnet", modelId: "son", remainingFraction: 0.2, resetTime: sonnetReset),
-                .init(label: "Gemini", modelId: "gem", remainingFraction: 0.8, resetTime: geminiReset)
-            ]
-        )
-        let summary = ProviderUsageSummary(
-            providerID: .antigravity, fetchedAt: .distantPast,
-            primary: nil, secondary: nil, payload: snapshot)
+        let fiveHour = now.addingTimeInterval(4 * 3_600)
+        let weekly = now.addingTimeInterval(5 * 86_400)
+        let summary = quotaSummary(fiveHourReset: fiveHour, weeklyReset: weekly)
         let est = provider.switcherRenewalEstimate(profile: makeProfile(), summary: summary, now: now)
-        XCTAssertEqual(est?.date, sonnetReset, "must follow the worst-model bar, not earliestModelReset")
+        XCTAssertEqual(est?.date, fiveHour, "must follow the worst-group 5h bucket")
         XCTAssertEqual(est?.prefix, "Resets")
     }
 
-    func test_switcherRenewalEstimate_worstModelWinsOverObservedAnchor() {
-        // The row text sits beside the worst-model bar, so its reset outranks
-        // the observed credit cycle here (unlike the header estimate).
+    func test_switcherRenewalEstimate_fiveHourWinsOverObservedAnchor() {
+        // The row text sits beside the 5h bar, so its reset outranks the
+        // observed credit cycle here (unlike the header estimate).
         let provider = makeProvider(transport: { _ in
             (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
                                      statusCode: 200, httpVersion: nil, headerFields: nil)!)
         }, watcher: StubAntigravityProcessWatcher())
         let reset = ISO8601DateFormatter().date(from: "2026-06-03T02:00:00Z")!
-        let snapshot = AntigravityUsageSnapshot(
-            fetchedAt: .distantPast,
-            models: [.init(label: "Sonnet", modelId: "son", remainingFraction: 0.2, resetTime: reset)]
-        )
-        let summary = ProviderUsageSummary(
-            providerID: .antigravity, fetchedAt: .distantPast,
-            primary: nil, secondary: nil, payload: snapshot)
+        let summary = quotaSummary(fiveHourReset: reset, weeklyReset: nil)
         var profile = makeProfile()
         profile.observedCreditResetAt = ISO8601DateFormatter().date(from: "2026-04-18T00:00:00Z")
         let est = provider.switcherRenewalEstimate(
@@ -661,20 +523,14 @@ final class AntigravityProviderTests: XCTestCase {
         XCTAssertEqual(est?.prefix, "Resets")
     }
 
-    func test_switcherRenewalEstimate_fallsBackToCreditCycle_whenModelsFresh() {
-        // No worst-model reset (all fresh) → defer to the account-level
-        // estimate (observed credit cycle).
+    func test_switcherRenewalEstimate_fallsBackToCreditCycle_whenNoFiveHourReset() {
+        // No 5h bucket reset → defer to the account-level estimate (observed
+        // credit cycle).
         let provider = makeProvider(transport: { _ in
             (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
                                      statusCode: 200, httpVersion: nil, headerFields: nil)!)
         }, watcher: StubAntigravityProcessWatcher())
-        let snapshot = AntigravityUsageSnapshot(
-            fetchedAt: .distantPast,
-            models: [.init(label: "A", modelId: "a", remainingFraction: 1.0, resetTime: nil)]
-        )
-        let summary = ProviderUsageSummary(
-            providerID: .antigravity, fetchedAt: .distantPast,
-            primary: nil, secondary: nil, payload: snapshot)
+        let summary = quotaSummary(fiveHourReset: nil, weeklyReset: nil)
         var profile = makeProfile()
         profile.observedCreditResetAt = ISO8601DateFormatter().date(from: "2026-04-18T00:00:00Z")
         let est = provider.switcherRenewalEstimate(
@@ -685,57 +541,16 @@ final class AntigravityProviderTests: XCTestCase {
         XCTAssertEqual(est?.absolute, true)
     }
 
-    func test_switcherRenewalEstimate_partialData_neverShowsAnotherModelsReset() {
-        // Partial response: the worst model (lowest remaining → the one on the
-        // bar) carries quota but NO resetTime, while a healthier model has one.
-        // The switcher must not borrow that other model's reset — better to
-        // show nothing than re-create the bar/text contradiction.
+    func test_switcherRenewalEstimate_noFiveHourReset_noCycle_returnsNil() {
+        // No 5h bucket reset and no observed cycle → nothing honest to show.
         let provider = makeProvider(transport: { _ in
             (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
                                      statusCode: 200, httpVersion: nil, headerFields: nil)!)
         }, watcher: StubAntigravityProcessWatcher())
         let now = ISO8601DateFormatter().date(from: "2026-05-29T00:00:00Z")!
-        let geminiReset = now.addingTimeInterval(4 * 3_600)
-        let snapshot = AntigravityUsageSnapshot(
-            fetchedAt: .distantPast,
-            models: [
-                .init(label: "Sonnet", modelId: "son", remainingFraction: 0.2, resetTime: nil),
-                .init(label: "Gemini", modelId: "gem", remainingFraction: 0.8, resetTime: geminiReset)
-            ]
-        )
-        let summary = ProviderUsageSummary(
-            providerID: .antigravity, fetchedAt: .distantPast,
-            primary: nil, secondary: nil, payload: snapshot)
-        // No observed cycle → no honest estimate to show.
+        let summary = quotaSummary(fiveHourReset: nil, weeklyReset: now.addingTimeInterval(4 * 3_600))
         let est = provider.switcherRenewalEstimate(profile: makeProfile(), summary: summary, now: now)
-        XCTAssertNil(est, "must not fall back to earliestModelReset (Gemini's)")
-    }
-
-    func test_switcherRenewalEstimate_partialData_deferToCreditCycle_notOtherModel() {
-        // Same partial shape, but with an observed cycle: defer to the cycle,
-        // still never to the other model's reset.
-        let provider = makeProvider(transport: { _ in
-            (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
-                                     statusCode: 200, httpVersion: nil, headerFields: nil)!)
-        }, watcher: StubAntigravityProcessWatcher())
-        let now = ISO8601DateFormatter().date(from: "2026-05-29T00:00:00Z")!
-        let geminiReset = now.addingTimeInterval(4 * 3_600)
-        let snapshot = AntigravityUsageSnapshot(
-            fetchedAt: .distantPast,
-            models: [
-                .init(label: "Sonnet", modelId: "son", remainingFraction: 0.2, resetTime: nil),
-                .init(label: "Gemini", modelId: "gem", remainingFraction: 0.8, resetTime: geminiReset)
-            ]
-        )
-        let summary = ProviderUsageSummary(
-            providerID: .antigravity, fetchedAt: .distantPast,
-            primary: nil, secondary: nil, payload: snapshot)
-        var profile = makeProfile()
-        profile.observedCreditResetAt = ISO8601DateFormatter().date(from: "2026-04-18T00:00:00Z")
-        let est = provider.switcherRenewalEstimate(profile: profile, summary: summary, now: now)
-        XCTAssertEqual(est?.date, ISO8601DateFormatter().date(from: "2026-06-18T00:00:00Z"))
-        XCTAssertEqual(est?.prefix, "Est. resets")
-        XCTAssertNotEqual(est?.date, geminiReset)
+        XCTAssertNil(est, "must not borrow the weekly bucket's reset for the 5h row")
     }
 
     // Build a snapshot whose tier ceiling is Pro (1000) with a real-API
@@ -752,7 +567,8 @@ final class AntigravityProviderTests: XCTestCase {
 
     private func antigravitySummary(_ snap: AntigravityUsageSnapshot) -> ProviderUsageSummary {
         ProviderUsageSummary(providerID: .antigravity, fetchedAt: .distantPast,
-                             primary: nil, secondary: nil, payload: snap)
+                             primary: nil, secondary: nil,
+                             payload: AntigravityUsagePayload(snapshot: snap, quota: nil))
     }
 
     func test_evaluateCreditCycle_detectsReset_whenRealWalletJumpsBackToFull() {

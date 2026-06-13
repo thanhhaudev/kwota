@@ -30,6 +30,11 @@ final class AntigravityProvider: AccountProvider {
     /// state.vscdb — and tests swap in a stub closure.
     private let readModelCredits: @MainActor () -> AntigravityModelCredits?
 
+    /// Per-group usage history for the active Antigravity profile, keyed by
+    /// group key. Assigned by MenuBarViewModel after construction; defaults to
+    /// empty so unit tests and cold start render the chart skeletons.
+    var groupHistoryProvider: @MainActor (UUID) -> [String: [UsageHistoryEntry]] = { _ in [:] }
+
     init(
         apiClient: AntigravityAPIClient,
         watcher: any AntigravityProcessWatching,
@@ -116,39 +121,36 @@ final class AntigravityProvider: AccountProvider {
         // profile row.
         backfillProfile(profile, from: snapshot)
 
-        // Attach the modelCredits sentinels to the snapshot so downstream
-        // views (popover caption + switcher bar dimming) can read them from
-        // `summary.payload`. The available-credit balance becomes the
-        // wallet fallback when the API returned none. Reader failures
-        // degrade to nil = "unknown".
+        // Authoritative quota (the Model Quota page). A miss degrades to nil —
+        // identity/plan still render; the switcher + tab show "unavailable".
+        var quota: AntigravityQuotaSummary?
+        do {
+            quota = try await apiClient.fetchQuotaSummary(
+                port: identity.port, csrfToken: identity.csrfToken)
+        } catch {
+            AppLog.shared.log("AntigravityProvider: quota fetch failed: \(error)", level: .warn)
+            quota = nil
+        }
+
         let credits = readModelCredits()
         snapshot.overagesEnabled = credits?.overagesEnabled
         snapshot.aiCreditsFallback = credits?.availableCredits
 
-        // primary  = worst-model utilization (the most-constrained model
-        //            across all rate-limited models). Surface this on the
-        //            switcher row so a single glance shows the model
-        //            closest to its cap.
-        // secondary = AI Credits utilization. Wallet vs tier ceiling.
-        //            Nil when tier has no ceiling (Free / Unknown).
-        let primary = snapshot.worstModelUtilization.map { util in
-            UsageBucket(utilization: util, resetsAt: nil)
+        // primary = worst-group 5-hour window; secondary = worst-group weekly.
+        // Reads like Claude/Codex (5h bar + weekly bar). Reset times carried.
+        let primary = quota?.worstFiveHour.map {
+            UsageBucket(utilization: $0.bucket.utilization, resetsAt: $0.bucket.resetTime)
         }
-        let secondary = snapshot.aiCreditsUtilization.map { util in
-            UsageBucket(utilization: util, resetsAt: nil)
+        let secondary = quota?.worstWeekly.map {
+            UsageBucket(utilization: $0.bucket.utilization, resetsAt: $0.bucket.resetTime)
         }
-
-        AppLog.shared.log(
-            "AntigravityProvider: parsed snapshot — plan=\(snapshot.planInfo?.planName ?? "nil"), worstModelUtil=\(snapshot.worstModelUtilization.map { String(format: "%.1f", $0) } ?? "nil"), aiCreditsUtil=\(snapshot.aiCreditsUtilization.map { String(format: "%.1f", $0) } ?? "nil"), overagesEnabled=\(snapshot.overagesEnabled.map(String.init(describing:)) ?? "nil"), aiCreditsFallback=\(snapshot.aiCreditsFallback.map(String.init) ?? "nil"), models=\(snapshot.models?.count ?? 0)",
-            level: .debug
-        )
 
         return ProviderUsageSummary(
             providerID: .antigravity,
             fetchedAt: snapshot.fetchedAt,
             primary: primary,
             secondary: secondary,
-            payload: snapshot,
+            payload: AntigravityUsagePayload(snapshot: snapshot, quota: quota),
             retryAfter: nil
         )
     }
@@ -192,10 +194,12 @@ final class AntigravityProvider: AccountProvider {
     func usageDetailView(summary: ProviderUsageSummary,
                         history: [UsageHistoryEntry],
                         profile: Profile) -> AnyView {
-        guard let snap = summary.payload as? AntigravityUsageSnapshot else {
+        guard let payload = summary.payload as? AntigravityUsagePayload else {
             return AnyView(EmptyView())
         }
-        return AnyView(AntigravityUsageDetailView(snapshot: snap, history: history))
+        return AnyView(AntigravityUsageDetailView(
+            snapshot: payload.snapshot,
+            history: history))
     }
 
     func planBadgeView(profile: Profile) -> AnyView {
@@ -230,65 +234,26 @@ final class AntigravityProvider: AccountProvider {
     func switcherBarTooltips(
         summary: ProviderUsageSummary
     ) -> (primary: String?, secondary: String?) {
-        guard let snapshot = summary.payload as? AntigravityUsageSnapshot else {
-            return (nil, nil)
+        guard let quota = (summary.payload as? AntigravityUsagePayload)?.quota else {
+            return ("Quota unavailable", "Quota unavailable")
         }
-
-        // Bar 1 — model rate-limit bar. Four cases:
-        //   1. No quota data at all → "No model rate limits reported"
-        //   2. Every model fresh (remaining = 100%) → "All models at full quota"
-        //   3. Every model exhausted → "All models capped · next reset in <time>"
-        //   4. Mixed → "Worst usable: <label> · N% remaining"
-        // The all-fresh case is checked BEFORE the worst-usable path so
-        // the tooltip says "all" instead of singling out one model whose
-        // remaining happens to tie.
-        let primaryTip: String
-        if snapshot.worstModelUtilization == nil {
-            primaryTip = "No model rate limits reported"
-        } else if snapshot.allModelsFresh {
-            primaryTip = "All models at full quota"
-        } else if snapshot.allModelsExhausted {
-            if let reset = snapshot.earliestModelReset {
-                primaryTip = "All models capped · next reset in \(Self.formattedResetCountdown(until: reset))"
-            } else {
-                primaryTip = "All models capped"
-            }
-        } else if let label = snapshot.worstModelLabel,
-                  let util = snapshot.worstModelUtilization {
+        func tip(_ label: String, _ pair: (group: AntigravityQuotaSummary.Group,
+                                           bucket: AntigravityQuotaSummary.Bucket)?) -> String? {
+            guard let pair, let util = pair.bucket.utilization else { return "\(label): not tracked" }
             let remaining = Int((100 - util).rounded())
-            primaryTip = "Worst usable: \(label) · \(remaining)% remaining"
-        } else {
-            // Defensive: worstModelUtilization was non-nil per the first
-            // guard, but the label resolver tied or returned nil. Fall
-            // back to a generic phrasing rather than crashing the popover.
-            primaryTip = "Model quota tracked"
-        }
-
-        // Bar 2 — AI Credits
-        let secondaryTip: String
-        if let wallet = snapshot.aiCreditsWallet,
-           let ceiling = snapshot.tier.aiCreditsCeiling, ceiling > 0 {
-            let walletStr  = Self.formattedCount(wallet)
-            let ceilingStr = Self.formattedCount(ceiling)
-            switch snapshot.overagesEnabled {
-            case .some(true):  secondaryTip = "AI Credits: \(walletStr)/\(ceilingStr) · Overages on"
-            case .some(false): secondaryTip = "AI Credits: \(walletStr)/\(ceilingStr) · Overages off"
-            case .none:        secondaryTip = "AI Credits: \(walletStr)/\(ceilingStr)"
+            let group = pair.group.displayName ?? "models"
+            if let reset = pair.bucket.resetTime {
+                return "\(label) · \(group) · \(remaining)% remaining · resets \(Self.formattedResetCountdown(until: reset))"
             }
-        } else {
-            secondaryTip = "AI Credits: not tracked on this plan"
+            return "\(label) · \(group) · \(remaining)% remaining"
         }
-
-        return (primaryTip, secondaryTip)
+        return (tip("5-hour", quota.worstFiveHour), tip("Weekly", quota.worstWeekly))
     }
 
     func switcherBarDimming(
         summary: ProviderUsageSummary
     ) -> (primary: Bool, secondary: Bool) {
-        guard let snapshot = summary.payload as? AntigravityUsageSnapshot else {
-            return (false, false)
-        }
-        return (false, snapshot.overagesEnabled == false)
+        (false, false)
     }
 
     // MARK: - Renewal / reset estimate
@@ -296,18 +261,10 @@ final class AntigravityProvider: AccountProvider {
     func renewalEstimate(profile: Profile,
                          summary: ProviderUsageSummary?,
                          now: Date) -> RenewalEstimate? {
-        // Account-level (main header) estimate. The observed credit cycle is
-        // the stablest signal, so it wins.
-        if let cycle = observedCreditCycleEstimate(profile: profile, now: now) {
-            return cycle
-        }
-        // Fallback before any observation: the soonest per-model rate-limit
-        // reset we actually know — honest, but a cooldown, not a cycle. The
-        // header stands alone (no bar beside it), so the soonest reset is an
-        // acceptable "when does something come back" hint here.
-        if let snapshot = summary?.payload as? AntigravityUsageSnapshot,
-           let reset = snapshot.earliestModelReset {
-            return RenewalEstimate(date: reset, prefix: "Resets", absolute: false)
+        if let cycle = observedCreditCycleEstimate(profile: profile, now: now) { return cycle }
+        if let quota = (summary?.payload as? AntigravityUsagePayload)?.quota {
+            let soonest = quota.groups.flatMap { $0.buckets }.compactMap { $0.resetTime }.min()
+            if let soonest { return RenewalEstimate(date: soonest, prefix: "Resets", absolute: false) }
         }
         return nil
     }
@@ -315,17 +272,9 @@ final class AntigravityProvider: AccountProvider {
     func switcherRenewalEstimate(profile: Profile,
                                  summary: ProviderUsageSummary?,
                                  now: Date) -> RenewalEstimate? {
-        // The switcher row's text sits beside the worst-model bar, so it must
-        // describe that exact model — its own reset wins.
-        if let snapshot = summary?.payload as? AntigravityUsageSnapshot,
-           let reset = snapshot.worstModelReset {
+        if let reset = (summary?.payload as? AntigravityUsagePayload)?.quota?.worstFiveHour?.bucket.resetTime {
             return RenewalEstimate(date: reset, prefix: "Resets", absolute: false)
         }
-        // No worst-model reset (worst model fresh, or constrained without a
-        // reset window in a partial response). Defer ONLY to the credit cycle
-        // — never to `earliestModelReset`, which can belong to a healthier
-        // model and would re-create the bar/text contradiction this hook
-        // exists to prevent.
         return observedCreditCycleEstimate(profile: profile, now: now)
     }
 
@@ -344,7 +293,7 @@ final class AntigravityProvider: AccountProvider {
     func evaluateCreditCycle(summary: ProviderUsageSummary,
                              profile: Profile,
                              now: Date) -> CreditCycleEvaluation? {
-        guard let snapshot = summary.payload as? AntigravityUsageSnapshot else { return nil }
+        guard let snapshot = (summary.payload as? AntigravityUsagePayload)?.snapshot else { return nil }
         // Trust ONLY a real-API wallet (userTier.availableCredits) — never the
         // state.vscdb fallback (aiCreditsFallback), which can be stale and fake
         // a jump — and a known ceiling. Without both we can't reason about a
@@ -363,14 +312,6 @@ final class AntigravityProvider: AccountProvider {
         return CreditCycleEvaluation(resetDetectedAt: reset,
                                      lastWallet: wallet,
                                      lastCeiling: ceiling)
-    }
-
-    /// Comma-grouped integer formatting reused by tooltips.
-    private static func formattedCount(_ n: Int64) -> String {
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        f.groupingSeparator = ","
-        return f.string(from: NSNumber(value: n)) ?? "\(n)"
     }
 
     /// Short countdown for "next reset in <time>". Matches the format

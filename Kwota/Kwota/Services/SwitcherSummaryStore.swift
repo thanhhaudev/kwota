@@ -60,7 +60,7 @@ private struct PersistedSwitcherSummary: Codable {
         self.secondary = summary.secondary
         self.retryAfter = summary.retryAfter
         self.antigravityOveragesEnabled =
-            (summary.payload as? AntigravityUsageSnapshot)?.overagesEnabled
+            (summary.payload as? AntigravityUsagePayload)?.snapshot.overagesEnabled
     }
 
     /// Reconstructs the in-memory `ProviderUsageSummary` from the persisted
@@ -75,10 +75,11 @@ private struct PersistedSwitcherSummary: Codable {
             // stay nil — the tooltip already degrades to "no model rate
             // limits reported" in that case, and the dim flag depends
             // only on overagesEnabled.
-            payload = AntigravityUsageSnapshot(
-                fetchedAt: fetchedAt,
-                overagesEnabled: antigravityOveragesEnabled
-            )
+            payload = AntigravityUsagePayload(
+                snapshot: AntigravityUsageSnapshot(
+                    fetchedAt: fetchedAt,
+                    overagesEnabled: antigravityOveragesEnabled),
+                quota: nil)
         } else {
             payload = EmptyPayload()
         }
