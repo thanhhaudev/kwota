@@ -206,6 +206,7 @@ struct MenuBarView: View {
             case .usage: UsageTabView(vm: vm)
             case .awake: KeepAwakeTabView(vm: vm)
             case .cache: CacheTabView(vm: vm)
+            case .stats: StatsTabView(vm: vm)
             }
         }
         .padding(.horizontal, 12)

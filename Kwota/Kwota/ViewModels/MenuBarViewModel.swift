@@ -21,13 +21,14 @@ final class MenuBarViewModel {
     // MARK: - Tabs
 
     enum Tab: String, CaseIterable, Identifiable {
-        case usage, awake, cache
+        case usage, awake, cache, stats
         var id: String { rawValue }
         var label: String {
             switch self {
             case .usage: return "Usage"
             case .awake: return "Awake"
             case .cache: return "Cache"
+            case .stats: return "Stats"
             }
         }
         var icon: String {
@@ -35,6 +36,7 @@ final class MenuBarViewModel {
             case .usage: return "chart.bar.fill"
             case .awake: return "cup.and.saucer.fill"
             case .cache: return "internaldrive.fill"
+            case .stats: return "chart.line.uptrend.xyaxis"
             }
         }
     }

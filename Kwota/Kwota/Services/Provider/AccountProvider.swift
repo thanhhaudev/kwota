@@ -102,6 +102,10 @@ protocol AccountProvider: AnyObject {
                         history: [UsageHistoryEntry],
                         profile: Profile) -> AnyView
 
+    /// Provider-specific Stats tab body (historical token consumption). Default
+    /// renders an unsupported placeholder; providers with token data override.
+    func statsDetailView(store: StatsStore, profile: Profile) -> AnyView
+
     /// Optional: provider-specific badge surfaced in the profile row
     /// (e.g. Claude's "Pro" / "Team" pill). Empty view = no badge.
     func planBadgeView(profile: Profile) -> AnyView
@@ -205,4 +209,8 @@ extension AccountProvider {
     func evaluateCreditCycle(summary: ProviderUsageSummary,
                              profile: Profile,
                              now: Date) -> CreditCycleEvaluation? { nil }
+
+    func statsDetailView(store: StatsStore, profile: Profile) -> AnyView {
+        AnyView(StatsUnsupportedView(providerName: displayName))
+    }
 }
