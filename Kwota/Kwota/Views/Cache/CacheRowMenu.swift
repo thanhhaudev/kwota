@@ -56,7 +56,10 @@ struct CacheRowMenu: View {
     var body: some View {
         Menu {
             if row.isCleanable {
-                Button("Clean now (\(cleanBlock?.menuSuffix ?? formatBytes(row.sizeBytes)))",
+                // No "(waiting…)" suffix here: while blocked the trigger
+                // glyph swaps to a spinner, so the busy state reads from the
+                // row itself instead of from disabled text inside the menu.
+                Button("Clean now (\(formatBytes(row.sizeBytes)))",
                        systemImage: "trash",
                        action: onCleanNow)
                     .disabled(row.sizeBytes == 0 || cleanBlock != nil)
@@ -93,12 +96,26 @@ struct CacheRowMenu: View {
                    role: .destructive,
                    action: onRemove)
         } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 20, height: 20)
-                .contentShape(Rectangle())
-                .accessibilityLabel("More actions for \(row.displayName)")
+            // ⋯ stays put as the menu trigger; while a scan/clean is loading
+            // a small spinner rides to its left so the busy state reads from
+            // the row without hiding the menu. Clean now disables inside, but
+            // the other actions (reveal, copy, evaluate, remove) aren't
+            // blocked by the in-flight operation and stay reachable.
+            HStack(spacing: 4) {
+                if cleanBlock != nil {
+                    ProgressView()
+                        .controlSize(.small)
+                        .allowsHitTesting(false)
+                }
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 20, height: 20)
+            }
+            .contentShape(Rectangle())
+            .accessibilityLabel(cleanBlock.map {
+                "More actions for \(row.displayName), \($0.menuSuffix)"
+            } ?? "More actions for \(row.displayName)")
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
