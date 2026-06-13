@@ -31,10 +31,14 @@ final class StatsFormatTests: XCTestCase {
 
     // MARK: StatsModelPalette.label
 
-    func test_label_stripsClaudePrefix() {
-        XCTAssertEqual(StatsModelPalette.label(for: "claude-opus-4-8"),  "opus-4-8")
-        XCTAssertEqual(StatsModelPalette.label(for: "claude-sonnet-4-6"), "sonnet-4-6")
-        XCTAssertEqual(StatsModelPalette.label(for: "claude-haiku-3-5"),  "haiku-3-5")
+    func test_label_stripsClaudePrefixAndPrettifiesVersion() {
+        XCTAssertEqual(StatsModelPalette.label(for: "claude-opus-4-8"),   "opus 4.8")
+        XCTAssertEqual(StatsModelPalette.label(for: "claude-sonnet-4-6"), "sonnet 4.6")
+        XCTAssertEqual(StatsModelPalette.label(for: "claude-haiku-3-5"),  "haiku 3.5")
+        // Date suffix is preserved, not special-cased.
+        XCTAssertEqual(StatsModelPalette.label(for: "claude-haiku-4-5-20251001"), "haiku 4.5.20251001")
+        // A bare model name with no version stays as-is.
+        XCTAssertEqual(StatsModelPalette.label(for: "claude-opus"), "opus")
     }
 
     func test_label_unknownPassthrough() {

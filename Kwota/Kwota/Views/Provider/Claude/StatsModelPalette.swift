@@ -21,11 +21,18 @@ enum StatsModelPalette {
         return colors[idx]
     }
 
-    /// Trim provider prefixes for a compact axis/legend label.
-    /// "claude-opus-4-8" -> "opus-4-8"; "gpt-5.5" -> "gpt-5.5".
+    /// Friendly display name for a model id. For `claude-…` ids: strip the
+    /// prefix, take the first segment as the model name and re-join the rest as
+    /// a dotted version, e.g. "claude-opus-4-8" -> "opus 4.8". `unknown` and any
+    /// non-`claude-` id (e.g. future "gpt-5.5") pass through unchanged so later
+    /// providers aren't pre-empted.
     static func label(for model: String) -> String {
-        if model == "unknown" { return "unknown" }
-        if let r = model.range(of: "claude-") { return String(model[r.upperBound...]) }
-        return model
+        guard model != "unknown" else { return "unknown" }
+        guard model.hasPrefix("claude-") else { return model }
+        let rest = String(model.dropFirst("claude-".count))
+        let parts = rest.split(separator: "-", omittingEmptySubsequences: true).map(String.init)
+        guard let name = parts.first else { return rest }
+        let version = parts.dropFirst().joined(separator: ".")
+        return version.isEmpty ? name : "\(name) \(version)"
     }
 }
