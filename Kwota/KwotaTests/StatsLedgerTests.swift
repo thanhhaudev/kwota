@@ -71,4 +71,23 @@ final class StatsLedgerTests: XCTestCase {
         l.prune(olderThan: 7, now: now)
         XCTAssertEqual(l.dailySeries(provider: .claude, sinceDay: nil).map(\.day), ["2026-06-13"])
     }
+
+    // MARK: - Round 3: codable round-trip + graceful decode
+
+    func test_codable_roundTrip() throws {
+        var l = StatsLedger()
+        let now = date("2026-06-13T10:00:00.000Z")
+        l.merge(provider: .claude, day: "2026-06-13", model: "opus",
+                delta: TokenBreakdown(input: 100, output: 20, cacheRead: 5), now: now)
+        let data = try JSONEncoder().encode(l)
+        let decoded = try JSONDecoder().decode(StatsLedger.self, from: data)
+        XCTAssertEqual(decoded, l)
+    }
+
+    func test_decode_missingFieldsDefaultGracefully() throws {
+        let json = #"{"schemaVersion":1}"#.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(StatsLedger.self, from: json)
+        XCTAssertEqual(decoded.total(provider: .claude, sinceDay: nil), .zero)
+        XCTAssertEqual(decoded.schemaVersion, 1)
+    }
 }
