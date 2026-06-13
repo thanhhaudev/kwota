@@ -371,31 +371,40 @@ final class CacheAIEvaluationTests: XCTestCase {
     }
 
     func testEvaluationModelSelectionAntigravity() {
-        let agy = MenuBarViewModel.evaluationModelSelection(
-            engine: .antigravity, claudeModel: .haiku, codexModel: .codexDefault
-        )
-        XCTAssertNil(agy.model, "agy has no --model")
-        XCTAssertEqual(agy.label, "antigravity")
+        let def = MenuBarViewModel.evaluationModelSelection(
+            engine: .antigravity, claudeModel: .haiku,
+            codexModel: .codexDefault, antigravityModel: .agyDefault)
+        XCTAssertNil(def.model, "agyDefault omits --model")
+        XCTAssertEqual(def.label, "antigravity-default")
+
+        let flash = MenuBarViewModel.evaluationModelSelection(
+            engine: .antigravity, claudeModel: .haiku,
+            codexModel: .codexDefault, antigravityModel: .gemini35FlashLow)
+        XCTAssertEqual(flash.model, "Gemini 3.5 Flash (Low)")
+        XCTAssertEqual(flash.label, "Gemini 3.5 Flash (Low)")
     }
 
     func testEvaluationModelSelectionMapsEngineToArgs() {
         // Claude: model arg and label are both the Anthropic ID.
         let claude = MenuBarViewModel.evaluationModelSelection(
-            engine: .claude, claudeModel: .haiku, codexModel: .gpt54Mini
+            engine: .claude, claudeModel: .haiku, codexModel: .gpt54Mini,
+            antigravityModel: .agyDefault
         )
         XCTAssertEqual(claude.model, AIModelChoice.haiku.rawValue)
         XCTAssertEqual(claude.label, AIModelChoice.haiku.rawValue)
 
         // Codex explicit: slug for both.
         let codex = MenuBarViewModel.evaluationModelSelection(
-            engine: .codex, claudeModel: .haiku, codexModel: .gpt54Mini
+            engine: .codex, claudeModel: .haiku, codexModel: .gpt54Mini,
+            antigravityModel: .agyDefault
         )
         XCTAssertEqual(codex.model, "gpt-5.4-mini")
         XCTAssertEqual(codex.label, "gpt-5.4-mini")
 
         // Codex default: nil arg (CLI config decides), placeholder label.
         let codexDefault = MenuBarViewModel.evaluationModelSelection(
-            engine: .codex, claudeModel: .haiku, codexModel: .codexDefault
+            engine: .codex, claudeModel: .haiku, codexModel: .codexDefault,
+            antigravityModel: .agyDefault
         )
         XCTAssertNil(codexDefault.model)
         XCTAssertEqual(codexDefault.label, "codex-default")

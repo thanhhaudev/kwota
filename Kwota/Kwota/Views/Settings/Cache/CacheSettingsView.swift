@@ -111,8 +111,21 @@ struct CacheSettingsView: View {
                     title: { $0.displayName }
                 )
             }
+        } else if vm.cacheState.aiEngine == .antigravity {
+            SettingsRow(
+                title: "Model",
+                subtitle: vm.cacheState.aiAntigravityModel.caption
+            ) {
+                CompactInlinePicker(
+                    selection: Binding(
+                        get: { vm.cacheState.aiAntigravityModel },
+                        set: { vm.cacheSetAntigravityModel($0) }
+                    ),
+                    options: AntigravityModelChoice.allCases,
+                    title: { $0.displayName }
+                )
+            }
         }
-        // .antigravity: no Model row — agy has no model selection.
         SettingsSectionDivider()
         SettingsRow(
             title: "Output language",

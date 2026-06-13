@@ -509,6 +509,8 @@ final class MenuBarViewModel {
         /// `aiModel` so switching engines round-trips without losing
         /// either choice.
         var aiCodexModel: CodexModelChoice = .default
+        /// Model used when `aiEngine == .antigravity`.
+        var aiAntigravityModel: AntigravityModelChoice = .default
         /// Paths the user has already been alerted about as "risky". Lives
         /// in-memory for now — Phase 5 persists it so the alert truly fires
         /// once per path across launches. Cleared by `cacheClearAIEvaluations`.
@@ -2518,12 +2520,13 @@ final class MenuBarViewModel {
     nonisolated static func evaluationModelSelection(
         engine: CacheAIEngine,
         claudeModel: AIModelChoice,
-        codexModel: CodexModelChoice
+        codexModel: CodexModelChoice,
+        antigravityModel: AntigravityModelChoice
     ) -> (model: String?, label: String) {
         switch engine {
         case .claude:      return (claudeModel.rawValue, claudeModel.rawValue)
         case .codex:       return (codexModel.cliModelArg, codexModel.provenanceLabel)
-        case .antigravity: return (nil, "antigravity")
+        case .antigravity: return (antigravityModel.cliModelArg, antigravityModel.provenanceLabel)
         }
     }
 
@@ -2806,6 +2809,7 @@ final class MenuBarViewModel {
         cacheState.aiModel = .default
         cacheState.aiEngine = .default
         cacheState.aiCodexModel = .default
+        cacheState.aiAntigravityModel = .default
         cacheState.riskyAlertedPaths.removeAll()
         cacheState.removedDefaultPaths.removeAll()
         saveCacheState()
@@ -2926,7 +2930,8 @@ final class MenuBarViewModel {
             let selection = Self.evaluationModelSelection(
                 engine: cacheState.aiEngine,
                 claudeModel: cacheState.aiModel,
-                codexModel: cacheState.aiCodexModel
+                codexModel: cacheState.aiCodexModel,
+                antigravityModel: cacheState.aiAntigravityModel
             )
             let result = await evaluator.evaluateBulk(
                 rows: pending,
@@ -2987,7 +2992,8 @@ final class MenuBarViewModel {
             let selection = Self.evaluationModelSelection(
                 engine: cacheState.aiEngine,
                 claudeModel: cacheState.aiModel,
-                codexModel: cacheState.aiCodexModel
+                codexModel: cacheState.aiCodexModel,
+                antigravityModel: cacheState.aiAntigravityModel
             )
             let result = await evaluator.evaluate(
                 row: row,
@@ -3057,6 +3063,7 @@ final class MenuBarViewModel {
         cacheState.aiModel = state.aiModel
         cacheState.aiEngine = state.aiEngine
         cacheState.aiCodexModel = state.aiCodexModel
+        cacheState.aiAntigravityModel = state.aiAntigravityModel
         cacheState.riskyAlertedPaths = Set(state.riskyAlertedPaths.map { URL(fileURLWithPath: $0) })
         cacheState.trashedItems = state.trashedItems
 
@@ -3119,6 +3126,7 @@ final class MenuBarViewModel {
             aiModel: cacheState.aiModel,
             aiEngine: cacheState.aiEngine,
             aiCodexModel: cacheState.aiCodexModel,
+            aiAntigravityModel: cacheState.aiAntigravityModel,
             aiEvaluationsByPath: evalsByPath,
             customPaths: customPaths,
             autoCleanByPath: autoCleanByPath,
@@ -3221,6 +3229,11 @@ final class MenuBarViewModel {
 
     func cacheSetCodexModel(_ model: CodexModelChoice) {
         cacheState.aiCodexModel = model
+        saveCacheState()
+    }
+
+    func cacheSetAntigravityModel(_ model: AntigravityModelChoice) {
+        cacheState.aiAntigravityModel = model
         saveCacheState()
     }
 
