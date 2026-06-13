@@ -97,7 +97,7 @@ struct CacheSettingsView: View {
                     title: { $0.displayName }
                 )
             }
-        } else {
+        } else if vm.cacheState.aiEngine == .codex {
             SettingsRow(
                 title: "Model",
                 subtitle: vm.cacheState.aiCodexModel.caption
@@ -112,6 +112,7 @@ struct CacheSettingsView: View {
                 )
             }
         }
+        // .antigravity: no Model row — agy has no model selection.
         SettingsSectionDivider()
         SettingsRow(
             title: "Output language",
@@ -168,6 +169,8 @@ struct CacheSettingsView: View {
             return "Evaluations run through the claude CLI and consume your Claude subscription quota."
         case .codex:
             return "Evaluations run through the codex CLI and consume your ChatGPT subscription quota."
+        case .antigravity:
+            return "Evaluations run through the agy CLI and consume your Antigravity subscription quota."
         }
     }
 

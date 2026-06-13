@@ -370,6 +370,14 @@ final class CacheAIEvaluationTests: XCTestCase {
         XCTAssertEqual(eval.modelUsed, "codex-default")
     }
 
+    func testEvaluationModelSelectionAntigravity() {
+        let agy = MenuBarViewModel.evaluationModelSelection(
+            engine: .antigravity, claudeModel: .haiku, codexModel: .codexDefault
+        )
+        XCTAssertNil(agy.model, "agy has no --model")
+        XCTAssertEqual(agy.label, "antigravity")
+    }
+
     func testEvaluationModelSelectionMapsEngineToArgs() {
         // Claude: model arg and label are both the Anthropic ID.
         let claude = MenuBarViewModel.evaluationModelSelection(

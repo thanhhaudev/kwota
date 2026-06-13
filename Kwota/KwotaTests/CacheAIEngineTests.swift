@@ -54,4 +54,14 @@ final class CacheAIEngineTests: XCTestCase {
     func testCodexModelDefaultIsCodexDefault() {
         XCTAssertEqual(CodexModelChoice.default, .codexDefault)
     }
+
+    func testAntigravityEngineMetadata() {
+        XCTAssertEqual(CacheAIEngine.antigravity.rawValue, "antigravity")
+        XCTAssertEqual(CacheAIEngine.antigravity.displayName, "Antigravity")
+        XCTAssertEqual(CacheAIEngine.antigravity.cliCommand, "agy")
+    }
+
+    func testAllEnginesPresent() {
+        XCTAssertEqual(Set(CacheAIEngine.allCases), [.claude, .codex, .antigravity])
+    }
 }
