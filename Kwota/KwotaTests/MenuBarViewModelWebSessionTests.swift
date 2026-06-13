@@ -100,6 +100,7 @@ final class MenuBarViewModelWebSessionTests: XCTestCase {
         )
         return MenuBarViewModel(
             usage: usage,
+            statsStore: makeHermeticStatsStore(),
             cachePersistence: CachePersistenceStore(url: temp.file("cache-state-\(UUID().uuidString).json")),
             profileStore: store,
             credentialStore: keychain,
@@ -405,6 +406,7 @@ final class MenuBarViewModelWebSessionTests: XCTestCase {
         )
         let vm = MenuBarViewModel(
             usage: usage2,
+            statsStore: makeHermeticStatsStore(),
             cachePersistence: CachePersistenceStore(url: temp.file("cache-state-\(UUID().uuidString).json")),
             profileStore: store,
             credentialStore: keychain,

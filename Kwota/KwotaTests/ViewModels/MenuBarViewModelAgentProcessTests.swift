@@ -135,6 +135,7 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
         )
         let vm = MenuBarViewModel(
             usage: usage,
+            statsStore: makeHermeticStatsStore(),
             cachePersistence: CachePersistenceStore(url: temp.file("cache-state-\(UUID().uuidString).json")),
             profileStore: profileStore,
             credentialStore: keychain,

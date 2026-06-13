@@ -119,6 +119,7 @@ final class MenuBarViewModelPreloadedSummaryTests: XCTestCase {
         )
         return MenuBarViewModel(
             usage: usage,
+            statsStore: makeHermeticStatsStore(),
             cachePersistence: CachePersistenceStore(url: temp.file("cache-state-\(UUID().uuidString).json")),
             profileStore: profileStore,
             credentialStore: keychain,

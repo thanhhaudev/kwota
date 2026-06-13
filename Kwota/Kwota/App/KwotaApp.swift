@@ -170,6 +170,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         AppDelegate.viewModel?.usage.stop()
+        AppDelegate.viewModel?.statsStore.flush()
     }
 }
 

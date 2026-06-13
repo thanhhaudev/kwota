@@ -79,6 +79,7 @@ final class MenuBarViewModelProfilesTests: XCTestCase {
         )
         return MenuBarViewModel(
             usage: usage,
+            statsStore: makeHermeticStatsStore(),
             cachePersistence: CachePersistenceStore(url: temp.file("cache-state-\(UUID().uuidString).json")),
             profileStore: store,
             credentialStore: keychain,
