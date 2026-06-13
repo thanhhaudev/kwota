@@ -42,4 +42,25 @@ final class StatsStoreTests: XCTestCase {
         XCTAssertEqual(store.totalsByModel(provider: .claude, sinceDay: nil)["unknown"], TokenBreakdown(input: 7))
         XCTAssertNil(store.totalsByModel(provider: .claude, sinceDay: nil)["x"])
     }
+
+    func test_persistThenReload_restoresLedgerAndOffsets() {
+        let dir = TempDirectory()
+        let url = dir.url.appendingPathComponent("stats-ledger.json")
+
+        let store1 = StatsStore(reader: FakeJSONLogReader(),
+                                ledgerURL: url,
+                                clock: { self.date("2026-06-13T10:00:00.000Z") },
+                                persistDebounce: 0)
+        store1.ingest([UsageEvent(uuid: "u1", sessionId: "s",
+                                  timestamp: date("2026-06-13T01:00:00.000Z"),
+                                  tokens: TokenBreakdown(input: 100), model: "opus")],
+                      provider: .claude)
+        store1.flushPersistForTesting()
+
+        let store2 = StatsStore(reader: FakeJSONLogReader(),
+                                ledgerURL: url,
+                                clock: { self.date("2026-06-13T10:00:00.000Z") },
+                                persistDebounce: 0)
+        XCTAssertEqual(store2.total(provider: .claude, sinceDay: nil), TokenBreakdown(input: 100))
+    }
 }
