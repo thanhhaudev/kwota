@@ -205,8 +205,8 @@ final class CacheAIEvaluationTests: XCTestCase {
 
         let result = await evaluator.evaluate(
             row: row,
-            model: AIModelChoice.sonnet46.rawValue,
-            modelLabel: AIModelChoice.sonnet46.rawValue,
+            model: AIModelChoice.sonnet.rawValue,
+            modelLabel: AIModelChoice.sonnet.rawValue,
             language: .english
         )
         switch result {
@@ -214,7 +214,7 @@ final class CacheAIEvaluationTests: XCTestCase {
             XCTAssertEqual(eval.safety, .caution)
             XCTAssertEqual(eval.warning, "Shared store")
             XCTAssertEqual(eval.purpose, "pnpm CAS store")
-            XCTAssertEqual(eval.modelUsed, AIModelChoice.sonnet46.rawValue)
+            XCTAssertEqual(eval.modelUsed, AIModelChoice.sonnet.rawValue)
         case .failure(let err):
             XCTFail("expected success, got \(err)")
         }
@@ -225,8 +225,8 @@ final class CacheAIEvaluationTests: XCTestCase {
         let evaluator = CacheEvaluator(cliRunner: runner)
         let result = await evaluator.evaluate(
             row: makeRow(handCurated: .safe, eval: nil),
-            model: AIModelChoice.sonnet46.rawValue,
-            modelLabel: AIModelChoice.sonnet46.rawValue,
+            model: AIModelChoice.sonnet.rawValue,
+            modelLabel: AIModelChoice.sonnet.rawValue,
             language: .english
         )
         if case .failure(.cliNotInstalled) = result { return }
@@ -242,8 +242,8 @@ final class CacheAIEvaluationTests: XCTestCase {
         let evaluator = CacheEvaluator(cliRunner: runner)
         let result = await evaluator.evaluate(
             row: makeRow(handCurated: .safe, eval: nil),
-            model: AIModelChoice.sonnet46.rawValue,
-            modelLabel: AIModelChoice.sonnet46.rawValue,
+            model: AIModelChoice.sonnet.rawValue,
+            modelLabel: AIModelChoice.sonnet.rawValue,
             language: .english
         )
         if case .failure(.cliFailed(let msg)) = result {
@@ -258,8 +258,8 @@ final class CacheAIEvaluationTests: XCTestCase {
         let evaluator = CacheEvaluator(cliRunner: runner)
         let result = await evaluator.evaluate(
             row: makeRow(handCurated: .safe, eval: nil),
-            model: AIModelChoice.sonnet46.rawValue,
-            modelLabel: AIModelChoice.sonnet46.rawValue,
+            model: AIModelChoice.sonnet.rawValue,
+            modelLabel: AIModelChoice.sonnet.rawValue,
             language: .english
         )
         if case .failure(.parseFailed) = result { return }
@@ -288,21 +288,21 @@ final class CacheAIEvaluationTests: XCTestCase {
     func testEvaluationModelSelectionMapsEngineToArgs() {
         // Claude: model arg and label are both the Anthropic ID.
         let claude = MenuBarViewModel.evaluationModelSelection(
-            engine: .claude, claudeModel: .haiku45, codexModel: .gpt54Mini
+            engine: .claude, claudeModel: .haiku, codexModel: .gpt54Mini
         )
-        XCTAssertEqual(claude.model, AIModelChoice.haiku45.rawValue)
-        XCTAssertEqual(claude.label, AIModelChoice.haiku45.rawValue)
+        XCTAssertEqual(claude.model, AIModelChoice.haiku.rawValue)
+        XCTAssertEqual(claude.label, AIModelChoice.haiku.rawValue)
 
         // Codex explicit: slug for both.
         let codex = MenuBarViewModel.evaluationModelSelection(
-            engine: .codex, claudeModel: .haiku45, codexModel: .gpt54Mini
+            engine: .codex, claudeModel: .haiku, codexModel: .gpt54Mini
         )
         XCTAssertEqual(codex.model, "gpt-5.4-mini")
         XCTAssertEqual(codex.label, "gpt-5.4-mini")
 
         // Codex default: nil arg (CLI config decides), placeholder label.
         let codexDefault = MenuBarViewModel.evaluationModelSelection(
-            engine: .codex, claudeModel: .haiku45, codexModel: .codexDefault
+            engine: .codex, claudeModel: .haiku, codexModel: .codexDefault
         )
         XCTAssertNil(codexDefault.model)
         XCTAssertEqual(codexDefault.label, "codex-default")
@@ -326,8 +326,8 @@ final class CacheAIEvaluationTests: XCTestCase {
 
         let result = await evaluator.evaluateBulk(
             rows: [rowA, rowB],
-            model: AIModelChoice.sonnet46.rawValue,
-            modelLabel: AIModelChoice.sonnet46.rawValue,
+            model: AIModelChoice.sonnet.rawValue,
+            modelLabel: AIModelChoice.sonnet.rawValue,
             language: .english
         )
         switch result {
@@ -351,8 +351,8 @@ final class CacheAIEvaluationTests: XCTestCase {
 
         let result = await evaluator.evaluateBulk(
             rows: [rowA],
-            model: AIModelChoice.sonnet46.rawValue,
-            modelLabel: AIModelChoice.sonnet46.rawValue,
+            model: AIModelChoice.sonnet.rawValue,
+            modelLabel: AIModelChoice.sonnet.rawValue,
             language: .english
         )
         if case .success(let byURL) = result {
@@ -369,8 +369,8 @@ final class CacheAIEvaluationTests: XCTestCase {
         let evaluator = CacheEvaluator(cliRunner: runner)
         let result = await evaluator.evaluateBulk(
             rows: [],
-            model: AIModelChoice.sonnet46.rawValue,
-            modelLabel: AIModelChoice.sonnet46.rawValue,
+            model: AIModelChoice.sonnet.rawValue,
+            modelLabel: AIModelChoice.sonnet.rawValue,
             language: .english
         )
         if case .success(let byURL) = result {

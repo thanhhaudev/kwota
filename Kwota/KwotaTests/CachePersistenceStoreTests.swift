@@ -32,7 +32,7 @@ final class CachePersistenceStoreTests: XCTestCase {
                 autoEmptyTrashAfterDays: 7,
                 deletePermanently: true
             ),
-            aiModel: .haiku45,
+            aiModel: .haiku,
             aiEvaluationsByPath: [
                 "/tmp/yarn": CacheAIEvaluation(
                     safety: .safe,
@@ -166,8 +166,8 @@ final class CachePersistenceStoreTests: XCTestCase {
                        "missing aiEngine should default to Claude")
         XCTAssertEqual(loaded.aiCodexModel, .codexDefault,
                        "missing aiCodexModel should default to codexDefault")
-        XCTAssertEqual(loaded.aiModel, .sonnet46,
-                       "legacy aiModel must keep decoding untouched")
+        XCTAssertEqual(loaded.aiModel, .sonnet,
+                       "legacy aiModel maps to the sonnet tier")
     }
 
     func testRoundTripsEngineAndCodexModel() {
@@ -238,8 +238,8 @@ final class CachePersistenceStoreTests: XCTestCase {
                        "unrecognized aiEngine rawValue should fall back to default")
         XCTAssertEqual(loaded.aiCodexModel, .codexDefault,
                        "unrecognized aiCodexModel rawValue should fall back to default")
-        XCTAssertEqual(loaded.aiModel, .sonnet46,
-                       "the rest of the state must survive an unrecognized enum value")
+        XCTAssertEqual(loaded.aiModel, .sonnet,
+                       "legacy aiModel maps to the sonnet tier")
     }
 
     func testLoadReturnsInitialOnGarbageFile() throws {
