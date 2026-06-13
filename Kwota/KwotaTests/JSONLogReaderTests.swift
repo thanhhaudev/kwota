@@ -245,6 +245,22 @@ final class JSONLogReaderTests: XCTestCase {
                       "read(only:) must ignore paths whose prefix is not the watched root")
     }
 
+    func test_parse_extractsModelFromAssistantLine() throws {
+        let tmp = TempDirectory()
+        let projectDir = tmp.file("p1")
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let usage = #"{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}"#
+        let line = #"{"type":"assistant","uuid":"u1","sessionId":"s1","timestamp":"2026-06-13T10:00:00.000Z","message":{"model":"claude-opus-4-8","usage":\#(usage)}}"#
+        try (line + "\n").write(to: projectDir.appendingPathComponent("a.jsonl"), atomically: true, encoding: .utf8)
+
+        let reader = FilesystemJSONLogReader(root: tmp.url)
+        let events = reader.read()
+
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.model, "claude-opus-4-8")
+        XCTAssertEqual(events.first?.tokens.input, 10)
+    }
+
     private func assistantLine(uuid: String, ts: String) -> String {
         """
         {"type":"assistant","uuid":"\(uuid)","sessionId":"s1","timestamp":"\(ts)","message":{"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}

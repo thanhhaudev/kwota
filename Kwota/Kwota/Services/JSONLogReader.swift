@@ -215,7 +215,8 @@ final class FilesystemJSONLogReader: JSONLogReader, @unchecked Sendable {
 
         let usageData = (try? JSONSerialization.data(withJSONObject: usageDict)) ?? Data()
         let tokens = (try? JSONDecoder().decode(TokenBreakdown.self, from: usageData)) ?? .zero
-        return UsageEvent(uuid: uuid, sessionId: sessionId, timestamp: ts, tokens: tokens)
+        let model = message["model"] as? String
+        return UsageEvent(uuid: uuid, sessionId: sessionId, timestamp: ts, tokens: tokens, model: model)
     }
 
     // `state()` / `restore(_:)` touch `offsets`/`mtimes`; callers must not
