@@ -92,23 +92,12 @@ private struct StatsModelCard: View {
     }
 }
 
-/// Compact token formatter ("12.3K", "1.2M").
-enum StatsFormat {
-    static func tokens(_ n: Int) -> String {
-        switch n {
-        case 1_000_000...: return String(format: "%.1fM", Double(n) / 1_000_000)
-        case 1_000...:     return String(format: "%.1fK", Double(n) / 1_000)
-        default:           return "\(n)"
-        }
-    }
-}
-
 /// Daily stacked bars: billable tokens per model per day, colored by model.
 struct StatsDailyChart: View {
     let series: [(day: String, byModel: [String: TokenBreakdown])]
 
     private struct Bar: Identifiable {
-        let id = UUID()
+        var id: String { "\(day)|\(model)" }
         let day: String
         let model: String
         let billable: Int
@@ -122,13 +111,19 @@ struct StatsDailyChart: View {
 
     var body: some View {
         Chart(bars) { bar in
+            // One BarMark per (day, model). Swift Charts stacks bars into one
+            // accumulated bar per day when they share an x value and a series
+            // dimension is declared via .foregroundStyle(by:) — default
+            // .standard stacking. Colors are driven by chartForegroundStyleScale
+            // so StatsModelPalette supplies each model's hue.
             BarMark(
                 x: .value("Day", String(bar.day.suffix(5))),   // "MM-dd"
                 y: .value("Tokens", bar.billable)
             )
-            .foregroundStyle(StatsModelPalette.color(for: bar.model))
+            .foregroundStyle(by: .value("Model", bar.model))
         }
         .chartLegend(.hidden)
+        .chartForegroundStyleScale { (model: String) in StatsModelPalette.color(for: model) }
         .chartYAxis {
             AxisMarks { value in
                 AxisGridLine()
