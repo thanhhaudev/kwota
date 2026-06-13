@@ -14,8 +14,8 @@
 //
 //      claude -p <userPrompt> --system-prompt <systemPrompt>
 //             --model <model> --output-format json --json-schema <schema>
-//             --disable-slash-commands --strict-mcp-config --tools ""
-//             --setting-sources project
+//             --no-session-persistence --disable-slash-commands
+//             --strict-mcp-config --tools "" --setting-sources project
 //
 //  `--output-format json` wraps the run in an envelope; `--json-schema`
 //  forces the model's answer into the `structured_output` field of that
@@ -75,33 +75,12 @@ final class ClaudeCLIRunner: AgentCLIInvocation {
             throw CLIInvocationError.notInstalled
         }
 
-        // Environment-isolation flags. `--bare` would do all of this in
-        // one shot but also disables keychain reads → no OAuth, so we
-        // strip the local Claude Code environment piecemeal instead:
-        //   --disable-slash-commands  no skills
-        //   --strict-mcp-config       no MCP servers (no --mcp-config given)
-        //   --tools ""                no tools → deterministic one-shot,
-        //                             and no PreToolUse hooks can fire
-        //   --setting-sources project only project-scoped settings; the
-        //                             neutral temp cwd has none, so the
-        //                             user's hooks never load
-        // This keeps the evaluation reproducible and cuts ~94% of the
-        // cached-context tokens the user would otherwise be billed for.
-        var args = [
-            "-p", userPrompt,
-            "--system-prompt", systemPrompt,
-            "--output-format", "json",
-            "--disable-slash-commands",
-            "--strict-mcp-config",
-            "--tools", "",
-            "--setting-sources", "project",
-        ]
-        if let model {
-            args.append(contentsOf: ["--model", model])
-        }
-        if let jsonSchema {
-            args.append(contentsOf: ["--json-schema", jsonSchema])
-        }
+        let args = Self.buildArguments(
+            userPrompt: userPrompt,
+            systemPrompt: systemPrompt,
+            model: model,
+            jsonSchema: jsonSchema
+        )
         let schemaUsed = jsonSchema != nil
 
         let (stdoutData, stderrData, exitCode) = try await CLIProcess.run(
@@ -120,6 +99,58 @@ final class ClaudeCLIRunner: AgentCLIInvocation {
         case .success(let answer): return answer
         case .failure(let err): throw err
         }
+    }
+
+    /// `claude -p` argument list. Pure + static for direct test coverage
+    /// (mirrors `CodexCLIRunner.buildArguments`).
+    ///
+    /// `--output-format json` wraps the run in an envelope; `--json-schema`
+    /// forces the answer into its `structured_output` field.
+    ///
+    /// Isolation flags. `--bare` would do most of this in one shot but also
+    /// disables keychain reads → no OAuth, so we strip the local Claude Code
+    /// environment piecemeal instead:
+    ///   --no-session-persistence  don't write this one-shot eval to
+    ///                             `~/.claude/projects`. Without it, `claude -p`
+    ///                             persists a session transcript that the Awake
+    ///                             activity chart's `scanClaudeBackfill` counts
+    ///                             as a Claude agent reply — surfacing Kwota's
+    ///                             own cache evaluations as phantom user
+    ///                             activity. (Codex's runner isolates the same
+    ///                             way via `exec --ephemeral`; agy has no such
+    ///                             flag, so the Antigravity chart filters by
+    ///                             transcript content instead.)
+    ///   --disable-slash-commands  no skills
+    ///   --strict-mcp-config       no MCP servers (no --mcp-config given)
+    ///   --tools ""                no tools → deterministic one-shot, and no
+    ///                             PreToolUse hooks can fire
+    ///   --setting-sources project only project-scoped settings; the neutral
+    ///                             cwd has none, so the user's hooks never load
+    /// This keeps the evaluation reproducible and cuts ~94% of the
+    /// cached-context tokens the user would otherwise be billed for.
+    static func buildArguments(
+        userPrompt: String,
+        systemPrompt: String,
+        model: String?,
+        jsonSchema: String?
+    ) -> [String] {
+        var args = [
+            "-p", userPrompt,
+            "--system-prompt", systemPrompt,
+            "--output-format", "json",
+            "--no-session-persistence",
+            "--disable-slash-commands",
+            "--strict-mcp-config",
+            "--tools", "",
+            "--setting-sources", "project",
+        ]
+        if let model {
+            args.append(contentsOf: ["--model", model])
+        }
+        if let jsonSchema {
+            args.append(contentsOf: ["--json-schema", jsonSchema])
+        }
+        return args
     }
 
     /// Decode the `--output-format json` envelope into either the model's

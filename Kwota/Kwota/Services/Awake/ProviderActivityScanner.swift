@@ -18,6 +18,25 @@ struct ProviderActivityScanner: Sendable {
     let matchesFile: @Sendable (URL) -> Bool
     /// Parse one raw JSONL line (UTF-8 bytes) into an activity Date, or nil.
     let timestamp: @Sendable (Data) -> Date?
+    /// Optional whole-file predicate. A matched file for which this returns true
+    /// is skipped entirely — none of its lines are counted. Used to drop Kwota's
+    /// own cache-eval transcripts (which the provider CLI writes into the watched
+    /// tree) from the activity chart. `nil` → nothing excluded.
+    let excludeFile: (@Sendable (Data) -> Bool)?
+
+    init(
+        provider: ProviderID,
+        roots: [URL],
+        matchesFile: @escaping @Sendable (URL) -> Bool,
+        timestamp: @escaping @Sendable (Data) -> Date?,
+        excludeFile: (@Sendable (Data) -> Bool)? = nil
+    ) {
+        self.provider = provider
+        self.roots = roots
+        self.matchesFile = matchesFile
+        self.timestamp = timestamp
+        self.excludeFile = excludeFile
+    }
 }
 
 /// Shared one-shot backfill scan + per-provider factory configs. Mirrors
@@ -52,7 +71,8 @@ enum ProviderActivityBackfill {
         matchesFile: @Sendable (URL) -> Bool,
         timestamp: @Sendable (Data) -> Date?,
         known: Set<String>,
-        cutoff: Date
+        cutoff: Date,
+        excludeFile: (@Sendable (Data) -> Bool)? = nil
     ) -> [DiscoveredFile] {
         let fm = FileManager.default
         let roots = roots.filter { candidate in
@@ -70,6 +90,7 @@ enum ProviderActivityBackfill {
                 if let mtime = try? url.resourceValues(forKeys: [.contentModificationDateKey])
                     .contentModificationDate, mtime < cutoff { continue }
                 guard let data = try? Data(contentsOf: url) else { continue }
+                if let excludeFile, excludeFile(data) { continue }
                 let bytes = [UInt8](data)
                 let newline = UInt8(ascii: "\n")
                 var dates: [Date] = []
@@ -113,6 +134,7 @@ enum ProviderActivityBackfill {
                     continue
                 }
                 guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+                if let excludeFile = scanner.excludeFile, excludeFile(Data(text.utf8)) { continue }
                 for raw in text.split(separator: "\n", omittingEmptySubsequences: true) {
                     guard let data = String(raw).data(using: .utf8),
                           let ts = scanner.timestamp(data),
@@ -195,7 +217,11 @@ enum ProviderActivityBackfill {
                       (obj["type"] as? String) == "PLANNER_RESPONSE",
                       let s = obj["created_at"] as? String else { return nil }
                 return parseDate(s)
-            }
+            },
+            // Drop Kwota's own cache-eval `agy -p` runs: they write a transcript
+            // into the same `antigravity-cli/brain` tree this scanner reads, and
+            // would otherwise count as phantom agent activity.
+            excludeFile: { AntigravityCacheEvalFilter.isCacheEvalTranscript($0) }
         )
     }
 }

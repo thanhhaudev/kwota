@@ -11,10 +11,34 @@ import AppKit
 @MainActor
 final class AntigravityActivitySourceTests: XCTestCase {
     private var bag = Set<AnyCancellable>()
+    private var tempDirs: [URL] = []
 
     override func tearDown() {
         bag.removeAll()
+        for dir in tempDirs { try? FileManager.default.removeItem(at: dir) }
+        tempDirs.removeAll()
         super.tearDown()
+    }
+
+    /// Write a real transcript under a `brain/.../transcript.jsonl` path and
+    /// return that path. When `eval` is true the USER_INPUT carries Kwota's
+    /// cache-eval signature, so the source should treat the whole session as its
+    /// own evaluation and emit nothing.
+    private func makeTranscriptOnDisk(eval: Bool) -> String {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agysrc-\(UUID().uuidString)", isDirectory: true)
+        tempDirs.append(base)
+        let logs = base.appendingPathComponent(
+            "antigravity-cli/brain/s/.system_generated/logs", isDirectory: true)
+        try! FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        let userContent = eval
+            ? "You are a \(CacheEvaluationPrompts.activitySignature) local cache folders."
+            : "Refactor the JSONL parser"
+        let body = "{\"type\":\"USER_INPUT\",\"content\":\"\(userContent)\"}\n"
+            + "{\"type\":\"PLANNER_RESPONSE\",\"created_at\":\"2026-06-13T08:00:00Z\"}\n"
+        let url = logs.appendingPathComponent("transcript.jsonl")
+        try! body.write(to: url, atomically: true, encoding: .utf8)
+        return url.path
     }
 
     private func drain() async {
@@ -335,5 +359,45 @@ final class AntigravityActivitySourceTests: XCTestCase {
         XCTAssertTrue(
             AntigravityActivitySource.watchRoots(home: home) { _ in false }.isEmpty
         )
+    }
+
+    // MARK: cache-eval suppression
+
+    /// A transcript written by Kwota's own cache evaluation lands in the watched
+    /// brain tree, but it isn't the user's work — the source emits nothing for it.
+    func testSkipsKwotaCacheEvalTranscript() async {
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        let past = Date(timeIntervalSince1970: 1_700_000_000)
+        var received: [ActivityEvent] = []
+        let source = AntigravityActivitySource(
+            isLive: { true }, makeFileEvents: { stream }, clock: { past },
+            notificationCenter: NotificationCenter())
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+        cont.yield(makeTranscriptOnDisk(eval: true))
+        await drain()
+        XCTAssertTrue(received.isEmpty,
+                      "Kwota's own cache-eval session must not surface on the chart")
+        cont.finish(); source.stop()
+    }
+
+    /// A real Antigravity session beside it is still counted — the filter is
+    /// content-specific, not a blanket mute of the antigravity-cli tree.
+    func testEmitsForRealSessionTranscript() async {
+        var cont: AsyncStream<String>.Continuation!
+        let stream = AsyncStream<String> { cont = $0 }
+        let past = Date(timeIntervalSince1970: 1_700_000_000)
+        var received: [ActivityEvent] = []
+        let source = AntigravityActivitySource(
+            isLive: { true }, makeFileEvents: { stream }, clock: { past },
+            notificationCenter: NotificationCenter())
+        source.activityPublisher.sink { received.append($0) }.store(in: &bag)
+        source.start()
+        cont.yield(makeTranscriptOnDisk(eval: false))
+        await drain()
+        XCTAssertTrue(received.contains { $0.kind == .agentResponse },
+                      "a real session's PLANNER_RESPONSE should be counted")
+        cont.finish(); source.stop()
     }
 }

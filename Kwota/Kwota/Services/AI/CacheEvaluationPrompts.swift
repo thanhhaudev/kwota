@@ -16,6 +16,16 @@
 import Foundation
 
 enum CacheEvaluationPrompts {
+    /// A verbatim fragment shared by `systemSingle` and `systemBulk`. Each cache
+    /// evaluation spawns a provider CLI (`claude -p` / `codex` / `agy -p`) whose
+    /// session transcript records this prompt, and those transcripts land in the
+    /// very trees the Awake activity chart watches. The activity layer matches on
+    /// this fragment to recognize — and exclude — Kwota's own eval runs so they
+    /// don't surface as phantom agent activity (see `AntigravityCacheEvalFilter`).
+    /// Keep it a literal substring of both system prompts below;
+    /// `CacheEvaluationPromptsTests` guards against drift.
+    static let activitySignature = "macOS power-user assistant evaluating"
+
     /// Safety-bucket vocabulary shared by the single-path and bulk system
     /// prompts. A single edit here changes the model's bias rules for both.
     private static let buckets = """

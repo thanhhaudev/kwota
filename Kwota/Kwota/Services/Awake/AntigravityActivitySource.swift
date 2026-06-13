@@ -28,6 +28,12 @@ final class AntigravityActivitySource: ActivitySource {
     /// Byte offset already consumed per watched transcript. First sight of a
     /// path snapshots its end-of-file so launch backfill isn't replayed.
     private var offsets: [String: UInt64] = [:]
+    /// Per-transcript verdict: is this session one of Kwota's own cache-eval
+    /// `agy -p` runs (written into the watched brain tree)? Classified once from
+    /// transcript content on first sight, then reused — the answer can't change
+    /// for a given session, and re-reading large real-session files per append
+    /// would be wasteful.
+    private var cacheEvalVerdict: [String: Bool] = [:]
     /// When `start()` ran. Discovery only ingests lines at/after this instant —
     /// the same moment launch backfill scanned — so a re-found transcript can't
     /// double-count what backfill already recorded.
@@ -110,6 +116,9 @@ final class AntigravityActivitySource: ActivitySource {
                 guard path.contains("/brain/"), path.hasSuffix("/transcript.jsonl")
                 else { continue }
                 guard self.isLive() else { continue }
+                // Skip Kwota's own cache-eval runs: the provider CLI writes their
+                // transcript into this same brain tree, but they aren't user work.
+                guard !self.isCacheEvalTranscript(path) else { continue }
                 AppLog.shared.log("ACTIVITY_TRACE AG.consume path=\(path)", level: .info)
                 self.subject.send(ActivityEvent(date: self.clock(), provider: .antigravity, kind: .fileWrite))
                 self.emitAgentResponses(at: path)
@@ -129,6 +138,7 @@ final class AntigravityActivitySource: ActivitySource {
     private func pollKnownFiles() {
         guard isLive() else { return }
         for path in Array(offsets.keys) {
+            guard !isCacheEvalTranscript(path) else { continue }
             let lines = newLines(at: path)
             guard !lines.isEmpty else { continue }
             AppLog.shared.log("ACTIVITY_TRACE AG.poll path=\(path) lines=\(lines.count)", level: .info)
@@ -159,11 +169,12 @@ final class AntigravityActivitySource: ActivitySource {
         let roots = scanner.roots
         let matchesFile = scanner.matchesFile
         let timestamp = scanner.timestamp
+        let excludeFile = scanner.excludeFile
         let cutoff = startedAt
         let found = await OffMain.run {
             ProviderActivityBackfill.scanUntracked(
                 roots: roots, matchesFile: matchesFile, timestamp: timestamp,
-                known: known, cutoff: cutoff)
+                known: known, cutoff: cutoff, excludeFile: excludeFile)
         }
         // Back on the main actor: skip any path the live stream began tracking
         // while the scan ran, so an append is never counted on both paths.
@@ -190,6 +201,20 @@ final class AntigravityActivitySource: ActivitySource {
                 subject.send(ActivityEvent(date: date, provider: .antigravity, kind: .agentResponse))
             }
         }
+    }
+
+    /// Whether `path` is one of Kwota's own cache-eval transcripts (which the
+    /// provider CLI writes into the watched brain tree). Classified once from
+    /// content via `AntigravityCacheEvalFilter` and memoized: a session's nature
+    /// is fixed, and the signature lives in the first line so the head read on
+    /// first sight is enough. An unreadable file is treated as not-an-eval and
+    /// not memoized, so a transient read miss can't permanently mute a session.
+    private func isCacheEvalTranscript(_ path: String) -> Bool {
+        if let verdict = cacheEvalVerdict[path] { return verdict }
+        guard FileManager.default.fileExists(atPath: path) else { return false }
+        let verdict = AntigravityCacheEvalFilter.isCacheEvalTranscript(path: path)
+        cacheEvalVerdict[path] = verdict
+        return verdict
     }
 
     func stop() {

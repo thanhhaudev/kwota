@@ -176,4 +176,74 @@ final class ProviderActivityScannerTests: XCTestCase {
         let dates = ProviderActivityBackfill.scan(scanner, cutoff: now.addingTimeInterval(-24 * 3600))
         XCTAssertEqual(dates.count, 1)   // only the PLANNER_RESPONSE row
     }
+
+    // MARK: cache-eval exclusion (Kwota's own `agy -p` runs)
+
+    private func writeAntigravityTranscript(
+        home: URL, session: String, content firstLineContent: String, ts: String
+    ) throws -> URL {
+        let dir = home.appendingPathComponent(
+            ".gemini/antigravity-cli/brain/\(session)/.system_generated/logs")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // First line is the USER_INPUT (carrying the prompt); second is the
+        // agent's PLANNER_RESPONSE that the chart would otherwise count.
+        let lines = [
+            "{\"created_at\":\"\(ts)\",\"type\":\"USER_INPUT\",\"content\":\"\(firstLineContent)\"}",
+            "{\"created_at\":\"\(ts)\",\"type\":\"PLANNER_RESPONSE\"}",
+        ].joined(separator: "\n") + "\n"
+        let url = dir.appendingPathComponent("transcript.jsonl")
+        try lines.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    /// Launch backfill (`scan`) drops a cache-eval session entirely — its
+    /// PLANNER_RESPONSE is not counted — while a real session beside it still is.
+    func test_antigravityFactory_scan_excludesCacheEvalSession() throws {
+        let home = root.appendingPathComponent("ah-eval", isDirectory: true)
+        let iso = ISO8601DateFormatter(); iso.formatOptions = [.withInternetDateTime]
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        let ts = iso.string(from: now.addingTimeInterval(-600))
+        _ = try writeAntigravityTranscript(
+            home: home, session: "kwota-eval",
+            content: "You are a \(CacheEvaluationPrompts.activitySignature) local cache folders.",
+            ts: ts)
+        _ = try writeAntigravityTranscript(
+            home: home, session: "real-work",
+            content: "Add a retry to the network client",
+            ts: ts)
+
+        let scanner = ProviderActivityBackfill.antigravity(home: home)
+        let dates = ProviderActivityBackfill.scan(scanner, cutoff: now.addingTimeInterval(-24 * 3600))
+        XCTAssertEqual(dates.count, 1)   // only the real session's PLANNER_RESPONSE
+    }
+
+    /// Mid-run discovery (`scanUntracked`) skips the eval transcript file and
+    /// surfaces only the real one.
+    func test_antigravityFactory_scanUntracked_excludesCacheEvalSession() throws {
+        let home = root.appendingPathComponent("ah-eval2", isDirectory: true)
+        let iso = ISO8601DateFormatter(); iso.formatOptions = [.withInternetDateTime]
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        let ts = iso.string(from: now.addingTimeInterval(-600))
+        let evalURL = try writeAntigravityTranscript(
+            home: home, session: "kwota-eval",
+            content: "You are a \(CacheEvaluationPrompts.activitySignature) local cache folders.",
+            ts: ts)
+        let realURL = try writeAntigravityTranscript(
+            home: home, session: "real-work",
+            content: "Investigate the flaky test",
+            ts: ts)
+
+        // Match on the session-dir segment, not full-path equality: the macOS
+        // temp dir is a /var → /private/var symlink and the enumerator may
+        // return either form.
+        _ = (evalURL, realURL)
+        let scanner = ProviderActivityBackfill.antigravity(home: home)
+        let found = ProviderActivityBackfill.scanUntracked(
+            roots: scanner.roots, matchesFile: scanner.matchesFile, timestamp: scanner.timestamp,
+            known: [], cutoff: now.addingTimeInterval(-24 * 3600), excludeFile: scanner.excludeFile)
+        XCTAssertFalse(found.contains { $0.path.contains("/kwota-eval/") },
+                       "eval transcript must be skipped")
+        XCTAssertTrue(found.contains { $0.path.contains("/real-work/") },
+                      "real transcript must be kept")
+    }
 }
