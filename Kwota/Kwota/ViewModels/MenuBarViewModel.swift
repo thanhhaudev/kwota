@@ -1020,8 +1020,8 @@ final class MenuBarViewModel {
     }
 
     /// Whether the popover is currently visible. Starts closed (the popover
-    /// is hidden at launch). Read by the cache-AI eval completion handlers to
-    /// decide whether to post a "finished while you were away" notification.
+    /// is hidden at launch). Used by the SWR refresh gate and the Antigravity
+    /// process watcher to switch polling cadence between open and closed.
     private(set) var isPopoverOpen = false
 
     func popoverDidOpen() {
@@ -2477,8 +2477,7 @@ final class MenuBarViewModel {
         rows
     }
 
-    /// A finished cache-AI evaluation worth surfacing as a notification when
-    /// the popover closed before it completed.
+    /// A finished cache-AI evaluation surfaced as a notification banner.
     enum CacheEvalNotification {
         /// Bulk run finished; `count` is how many rows were evaluated.
         case bulkSuccess(count: Int)
@@ -2535,11 +2534,13 @@ final class MenuBarViewModel {
         }
     }
 
-    /// Post a cache-eval completion notification, but only while the popover
-    /// is closed — if it's open the user can already see the result inline,
-    /// so a banner would be redundant.
-    private func notifyCacheEvalIfBackgrounded(_ kind: CacheEvalNotification) {
-        guard !isPopoverOpen else { return }
+    /// Post a cache-eval completion notification whenever an evaluation
+    /// finishes. This intentionally does NOT gate on `isPopoverOpen`: that flag
+    /// rides SwiftUI's `.onDisappear`, which `MenuBarExtra(.window)` fires
+    /// unreliably on outside-click dismissal, so gating on it dropped the banner
+    /// entirely. If the popover happens to be open the user briefly sees both
+    /// the inline result and the banner — an accepted redundancy.
+    private func notifyCacheEvalFinished(_ kind: CacheEvalNotification) {
         let content = Self.cacheEvalNotificationContent(kind)
         Task {
             await notificationDispatcher.post(
@@ -2968,11 +2969,11 @@ final class MenuBarViewModel {
                 )
                 saveCacheState()
                 processRiskyTransitions(newRiskyPaths)
-                notifyCacheEvalIfBackgrounded(.bulkSuccess(count: byURL.count))
+                notifyCacheEvalFinished(.bulkSuccess(count: byURL.count))
             case .failure(let err):
                 AppLog.shared.log("cacheEvaluateAllWithAI: bulk failed: \(err)", level: .warn)
                 cacheState.aiEvaluationError = err
-                notifyCacheEvalIfBackgrounded(.bulkFailure)
+                notifyCacheEvalFinished(.bulkFailure)
             }
         }
     }
@@ -3015,14 +3016,14 @@ final class MenuBarViewModel {
                 if eval.safety == .risky {
                     processRiskyTransitions([row.path])
                 }
-                notifyCacheEvalIfBackgrounded(.rowSuccess(rowID: rowID, name: row.displayName))
+                notifyCacheEvalFinished(.rowSuccess(rowID: rowID, name: row.displayName))
             case .failure(let err):
                 AppLog.shared.log(
                     "cacheReEvaluateRow: '\(row.displayName)' failed: \(err)",
                     level: .warn
                 )
                 cacheState.aiEvaluationError = err
-                notifyCacheEvalIfBackgrounded(.rowFailure(rowID: rowID, name: row.displayName))
+                notifyCacheEvalFinished(.rowFailure(rowID: rowID, name: row.displayName))
             }
         }
     }
