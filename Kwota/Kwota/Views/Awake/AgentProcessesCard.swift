@@ -119,19 +119,7 @@ struct AgentProcessesCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 10) {
-                if vm.agentProcesses.isEmpty {
-                    Text("No agent processes running")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    rowList
-                    if AgentProcessListModel.hiddenCount(vm.agentProcesses, showAll: false) > 0 {
-                        tailToggle
-                    }
-                }
-            }
-            .kwotaCard()
+            agentCard
 
             if let notice = vm.agentProcessKillNotice {
                 KwotaInlineAlert(
@@ -168,6 +156,39 @@ struct AgentProcessesCard: View {
         expandedMaxHeight = min(540, max(240, screenH * 0.85 - 500))
     }
 
+    /// Card chrome is inlined (instead of `.kwotaCard()`) so the ScrollView
+    /// spans the full card width and its overlay scrollbar rides flush
+    /// against the card's right edge — the same construction as
+    /// `CacheTabView.folderListCard`. Content padding lives inside the
+    /// scroll body, and the Show-all toggle sits as a non-scrolling footer
+    /// row separated by a hairline divider.
+    private var agentCard: some View {
+        VStack(spacing: 0) {
+            if vm.agentProcesses.isEmpty {
+                Text("No agent processes running")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 12)
+                    .padding(.horizontal, 16)
+            } else {
+                rowList
+                if AgentProcessListModel.hiddenCount(vm.agentProcesses, showAll: false) > 0 {
+                    Divider()
+                    tailToggle
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(.regularMaterial)
+                .stroke(Color.secondary.opacity(0.15), lineWidth: 0.5)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .shadow(color: .black.opacity(0.06), radius: 3, x: 0, y: 1)
+    }
+
     /// Collapsed: plain stack of the first `collapsedCap` rows — short.
     /// Expanded: bounded internal scroll so the popover never outgrows the
     /// screen no matter how many sessions are alive. The scroll wrapper is
@@ -186,19 +207,20 @@ struct AgentProcessesCard: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     rowStack(visible)
                 }
-                // Keep rows at the collapsed-state width — the bleed below
-                // would otherwise stretch them into the card gutter.
-                .padding(.trailing, 12)
+                .padding(.vertical, 12)
+                .padding(.horizontal, 16)
             }
             .frame(maxHeight: expandedMaxHeight)
-            // Bleed the scroll viewport into the card's trailing padding so
-            // the overlay scrollbar rides the card gutter near the edge
-            // instead of hovering over the kill glyphs.
-            .padding(.trailing, -12)
+            // Zero the ScrollView's default insets so the overlay scrollbar
+            // sits flush at the card edge; content padding above is the only
+            // gutter — matching CacheTabView.
+            .contentMargins(0, for: .scrollContent)
         } else {
             VStack(alignment: .leading, spacing: 0) {
                 rowStack(visible)
             }
+            .padding(.vertical, 12)
+            .padding(.horizontal, 16)
         }
     }
 
@@ -233,6 +255,9 @@ struct AgentProcessesCard: View {
             .font(.system(size: 11, weight: .medium))
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(showAllProcesses
@@ -266,8 +291,6 @@ struct AgentProcessesCard: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
-                    .lineLimit(1)
-                    .truncationMode(.middle)
             }
             Spacer(minLength: 8)
             if vm.killingAgentPIDs.contains(proc.pid) {
@@ -348,12 +371,33 @@ struct AgentProcessesCard: View {
     /// "# 4821 · ⏱ 2h 13m · ● idle · 📁 kwota" — every field carries a
     /// glyph (number = PID, timer = uptime, folder = project basename, the
     /// project being what tells 14 look-alike claude sessions apart).
-    /// Returns concatenated `Text` so the activity dot can carry its tier
-    /// color inline. Raw CPU% is intentionally not shown — the colored dot
-    /// plus tier word replaces it for non-technical readability.
-    private func subtitle(for proc: AgentProcessInfo) -> Text {
+    ///
+    /// Split into two segments instead of one truncating `Text`: the meta
+    /// run (PID · uptime · tier) is `fixedSize` + high layout priority so it
+    /// always reads in full, and the project name absorbs all the overflow,
+    /// truncated in the middle. Otherwise middle-truncating the whole line
+    /// eats the uptime/tier and keeps a useless project tail.
+    @ViewBuilder
+    private func subtitle(for proc: AgentProcessInfo) -> some View {
+        HStack(spacing: 0) {
+            metaText(for: proc)
+                .fixedSize()
+                .layoutPriority(1)
+            if let project = proc.projectName {
+                (Text(" · ") + inlineIcon("folder") + Text(project))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+    }
+
+    /// The non-truncating meta run. Returns concatenated `Text` so the
+    /// activity dot can carry its tier color inline. Raw CPU% is
+    /// intentionally not shown — the colored dot plus tier word replaces it
+    /// for non-technical readability.
+    private func metaText(for proc: AgentProcessInfo) -> Text {
         let tier = proc.activityTier
-        var text = inlineIcon("number")
+        return inlineIcon("number")
             + Text("\(String(proc.pid)) · ")
             + inlineIcon("timer")
             + Text("\(AgentProcessRowFormat.durationText(etime: proc.elapsed)) · ")
@@ -364,10 +408,6 @@ struct AgentProcessesCard: View {
                 .baselineOffset(1)
                 .foregroundStyle(tier.color)
             + Text(" \(tier.label)")
-        if let project = proc.projectName {
-            text = text + Text(" · ") + inlineIcon("folder") + Text(project)
-        }
-        return text
     }
 
     /// Field glyph inside the subtitle line. Slightly under the caption2
