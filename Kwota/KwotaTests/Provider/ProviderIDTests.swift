@@ -42,4 +42,10 @@ final class ProviderIDTests: XCTestCase {
         let data = try JSONEncoder().encode(ProviderID.antigravity)
         XCTAssertEqual(String(data: data, encoding: .utf8), "\"antigravity\"")
     }
+
+    func test_displayName_matchesProviderLabels() {
+        XCTAssertEqual(ProviderID.claude.displayName, "Claude")
+        XCTAssertEqual(ProviderID.codex.displayName, "Codex")
+        XCTAssertEqual(ProviderID.antigravity.displayName, "Antigravity")
+    }
 }

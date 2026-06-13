@@ -23,6 +23,16 @@ enum ProviderID: Codable, Hashable, Sendable {
         }
     }
 
+    /// Human-facing provider label for notification titles and other UI.
+    /// Matches the `displayName` strings on the concrete `AccountProvider`s.
+    var displayName: String {
+        switch self {
+        case .claude: "Claude"
+        case .codex: "Codex"
+        case .antigravity: "Antigravity"
+        }
+    }
+
     init(rawValue: String) {
         switch rawValue {
         case "claude": self = .claude
