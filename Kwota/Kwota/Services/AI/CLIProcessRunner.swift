@@ -20,6 +20,11 @@ enum CLIProcess {
     /// project auto-discovery (CLAUDE.md, AGENTS.md, git repo) can't pick
     /// up whatever project the host app happened to launch from.
     ///
+    /// `environment` overrides the child's process environment when non-nil.
+    /// When nil (default), the child inherits the parent's environment
+    /// unchanged. Pass a value to augment PATH for node-shebang CLIs whose
+    /// runtime may not be on the Finder-launched app's minimal PATH.
+    ///
     /// If the caller's `Task` is cancelled, the child process is
     /// terminated (SIGTERM + SIGKILL after 1 s) and the continuation
     /// throws `CLIInvocationError.cancelled`.
@@ -28,6 +33,7 @@ enum CLIProcess {
         args: [String],
         stdin: Data? = nil,                                          // DELTA
         currentDirectory: URL = FileManager.default.temporaryDirectory, // DELTA
+        environment: [String: String]? = nil,
         timeout: TimeInterval
     ) async throws -> (stdout: Data, stderr: Data, exitCode: Int32) {
         // Shared slot for the spawned Process so the cancellation handler can
@@ -52,6 +58,9 @@ enum CLIProcess {
                     process.executableURL = URL(fileURLWithPath: binary)
                     process.arguments = args
                     process.currentDirectoryURL = currentDirectory   // DELTA
+                    if let environment {
+                        process.environment = environment
+                    }
 
                     let stdout = Pipe()
                     let stderr = Pipe()

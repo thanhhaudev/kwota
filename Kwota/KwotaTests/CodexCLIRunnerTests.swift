@@ -164,6 +164,35 @@ final class CodexCLIRunnerTests: XCTestCase {
         XCTAssertEqual(out, "plain answer")
     }
 
+    // MARK: - childEnvironment
+
+    func testChildEnvironmentPutsBinaryDirOnPathFirst() {
+        // nvm's codex is `#!/usr/bin/env node`; node lives in the same dir.
+        // The spawned child must see that dir on PATH or the shebang fails
+        // with "env: node: No such file or directory".
+        let env = CodexCLIRunner.childEnvironment(
+            forBinary: "/Users/me/.nvm/versions/node/v20.20.0/bin/codex",
+            baseEnvironment: ["PATH": "/usr/bin:/bin"]
+        )
+        let path = env["PATH"] ?? ""
+        let binDir = "/Users/me/.nvm/versions/node/v20.20.0/bin"
+        XCTAssertTrue(path.split(separator: ":").map(String.init).contains(binDir),
+                      "codex's own directory must be on PATH so its sibling node resolves")
+        XCTAssertTrue(path.hasPrefix(binDir + ":"),
+                      "the binary dir should come first so the co-located node wins")
+        // The pre-existing PATH entries must still be present (appended).
+        XCTAssertTrue(path.contains("/usr/bin"), "existing PATH must be preserved")
+    }
+
+    func testChildEnvironmentPreservesOtherVariables() {
+        let env = CodexCLIRunner.childEnvironment(
+            forBinary: "/opt/homebrew/bin/codex",
+            baseEnvironment: ["PATH": "/usr/bin", "HOME": "/Users/me", "FOO": "bar"]
+        )
+        XCTAssertEqual(env["HOME"], "/Users/me", "non-PATH vars must pass through (auth/home lookups)")
+        XCTAssertEqual(env["FOO"], "bar")
+    }
+
     // MARK: - ask (resolver seam only — no subprocess)
 
     func testAskThrowsNotInstalledWhenResolverFindsNothing() async {

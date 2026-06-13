@@ -132,6 +132,7 @@ final class CodexCLIRunner: AgentCLIInvocation {
             args: args,
             stdin: stdin,
             currentDirectory: workDir,
+            environment: Self.childEnvironment(forBinary: binary),
             timeout: timeout
         )
         let stderr = String(data: stderrData, encoding: .utf8)?
@@ -146,6 +147,24 @@ final class CodexCLIRunner: AgentCLIInvocation {
         case .success(let text): return text
         case .failure(let err): throw err
         }
+    }
+
+    /// Environment for the spawned `codex` process. The nvm/Homebrew
+    /// `codex` is a `#!/usr/bin/env node` script, so the child must find
+    /// `node` on PATH — and a Finder-launched .app inherits only a minimal
+    /// PATH. `node` sits in the same directory as `codex` for nvm installs,
+    /// so we prepend the binary's own directory, then the repo's standard
+    /// augmented PATH, then whatever PATH we already had. Non-PATH
+    /// variables pass through untouched (auth/home lookups rely on them).
+    static func childEnvironment(
+        forBinary binary: String,
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: String] {
+        var env = baseEnvironment
+        let binDir = (binary as NSString).deletingLastPathComponent
+        let augmented = ClaudeProbe.augmentedPATH(existing: env["PATH"] ?? "")
+        env["PATH"] = binDir.isEmpty ? augmented : "\(binDir):\(augmented)"
+        return env
     }
 
     /// `codex exec` argument list. Pure + static for direct test coverage
