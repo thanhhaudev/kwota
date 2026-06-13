@@ -32,6 +32,18 @@ final class StatsStore {
     private let persistQueue = DispatchQueue(label: "com.thanhhaudev.kwota.stats-persist", qos: .utility)
     private var pendingPersist: DispatchWorkItem?
 
+    // MARK: Read serialization
+
+    /// True while a `readChanged` session is in progress off-main.
+    /// Re-entrant calls coalesce into the pending state below instead of
+    /// racing on the reader's mutable offsets.
+    private var isReading = false
+    private var pendingFullWalk = false
+    private var pendingPaths: Set<URL> = []
+    /// Provider recorded for the coalesced request, so the in-flight loop
+    /// can use the right provider on the next iteration.
+    private var pendingProvider: ProviderID?
+
     init(reader: JSONLogReader,
          ledgerURL: URL = StatsStore.defaultLedgerURL(),
          clock: @escaping () -> Date = { Date() },
@@ -56,12 +68,46 @@ final class StatsStore {
     /// Read the changed paths (nil = full walk) with this store's own offsets
     /// and merge whatever events come back. Reuses `UsageMonitor`'s FSEvents
     /// signal but keeps independent offsets so backfill/incremental is correct.
+    ///
+    /// Reads are serialized via `isReading` — `read()` mutates the reader's
+    /// per-file offsets, so two concurrent walks would race. A call that
+    /// arrives mid-read is COALESCED into `pendingFullWalk`/`pendingPaths`;
+    /// the in-flight loop consumes that deferred state to drive the next
+    /// iteration. A nil (full-walk) request supersedes any pending paths;
+    /// a later path request is subsumed by a pending full walk.
     func readChanged(_ paths: Set<URL>?, provider: ProviderID) async {
-        let events: [UsageEvent] = await OffMain.run { [reader] in
-            if let paths { return reader.read(only: paths) }
-            return reader.read()
+        if isReading {
+            if paths == nil { pendingFullWalk = true }
+            else if !pendingFullWalk { pendingPaths.formUnion(paths!) }
+            pendingProvider = provider
+            return
         }
-        ingest(events, provider: provider)
+        isReading = true
+        defer { isReading = false }
+        var current = paths
+        var currentProvider = provider
+        while true {
+            let req = current
+            let events: [UsageEvent] = await OffMain.run { [reader] in
+                if let req { return reader.read(only: req) }
+                return reader.read()
+            }
+            ingest(events, provider: currentProvider)
+            if pendingFullWalk {
+                pendingFullWalk = false
+                pendingPaths.removeAll(keepingCapacity: true)
+                current = nil
+                currentProvider = pendingProvider ?? currentProvider
+                pendingProvider = nil
+            } else if !pendingPaths.isEmpty {
+                current = pendingPaths
+                pendingPaths.removeAll(keepingCapacity: true)
+                currentProvider = pendingProvider ?? currentProvider
+                pendingProvider = nil
+            } else {
+                return
+            }
+        }
     }
 
     /// Merge already-read events into the rollup. Pure/synchronous.
@@ -116,8 +162,11 @@ final class StatsStore {
         persistQueue.asyncAfter(deadline: .now() + persistDebounce, execute: item)
     }
 
-    /// Test seam: run any pending write synchronously now.
-    func flushPersistForTesting() {
+    /// Synchronously flush any pending persist to disk. Called on clean exit
+    /// (via MenuBarViewModel teardown) so the last ingest is never silently
+    /// dropped within the debounce window. Also used by tests for deterministic
+    /// ordering.
+    func flush() {
         pendingPersist?.cancel()
         let snapshot = Envelope(ledger: ledger, readerState: reader.state())
         persistQueue.sync { Self.write(snapshot, to: self.ledgerURL) }

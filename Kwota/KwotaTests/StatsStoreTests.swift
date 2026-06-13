@@ -55,12 +55,32 @@ final class StatsStoreTests: XCTestCase {
                                   timestamp: date("2026-06-13T01:00:00.000Z"),
                                   tokens: TokenBreakdown(input: 100), model: "opus")],
                       provider: .claude)
-        store1.flushPersistForTesting()
+        store1.flush()
 
         let store2 = StatsStore(reader: FakeJSONLogReader(),
                                 ledgerURL: url,
                                 clock: { self.date("2026-06-13T10:00:00.000Z") },
                                 persistDebounce: 0)
         XCTAssertEqual(store2.total(provider: .claude, sinceDay: nil), TokenBreakdown(input: 100))
+    }
+
+    func test_readChanged_ingestsEventsEndToEnd() async {
+        // Verify the read→ingest path through the new serialized loop: seed
+        // FakeJSONLogReader with one batch, call readChanged(nil), assert events land.
+        let fake = FakeJSONLogReader()
+        fake.queue = [[
+            UsageEvent(uuid: "r1", sessionId: "s", timestamp: date("2026-06-13T03:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 50, output: 5), model: "claude-opus-4-8"),
+            UsageEvent(uuid: "r2", sessionId: "s", timestamp: date("2026-06-13T04:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 30), model: "claude-opus-4-8"),
+        ]]
+        let store = StatsStore(reader: fake,
+                               ledgerURL: URL(fileURLWithPath: "/dev/null"),
+                               clock: { self.date("2026-06-13T10:00:00.000Z") },
+                               persistDebounce: 0)
+        await store.readChanged(nil, provider: .claude)
+        XCTAssertEqual(store.total(provider: .claude, sinceDay: nil),
+                       TokenBreakdown(input: 80, output: 5))
+        XCTAssertEqual(fake.readFullCount, 1, "expected exactly one full-walk read")
     }
 }
