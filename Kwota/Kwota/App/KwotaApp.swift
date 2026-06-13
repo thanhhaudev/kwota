@@ -163,7 +163,11 @@ struct KwotaApp: App {
 /// FSEvents-driven ledger updates that landed within the debounce window
 /// before the user quit Kwota are abandoned at process exit; the next
 /// launch's JSONL re-walk recovers the events but `readerState` and
-/// `lastUpdate` regress.
+/// `lastUpdate` regress. `statsStore.flush()` serves the same purpose for
+/// StatsStore: it forces the debounced rollup-and-offset write to complete
+/// synchronously so the last token-usage ingest before quit is not lost and,
+/// because reader offsets are stored in the same envelope, is not silently
+/// re-processed on next launch.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static var viewModel: MenuBarViewModel?
