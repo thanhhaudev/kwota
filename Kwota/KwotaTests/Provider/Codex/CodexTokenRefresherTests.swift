@@ -117,7 +117,8 @@ private struct StubCodexAuthReader: CodexAuthReaderProviding {
             accountId: nil,
             email: nil,
             name: nil,
-            subscriptionActiveUntil: nil
+            subscriptionActiveUntil: nil,
+            planType: nil
         )
     }
 }

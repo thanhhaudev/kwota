@@ -322,6 +322,87 @@ final class CodexAutoProfileCoordinatorTests: XCTestCase {
                        "No-op sync must not bump lastFetchedAt")
     }
 
+    // MARK: - Plan label plumbing
+
+    func test_newLogin_setsPlanFromJwt_whenPlanTypePresent() throws {
+        let watcher = StubCodexAccountWatcher()
+        let coord = makeCoord(watcher: watcher)
+        coord.start()
+
+        watcher.emit(CodexIdentity(
+            email: "u@x.com",
+            accountId: "acct-1",
+            credentialFingerprint: "fp",
+            name: "Hau",
+            planType: "plus"
+        ))
+
+        let added = try XCTUnwrap(profileStore.profiles.first { $0.providerID == .codex })
+        XCTAssertEqual(added.subscriptionPlan, "Plus",
+                       "JWT chatgpt_plan_type must populate Profile.subscriptionPlan at creation")
+    }
+
+    func test_existingProfile_syncsPlan_whenItDiffers() throws {
+        let existing = Profile(
+            name: "u@x.com",
+            authMethod: .cliSync,
+            providerID: .codex,
+            organizationId: "acct-1",
+            email: "u@x.com",
+            kind: .auto,
+            ownershipBoundary: Date()
+        )
+        try profileStore.add(existing)
+
+        let watcher = StubCodexAccountWatcher()
+        let coord = makeCoord(watcher: watcher)
+        coord.start()
+
+        watcher.emit(CodexIdentity(
+            email: "u@x.com",
+            accountId: "acct-1",
+            credentialFingerprint: "fp",
+            name: nil,
+            planType: "plus"
+        ))
+
+        let updated = try XCTUnwrap(profileStore.profiles.first { $0.id == existing.id })
+        XCTAssertEqual(updated.subscriptionPlan, "Plus",
+                       "Existing profile subscriptionPlan must sync to the JWT plan label")
+    }
+
+    func test_existingProfile_nilPlanType_doesNotClearPlan() throws {
+        // A degraded JWT (no chatgpt_plan_type) must not blank a plan the
+        // profile already carries — mirrors the wham/usage back-fill guard.
+        let existing = Profile(
+            name: "Hau",
+            authMethod: .cliSync,
+            providerID: .codex,
+            organizationId: "acct-1",
+            subscriptionPlan: "Plus",
+            email: "u@x.com",
+            kind: .auto,
+            ownershipBoundary: Date()
+        )
+        try profileStore.add(existing)
+
+        let watcher = StubCodexAccountWatcher()
+        let coord = makeCoord(watcher: watcher)
+        coord.start()
+
+        watcher.emit(CodexIdentity(
+            email: "u@x.com",
+            accountId: "acct-1",
+            credentialFingerprint: "fp",
+            name: "Hau",
+            planType: nil
+        ))
+
+        let after = try XCTUnwrap(profileStore.profiles.first { $0.id == existing.id })
+        XCTAssertEqual(after.subscriptionPlan, "Plus",
+                       "nil plan claim must leave an existing plan label untouched")
+    }
+
     // MARK: - launch snapshot (restore last-active on relaunch)
 
     func test_firstEmit_crossProviderActive_doesNotStealFocus() throws {
@@ -447,7 +528,8 @@ private struct StubCodexAuthReaderForCoord: CodexAuthReaderProviding {
             accountId: nil,
             email: "u@x.com",
             name: nil,
-            subscriptionActiveUntil: nil
+            subscriptionActiveUntil: nil,
+            planType: nil
         )
     }
 }

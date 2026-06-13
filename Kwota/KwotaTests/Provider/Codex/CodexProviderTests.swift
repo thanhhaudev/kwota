@@ -377,18 +377,21 @@ private struct StubCodexAuthReader: CodexAuthReaderProviding {
     let accountId: String?
     let name: String?
     let subscriptionActiveUntil: Date?
+    let planType: String?
     init(
         token: String?,
         email: String? = "u@x.com",
         accountId: String? = nil,
         name: String? = nil,
-        subscriptionActiveUntil: Date? = nil
+        subscriptionActiveUntil: Date? = nil,
+        planType: String? = nil
     ) {
         self.token = token
         self.email = email
         self.accountId = accountId
         self.name = name
         self.subscriptionActiveUntil = subscriptionActiveUntil
+        self.planType = planType
     }
     func read() -> CodexAuthReader.Auth? {
         guard let token, !token.isEmpty else { return nil }
@@ -399,7 +402,8 @@ private struct StubCodexAuthReader: CodexAuthReaderProviding {
             accountId: accountId,
             email: email,
             name: name,
-            subscriptionActiveUntil: subscriptionActiveUntil
+            subscriptionActiveUntil: subscriptionActiveUntil,
+            planType: planType
         )
     }
 }

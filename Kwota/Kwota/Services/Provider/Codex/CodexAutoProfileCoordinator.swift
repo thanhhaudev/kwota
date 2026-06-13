@@ -131,6 +131,19 @@ final class CodexAutoProfileCoordinator {
                     try? profileStore.updateProfile(updated)
                 }
             }
+            // Sync the plan label from the JWT's chatgpt_plan_type. The JWT is
+            // authoritative and auto profiles have no plan-edit UI, so silent
+            // overwrite matches the name-sync rationale. Formatted here so the
+            // badge and the wham/usage back-fill converge on the same string.
+            // A nil plan claim never clears an existing label (degraded tokens
+            // shouldn't blank the badge).
+            if let newPlan = PlanFormatter.format(identity.planType) {
+                var updated = profileStore.profiles.first(where: { $0.id == match.id }) ?? match
+                if updated.subscriptionPlan != newPlan {
+                    updated.subscriptionPlan = newPlan
+                    try? profileStore.updateProfile(updated)
+                }
+            }
             profileStore.activateOnAppearance(id: match.id, provider: .codex)
             seedKeychain(for: match.id)
             demoteOtherCodexAutoProfiles(except: match.id)
@@ -142,6 +155,7 @@ final class CodexAutoProfileCoordinator {
             authMethod: .cliSync,
             providerID: .codex,
             organizationId: identity.accountId,
+            subscriptionPlan: PlanFormatter.format(identity.planType),
             subscriptionRenewsAt: identity.subscriptionActiveUntil,
             email: email,
             kind: .auto,

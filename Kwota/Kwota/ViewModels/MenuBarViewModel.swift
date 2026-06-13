@@ -1843,7 +1843,12 @@ final class MenuBarViewModel {
                     // entirely once the Codex CLI has switched users.
                     if let codex = summary.payload as? CodexUsageSnapshot,
                        var latest = profileStore.profiles.first(where: { $0.id == profile.id }) {
-                        let planLabel = PlanFormatter.format(codex.planType)
+                        // wham/usage intermittently 200s with a degraded payload
+                        // (no plan_type) — see project_codex_wham_usage_null_rate_limit.
+                        // PlanFormatter.format(nil) is nil; keep the existing label
+                        // in that case rather than blanking the badge. The coordinator's
+                        // JWT-sourced plan is the authoritative fallback.
+                        let planLabel = PlanFormatter.format(codex.planType) ?? latest.subscriptionPlan
                         if latest.subscriptionPlan != planLabel || latest.lastFetchedAt != summary.fetchedAt {
                             latest.subscriptionPlan = planLabel
                             latest.lastFetchedAt = summary.fetchedAt

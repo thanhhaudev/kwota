@@ -107,6 +107,10 @@ final class CodexProvider: AccountProvider {
             updated.name = name
             changed = true
         }
+        if let plan = PlanFormatter.format(auth.planType), live.subscriptionPlan != plan {
+            updated.subscriptionPlan = plan
+            changed = true
+        }
         if let renewsAt = auth.subscriptionActiveUntil {
             let normalized = Date(timeIntervalSince1970: floor(renewsAt.timeIntervalSince1970))
             if live.subscriptionRenewsAt != normalized {

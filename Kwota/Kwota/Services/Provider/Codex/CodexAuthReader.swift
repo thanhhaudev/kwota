@@ -24,6 +24,7 @@ struct CodexAuthReader {
         let email: String?
         let name: String?
         let subscriptionActiveUntil: Date?
+        let planType: String?
     }
 
     let authFile: URL
@@ -61,6 +62,7 @@ struct CodexAuthReader {
         let email = payload?["email"] as? String
         let name = payload?["name"] as? String
         let subscriptionActiveUntil = Self.subscriptionActiveUntil(from: payload)
+        let planType = Self.planType(from: payload)
         return Auth(
             accessToken: accessToken,
             refreshToken: tokens["refresh_token"] as? String,
@@ -68,7 +70,8 @@ struct CodexAuthReader {
             accountId: tokens["account_id"] as? String,
             email: email,
             name: name,
-            subscriptionActiveUntil: subscriptionActiveUntil
+            subscriptionActiveUntil: subscriptionActiveUntil,
+            planType: planType
         )
     }
 
@@ -119,6 +122,22 @@ struct CodexAuthReader {
         let f2 = ISO8601DateFormatter()
         f2.formatOptions = [.withInternetDateTime]
         return f2.date(from: raw)
+    }
+
+    /// Pulls the `chatgpt_plan_type` claim from the nested
+    /// `https://api.openai.com/auth` object inside the JWT payload — the
+    /// raw OpenAI plan slug (e.g. "plus", "pro", "free"). Returns nil when
+    /// the subtree is missing, not a dict, or the claim is absent/empty.
+    /// `PlanFormatter.format` turns the slug into a display label downstream.
+    static func planType(from payload: [String: Any]?) -> String? {
+        guard let payload,
+              let openai = payload["https://api.openai.com/auth"] as? [String: Any],
+              let raw = openai["chatgpt_plan_type"] as? String,
+              !raw.isEmpty
+        else {
+            return nil
+        }
+        return raw
     }
 }
 

@@ -18,19 +18,22 @@ struct CodexIdentity: Equatable {
     let credentialFingerprint: String
     let name: String?
     let subscriptionActiveUntil: Date?
+    let planType: String?
 
     init(
         email: String?,
         accountId: String?,
         credentialFingerprint: String,
         name: String? = nil,
-        subscriptionActiveUntil: Date? = nil
+        subscriptionActiveUntil: Date? = nil,
+        planType: String? = nil
     ) {
         self.email = email
         self.accountId = accountId
         self.credentialFingerprint = credentialFingerprint
         self.name = name
         self.subscriptionActiveUntil = subscriptionActiveUntil
+        self.planType = planType
     }
 }
 
@@ -132,7 +135,8 @@ final class CodexAccountWatcher {
             accountId: auth.accountId,
             credentialFingerprint: Self.fingerprint(of: auth.accessToken),
             name: auth.name,
-            subscriptionActiveUntil: auth.subscriptionActiveUntil
+            subscriptionActiveUntil: auth.subscriptionActiveUntil,
+            planType: auth.planType
         )
     }
 

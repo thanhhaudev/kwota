@@ -200,4 +200,66 @@ final class CodexAuthReaderTests: XCTestCase {
         let auth = try XCTUnwrap(CodexAuthReader(authFile: tmp).read())
         XCTAssertNil(auth.subscriptionActiveUntil)
     }
+
+    func test_read_parsesPlanType_whenNestedClaimPresent() throws {
+        let token = jwt(claims: [
+            "email": "u@x.com",
+            "https://api.openai.com/auth": [
+                "chatgpt_plan_type": "plus"
+            ]
+        ])
+        let json = """
+        {
+          "tokens": { "access_token": "acc", "id_token": "\(token)" }
+        }
+        """.data(using: .utf8)!
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-auth-\(UUID().uuidString).json")
+        try json.write(to: tmp)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let auth = try XCTUnwrap(CodexAuthReader(authFile: tmp).read())
+        XCTAssertEqual(auth.planType, "plus",
+                       "chatgpt_plan_type claim must populate Auth.planType")
+    }
+
+    func test_read_planTypeIsNil_whenNestedClaimMissing() throws {
+        let token = jwt(claims: [
+            "email": "u@x.com",
+            "https://api.openai.com/auth": [
+                "chatgpt_subscription_active_until": "2026-06-22T05:31:23+00:00"
+            ]
+        ])
+        let json = """
+        {
+          "tokens": { "access_token": "acc", "id_token": "\(token)" }
+        }
+        """.data(using: .utf8)!
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-auth-\(UUID().uuidString).json")
+        try json.write(to: tmp)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let auth = try XCTUnwrap(CodexAuthReader(authFile: tmp).read())
+        XCTAssertNil(auth.planType)
+    }
+
+    func test_read_planTypeIsNil_whenNestedSubtreeIsNotObject() throws {
+        let token = jwt(claims: [
+            "email": "u@x.com",
+            "https://api.openai.com/auth": "should-be-object"
+        ])
+        let json = """
+        {
+          "tokens": { "access_token": "acc", "id_token": "\(token)" }
+        }
+        """.data(using: .utf8)!
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-auth-\(UUID().uuidString).json")
+        try json.write(to: tmp)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let auth = try XCTUnwrap(CodexAuthReader(authFile: tmp).read())
+        XCTAssertNil(auth.planType)
+    }
 }
