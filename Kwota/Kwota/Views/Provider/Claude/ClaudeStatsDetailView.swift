@@ -52,12 +52,23 @@ struct ClaudeStatsDetailView: View {
     var body: some View {
         // Reading store.revision forces re-render when the rollup changes.
         let _ = store.revision
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                summaryCard
-                dailyCard
+        Group {
+            if !hasAnyData {
+                ContentUnavailableView {
+                    Label("No Token Usage Yet", systemImage: "chart.bar.xaxis")
+                } description: {
+                    Text("Token usage will appear here as you work with Claude. Stats are kept until you clear them.")
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        summaryCard
+                        dailyCard
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                }
             }
-            .fixedSize(horizontal: false, vertical: true)
         }
         .confirmationDialog("Clear all Claude token stats?",
                             isPresented: $showClearConfirm, titleVisibility: .visible) {
@@ -74,10 +85,17 @@ struct ClaudeStatsDetailView: View {
         VStack(alignment: .leading, spacing: 6) {
             cardHeader
             if modelRows.isEmpty {
-                Text("No usage recorded in this range yet.")  // replaced in Task 3
-                    .font(.callout).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 16)
+                VStack(spacing: 6) {
+                    Image(systemName: "chart.bar.xaxis")
+                        .font(.title2).foregroundStyle(.secondary)
+                    Text("No usage in \(range.menuLabel.lowercased())")
+                        .font(.callout).fontWeight(.semibold)
+                    Text("Try a wider range, or come back after using Claude.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
             } else {
                 ForEach(Array(modelRows.enumerated()), id: \.element.model) { idx, row in
                     if idx > 0 {
@@ -99,8 +117,12 @@ struct ClaudeStatsDetailView: View {
                 .foregroundStyle(.secondary)
                 .tracking(1.5)
                 .textCase(.uppercase)
-            StatsDailyChart(series: store.dailySeries(provider: .claude, sinceDay: sinceDay))
-                .frame(height: 96)
+            if modelRows.isEmpty {
+                StatsDailySkeletonChart().frame(height: 96)
+            } else {
+                StatsDailyChart(series: store.dailySeries(provider: .claude, sinceDay: sinceDay))
+                    .frame(height: 96)
+            }
         }
         .kwotaCard()
     }
@@ -237,5 +259,55 @@ struct StatsDailyChart: View {
                 }
             }
         }
+    }
+}
+
+/// Empty-range placeholder: a chart frame of dashed gridlines + dashed-border
+/// bars, communicating "chart shape" without faking values. Mirrors
+/// `UsageTrendChart`'s skeleton idiom so users recognize it as a placeholder.
+struct StatsDailySkeletonChart: View {
+    private let fractions: [CGFloat] = [0.40, 0.60, 0.50, 0.80, 0.55, 0.70, 0.45]
+    private let stroke = StrokeStyle(lineWidth: 0.8, dash: [3, 2])
+    private let color = Color.secondary.opacity(0.35)
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                VStack(spacing: 0) {
+                    gridline
+                    Spacer()
+                    gridline
+                    Spacer()
+                    gridline
+                }
+                HStack(alignment: .bottom, spacing: 6) {
+                    ForEach(fractions.indices, id: \.self) { i in
+                        RoundedRectangle(cornerRadius: 2)
+                            .strokeBorder(color, style: stroke)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: max(8, geo.size.height * fractions[i]))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .padding(.horizontal, 4)
+            }
+        }
+    }
+
+    private var gridline: some View {
+        StatsSkeletonRule().stroke(color, style: stroke).frame(height: 0.5)
+    }
+}
+
+/// A single horizontal line through the view's vertical center, used for the
+/// skeleton chart's dashed gridlines. Stroking a `Shape` paints the full line
+/// inside the frame; a stroked `Rectangle` would center the stroke on the 0.5pt
+/// border and clip to a hairline that can vanish at 1× scale.
+private struct StatsSkeletonRule: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.midY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+        return path
     }
 }
