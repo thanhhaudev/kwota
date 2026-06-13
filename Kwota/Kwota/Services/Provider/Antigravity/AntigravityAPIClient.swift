@@ -18,6 +18,12 @@ final class AntigravityAPIClient {
     /// this is the one constant to update.
     static let methodPath = "/exa.language_server_pb.LanguageServerService/GetUserStatus"
 
+    /// RetrieveUserQuotaSummary — the authoritative per-group weekly/5h quota.
+    static let quotaMethodPath = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
+
+    /// Shared request body — the metadata envelope both endpoints accept.
+    static let requestBody = #"{"metadata":{"ideName":"antigravity","extensionName":"antigravity","locale":"en"}}"#
+
     typealias Transport = (URLRequest) async throws -> (Data, URLResponse)
 
     let transport: Transport
@@ -77,41 +83,58 @@ final class AntigravityAPIClient {
     /// - `.transient` when neither scheme returns a 200 (connection refused,
     ///   non-200 status on both, network error on both).
     func fetchSnapshot(port: Int, csrfToken: String) async throws -> AntigravityUsageSnapshot {
+        let data = try await postFirst200(port: port, csrfToken: csrfToken, methodPath: Self.methodPath)
+        var snap: AntigravityUsageSnapshot
+        do {
+            snap = try AntigravityUsageSnapshot.decoder.decode(AntigravityUsageSnapshot.self, from: data)
+        } catch {
+            AppLog.shared.log(
+                "AntigravityAPIClient.decode snapshot failed: \(data.count) bytes (body redacted)",
+                level: .debug)
+            throw ClaudeAPIClient.APIError.decode(String(describing: error))
+        }
+        snap.fetchedAt = now()
+        return snap
+    }
+
+    func fetchQuotaSummary(port: Int, csrfToken: String) async throws -> AntigravityQuotaSummary {
+        let data = try await postFirst200(port: port, csrfToken: csrfToken, methodPath: Self.quotaMethodPath)
+        var quota: AntigravityQuotaSummary
+        do {
+            quota = try AntigravityQuotaSummary.decoder.decode(AntigravityQuotaSummary.self, from: data)
+        } catch {
+            AppLog.shared.log(
+                "AntigravityAPIClient.decode quota failed: \(data.count) bytes (body redacted)",
+                level: .debug)
+            throw ClaudeAPIClient.APIError.decode(String(describing: error))
+        }
+        quota.fetchedAt = now()
+        return quota
+    }
+
+    /// Shared scheme-probe: POST to the given RPC method path over http then
+    /// https; return the body of the first 200. A 200 with a bad body is the
+    /// caller's problem (decode there) — finding a 200 means we found the
+    /// server. `.transient` when neither scheme yields a 200.
+    private func postFirst200(port: Int, csrfToken: String, methodPath: String) async throws -> Data {
         for scheme in ["http", "https"] {
-            guard let url = URL(string: "\(scheme)://127.0.0.1:\(port)\(Self.methodPath)") else {
-                continue
-            }
+            guard let url = URL(string: "\(scheme)://127.0.0.1:\(port)\(methodPath)") else { continue }
             var req = URLRequest(url: url)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.setValue("1", forHTTPHeaderField: "Connect-Protocol-Version")
             req.setValue(csrfToken, forHTTPHeaderField: "X-Codeium-Csrf-Token")
-            req.httpBody = Data(#"{"metadata":{"ideName":"antigravity","extensionName":"antigravity","locale":"en"}}"#.utf8)
+            req.httpBody = Data(Self.requestBody.utf8)
 
             let data: Data
             let response: URLResponse
             do {
                 (data, response) = try await transport(req)
             } catch {
-                continue  // Try next scheme.
+                continue
             }
             guard let http = response as? HTTPURLResponse else { continue }
-            if http.statusCode == 200 {
-                var snap: AntigravityUsageSnapshot
-                do {
-                    snap = try AntigravityUsageSnapshot.decoder.decode(
-                        AntigravityUsageSnapshot.self, from: data)
-                } catch {
-                    AppLog.shared.log(
-                        "AntigravityAPIClient.decode failed: \(data.count) bytes (body redacted)",
-                        level: .debug
-                    )
-                    throw ClaudeAPIClient.APIError.decode(String(describing: error))
-                }
-                snap.fetchedAt = now()
-                return snap
-            }
-            // Non-200 → try next scheme.
+            if http.statusCode == 200 { return data }
         }
         throw ClaudeAPIClient.APIError.transient
     }

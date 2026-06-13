@@ -166,4 +166,67 @@ final class AntigravityAPIClientTests: XCTestCase {
         let snap = try await client.fetchSnapshot(port: 49839, csrfToken: "tok")
         XCTAssertEqual(snap.fetchedAt, fixed)
     }
+
+    // MARK: - Quota summary
+
+    private let quotaJSON = """
+    {"response":{"groups":[
+      {"displayName":"Gemini Models","buckets":[
+        {"bucketId":"gemini-5h","window":"5h","remainingFraction":0.5,"resetTime":"2026-06-13T15:40:07Z"}]}]}}
+    """
+
+    func test_fetchQuotaSummary_httpSucceeds_decodes() async throws {
+        let captured = Captured()
+        let client = AntigravityAPIClient(
+            transport: stub(status: 200, body: quotaJSON, captured: captured))
+        let q = try await client.fetchQuotaSummary(port: 49839, csrfToken: "tok")
+        XCTAssertEqual(q.groups.count, 1)
+        XCTAssertEqual(q.groups.first?.fiveHour?.utilization ?? -1, 50, accuracy: 0.001)
+        XCTAssertEqual(captured.requests.first?.url?.scheme, "http")
+        XCTAssertEqual(
+            captured.requests.first?.url?.path,
+            "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary")
+        XCTAssertEqual(captured.requests.first?.value(forHTTPHeaderField: "X-Codeium-Csrf-Token"), "tok")
+    }
+
+    func test_fetchQuotaSummary_httpFails_httpsFallback() async throws {
+        var i = 0
+        let transport: ClaudeAPIClient.Transport = { [quotaJSON] req in
+            defer { i += 1 }
+            let status = (i == 0) ? 500 : 200
+            let resp = HTTPURLResponse(url: req.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+            return (status == 200 ? Data(quotaJSON.utf8) : Data(), resp)
+        }
+        let q = try await AntigravityAPIClient(transport: transport)
+            .fetchQuotaSummary(port: 1, csrfToken: "t")
+        XCTAssertEqual(q.groups.count, 1)
+    }
+
+    func test_fetchQuotaSummary_allFail_throwsTransient() async {
+        let transport: ClaudeAPIClient.Transport = { req in
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!
+            return (Data(), resp)
+        }
+        do {
+            _ = try await AntigravityAPIClient(transport: transport)
+                .fetchQuotaSummary(port: 1, csrfToken: "t")
+            XCTFail("expected throw")
+        } catch let e as ClaudeAPIClient.APIError {
+            XCTAssertEqual(e, .transient)
+        } catch { XCTFail("wrong error: \(error)") }
+    }
+
+    func test_fetchQuotaSummary_200BadJSON_throwsDecode() async {
+        let transport: ClaudeAPIClient.Transport = { req in
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (Data("{not json".utf8), resp)
+        }
+        do {
+            _ = try await AntigravityAPIClient(transport: transport)
+                .fetchQuotaSummary(port: 1, csrfToken: "t")
+            XCTFail("expected throw")
+        } catch let e as ClaudeAPIClient.APIError {
+            if case .decode = e {} else { XCTFail("expected .decode, got \(e)") }
+        } catch { XCTFail("wrong error: \(error)") }
+    }
 }
