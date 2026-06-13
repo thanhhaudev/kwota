@@ -48,4 +48,27 @@ final class StatsLedgerTests: XCTestCase {
         let d = f.date(from: "2026-06-13T23:30:00-07:00")!   // == 2026-06-14T06:30 UTC
         XCTAssertEqual(l.dayKey(for: d), "2026-06-14")
     }
+
+    // MARK: - Round 2: dailySeries + prune
+
+    func test_dailySeries_isSortedAscendingAndFilters() {
+        var l = StatsLedger()
+        let now = date("2026-06-13T10:00:00.000Z")
+        l.merge(provider: .claude, day: "2026-06-13", model: "opus", delta: TokenBreakdown(input: 9), now: now)
+        l.merge(provider: .claude, day: "2026-06-11", model: "opus", delta: TokenBreakdown(input: 1), now: now)
+        l.merge(provider: .claude, day: "2026-06-12", model: "sonnet", delta: TokenBreakdown(input: 4), now: now)
+
+        let series = l.dailySeries(provider: .claude, sinceDay: "2026-06-12")
+        XCTAssertEqual(series.map(\.day), ["2026-06-12", "2026-06-13"])
+        XCTAssertEqual(series.first?.byModel["sonnet"]?.input, 4)
+    }
+
+    func test_prune_dropsDaysOlderThanCutoff() {
+        var l = StatsLedger()
+        let now = date("2026-06-13T10:00:00.000Z")
+        l.merge(provider: .claude, day: "2026-06-01", model: "opus", delta: TokenBreakdown(input: 1), now: now)
+        l.merge(provider: .claude, day: "2026-06-13", model: "opus", delta: TokenBreakdown(input: 9), now: now)
+        l.prune(olderThan: 7, now: now)
+        XCTAssertEqual(l.dailySeries(provider: .claude, sinceDay: nil).map(\.day), ["2026-06-13"])
+    }
 }

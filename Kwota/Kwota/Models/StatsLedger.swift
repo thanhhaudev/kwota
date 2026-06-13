@@ -68,4 +68,32 @@ struct StatsLedger: Codable, Equatable {
         f.dateFormat = "yyyy-MM-dd"
         return f.string(from: date)
     }
+
+    /// Days >= `sinceDay` (nil = all), ascending by day key. Each entry maps
+    /// model → tokens for that day. Drives the daily chart.
+    func dailySeries(provider: ProviderID, sinceDay: String?) -> [(day: String, byModel: [String: TokenBreakdown])] {
+        guard let days = byProvider[provider.rawValue] else { return [] }
+        return days
+            .filter { sinceDay == nil || $0.key >= sinceDay! }
+            .sorted { $0.key < $1.key }
+            .map { (day: $0.key, byModel: $0.value) }
+    }
+
+    /// Drops day buckets older than `days` across every provider. Cutoff is
+    /// computed in `calendar`'s timezone (UTC by default, matching `dayKey`).
+    mutating func prune(olderThan days: Int, now: Date, calendar: Calendar = StatsLedger.utcCalendarForKeys) {
+        guard let cutoff = calendar.date(byAdding: .day, value: -days, to: now) else { return }
+        let parser = DateFormatter()
+        parser.calendar = calendar
+        parser.locale = Locale(identifier: "en_US_POSIX")
+        parser.timeZone = calendar.timeZone
+        parser.dateFormat = "yyyy-MM-dd"
+        for (provider, daysMap) in byProvider {
+            var kept = daysMap
+            for key in daysMap.keys {
+                if let d = parser.date(from: key), d < cutoff { kept.removeValue(forKey: key) }
+            }
+            byProvider[provider] = kept
+        }
+    }
 }
