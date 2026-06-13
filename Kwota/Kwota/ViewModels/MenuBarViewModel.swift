@@ -210,7 +210,11 @@ final class MenuBarViewModel {
     /// Spawns `claude -p` for Cache → AI evaluation. CLI route is the
     /// only auth path that actually works for `/v1/messages`-style
     /// generation today (third-party OAuth Bearer is gated).
-    private let cliRunner: ClaudeCLIInvocation
+    private let cliRunner: AgentCLIInvocation
+    /// Codex counterpart of `cliRunner`. Constructed eagerly (it's a
+    /// stateless pair of closures — no IO until `ask`), injectable for
+    /// tests like `cliRunner`.
+    private let codexCLIRunner: AgentCLIInvocation
     let privilegedHelper: PrivilegedHelperManager
     private var historyStore: UsageHistoryStore?
     /// Maps a profile id to its usage-history file. Defaults to the live
@@ -495,6 +499,13 @@ final class MenuBarViewModel {
         var normalCleanError: String?
         /// User-selected model. Phase 2 will forward this to the API client.
         var aiModel: AIModelChoice = .default
+        /// Which CLI engine runs evaluations. Mirrors
+        /// `CachePersistedState.aiEngine`.
+        var aiEngine: CacheAIEngine = .default
+        /// Model used when `aiEngine == .codex`. The Claude model stays in
+        /// `aiModel` so switching engines round-trips without losing
+        /// either choice.
+        var aiCodexModel: CodexModelChoice = .default
         /// Paths the user has already been alerted about as "risky". Lives
         /// in-memory for now — Phase 5 persists it so the alert truly fires
         /// once per path across launches. Cleared by `cacheClearAIEvaluations`.
@@ -557,7 +568,8 @@ final class MenuBarViewModel {
         profileUsageFetcher: (any ProfileUsageFetching)? = nil,
         apiClient: ClaudeAPIClient? = nil,
         cliRefresher: CLITokenRefresher? = nil,
-        cliRunner: ClaudeCLIInvocation? = nil,
+        cliRunner: AgentCLIInvocation? = nil,
+        codexCLIRunner: AgentCLIInvocation? = nil,
         privilegedHelper: PrivilegedHelperManager? = nil,
         registry: ProviderRegistry? = nil,
         shortcutCoordinator: ShortcutCoordinator? = nil,
@@ -597,6 +609,7 @@ final class MenuBarViewModel {
         let resolvedCLIRefresher = cliRefresher ?? CLITokenRefresher(store: resolvedCredentialStore)
         self.cliRefresher = resolvedCLIRefresher
         self.cliRunner = cliRunner ?? ClaudeCLIRunner()
+        self.codexCLIRunner = codexCLIRunner ?? CodexCLIRunner()
         self.privilegedHelper = privilegedHelper ?? PrivilegedHelperManager.live()
 
         // Both defaults are inert at init time (no IO until scan()/kill is
@@ -2494,6 +2507,20 @@ final class MenuBarViewModel {
         }
     }
 
+    /// Map the selected engine + per-engine model choices onto the
+    /// evaluator's (CLI model arg, provenance label) pair. Pure so the
+    /// mapping is unit-testable without a view model.
+    nonisolated static func evaluationModelSelection(
+        engine: CacheAIEngine,
+        claudeModel: AIModelChoice,
+        codexModel: CodexModelChoice
+    ) -> (model: String?, label: String) {
+        switch engine {
+        case .claude: return (claudeModel.rawValue, claudeModel.rawValue)
+        case .codex:  return (codexModel.cliModelArg, codexModel.provenanceLabel)
+        }
+    }
+
     /// Post a cache-eval completion notification, but only while the popover
     /// is closed — if it's open the user can already see the result inline,
     /// so a banner would be redundant.
@@ -2771,6 +2798,8 @@ final class MenuBarViewModel {
         cacheState.rows = CacheStubData.defaultRows()
         cacheState.settings = .stubDefault
         cacheState.aiModel = .default
+        cacheState.aiEngine = .default
+        cacheState.aiCodexModel = .default
         cacheState.riskyAlertedPaths.removeAll()
         cacheState.removedDefaultPaths.removeAll()
         saveCacheState()
@@ -2888,9 +2917,15 @@ final class MenuBarViewModel {
             }
 
             let evaluator = makeCacheEvaluator()
+            let selection = Self.evaluationModelSelection(
+                engine: cacheState.aiEngine,
+                claudeModel: cacheState.aiModel,
+                codexModel: cacheState.aiCodexModel
+            )
             let result = await evaluator.evaluateBulk(
                 rows: pending,
-                model: cacheState.aiModel,
+                model: selection.model,
+                modelLabel: selection.label,
                 language: cacheState.settings.aiLanguage
             )
             switch result {
@@ -2943,9 +2978,15 @@ final class MenuBarViewModel {
             guard let row = cacheState.rows.first(where: { $0.id == rowID }) else { return }
 
             let evaluator = makeCacheEvaluator()
+            let selection = Self.evaluationModelSelection(
+                engine: cacheState.aiEngine,
+                claudeModel: cacheState.aiModel,
+                codexModel: cacheState.aiCodexModel
+            )
             let result = await evaluator.evaluate(
                 row: row,
-                model: cacheState.aiModel,
+                model: selection.model,
+                modelLabel: selection.label,
                 language: cacheState.settings.aiLanguage
             )
             switch result {
@@ -2986,11 +3027,14 @@ final class MenuBarViewModel {
         cacheState.normalCleanError = nil
     }
 
-    /// Build a fresh evaluator on demand. The evaluator is cheap (one
-    /// service reference) and stateless across calls, so we don't bother
-    /// caching it as a stored property.
+    /// Build a fresh evaluator on demand, bound to whichever CLI engine
+    /// the user selected. The evaluator is cheap (one service reference)
+    /// and stateless across calls, so we don't bother caching it.
     private func makeCacheEvaluator() -> CacheEvaluator {
-        CacheEvaluator(cliRunner: cliRunner)
+        switch cacheState.aiEngine {
+        case .claude: return CacheEvaluator(cliRunner: cliRunner)
+        case .codex:  return CacheEvaluator(cliRunner: codexCLIRunner)
+        }
     }
 
     // MARK: - Cache persistence
@@ -3004,6 +3048,8 @@ final class MenuBarViewModel {
     private func applyPersistedCacheState(_ state: CachePersistedState) {
         cacheState.settings = state.settings
         cacheState.aiModel = state.aiModel
+        cacheState.aiEngine = state.aiEngine
+        cacheState.aiCodexModel = state.aiCodexModel
         cacheState.riskyAlertedPaths = Set(state.riskyAlertedPaths.map { URL(fileURLWithPath: $0) })
         cacheState.trashedItems = state.trashedItems
 
@@ -3064,6 +3110,8 @@ final class MenuBarViewModel {
         return CachePersistedState(
             settings: cacheState.settings,
             aiModel: cacheState.aiModel,
+            aiEngine: cacheState.aiEngine,
+            aiCodexModel: cacheState.aiCodexModel,
             aiEvaluationsByPath: evalsByPath,
             customPaths: customPaths,
             autoCleanByPath: autoCleanByPath,
@@ -3156,6 +3204,16 @@ final class MenuBarViewModel {
 
     func cacheSetAIModel(_ model: AIModelChoice) {
         cacheState.aiModel = model
+        saveCacheState()
+    }
+
+    func cacheSetAIEngine(_ engine: CacheAIEngine) {
+        cacheState.aiEngine = engine
+        saveCacheState()
+    }
+
+    func cacheSetCodexModel(_ model: CodexModelChoice) {
+        cacheState.aiCodexModel = model
         saveCacheState()
     }
 

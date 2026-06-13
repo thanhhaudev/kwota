@@ -141,7 +141,7 @@ struct CacheTabView: View {
             }
 
             if let error = vm.cacheState.aiEvaluationError {
-                let display = aiErrorDisplay(for: error)
+                let display = aiErrorDisplay(for: error, engine: vm.cacheState.aiEngine)
                 KwotaInlineAlert(
                     tint: display.tint,
                     icon: display.icon,
@@ -191,37 +191,43 @@ struct CacheTabView: View {
 
     /// Map an `EvaluationError` to its inline-banner copy. Kept here (not on
     /// the error type itself) because tint + icon are SwiftUI concerns the
-    /// service layer shouldn't know about.
+    /// service layer shouldn't know about. Copy names the engine that
+    /// actually ran, so a Codex auth failure doesn't tell the user to fix
+    /// Claude.
     private func aiErrorDisplay(
-        for error: CacheEvaluator.EvaluationError
+        for error: CacheEvaluator.EvaluationError,
+        engine: CacheAIEngine
     ) -> (tint: Color, icon: String, title: String, detail: String) {
+        let name = engine.displayName
+        let cmd = engine.cliCommand
         switch error {
         case .cliNotInstalled:
+            let product = engine == .claude ? "Claude Code" : "Codex"
             return (
                 .orange,
                 "terminal",
-                "Claude Code CLI not found",
-                "AI evaluation runs through the `claude` command. Install Claude Code, sign in, then try again."
+                "\(product) CLI not found",
+                "AI evaluation runs through the `\(cmd)` command. Install \(product), sign in, then try again."
             )
         case .cliFailed(let stderr):
             return (
                 .red,
                 "exclamationmark.triangle",
-                "Claude CLI returned an error",
-                "Re-run `claude` once to verify your session, then try again. (\(Self.truncatedForBanner(stderr)))"
+                "\(name) CLI returned an error",
+                "Re-run `\(cmd)` once to verify your session, then try again. (\(Self.truncatedForBanner(stderr)))"
             )
         case .timeout:
             return (
                 .orange,
                 "clock.badge.exclamationmark",
-                "Claude CLI took too long",
+                "\(name) CLI took too long",
                 "The evaluation ran past its time budget. Try again, or re-evaluate one row at a time."
             )
         case .parseFailed(let message):
             return (
                 .red,
                 "doc.questionmark",
-                "Couldn't parse Claude's response",
+                "Couldn't parse \(name)'s response",
                 "The model didn't return valid JSON. Try again. (\(Self.truncatedForBanner(message)))"
             )
         }

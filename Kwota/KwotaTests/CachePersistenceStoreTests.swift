@@ -142,6 +142,106 @@ final class CachePersistenceStoreTests: XCTestCase {
                        "missing CustomPath.isSystem should default to false")
     }
 
+    func testLoadDefaultsEngineFieldsOnLegacyFile() throws {
+        // A blob written before aiEngine / aiCodexModel existed. Decode
+        // must default to Claude + codex-default instead of failing the
+        // whole decode (which would wipe settings + evaluations).
+        let tmp = TempDirectory()
+        let target = tmp.file("cache-state.json")
+        let legacy = """
+        {
+          "settings": {"isEnabled": true, "scanInterval": "thirtyMinutes", "globalCapBytes": 60000000000, "aiLanguage": "en"},
+          "aiModel": "claude-sonnet-4-6",
+          "aiEvaluationsByPath": {},
+          "customPaths": [],
+          "autoCleanByPath": {},
+          "riskyAlertedPaths": [],
+          "sizesByPath": {},
+          "trashedItems": []
+        }
+        """
+        try Data(legacy.utf8).write(to: target)
+        let loaded = CachePersistenceStore(url: target).load()
+        XCTAssertEqual(loaded.aiEngine, .claude,
+                       "missing aiEngine should default to Claude")
+        XCTAssertEqual(loaded.aiCodexModel, .codexDefault,
+                       "missing aiCodexModel should default to codexDefault")
+        XCTAssertEqual(loaded.aiModel, .sonnet46,
+                       "legacy aiModel must keep decoding untouched")
+    }
+
+    func testRoundTripsEngineAndCodexModel() {
+        let tmp = TempDirectory()
+        let store = CachePersistenceStore(url: tmp.file("cache-state.json"))
+
+        var state = CachePersistedState.initial
+        state.aiEngine = .codex
+        state.aiCodexModel = .gpt54Mini
+
+        store.save(state)
+        let loaded = store.load()
+        XCTAssertEqual(loaded, state)
+        XCTAssertEqual(loaded.aiEngine, .codex)
+        XCTAssertEqual(loaded.aiCodexModel, .gpt54Mini)
+    }
+
+    func testLoadDefaultsCodexModelWhenOnlyEnginePresent() throws {
+        // Partial-upgrade blob: an intermediate build wrote aiEngine but
+        // not aiCodexModel. The missing field must fall back to default,
+        // not fail the decode.
+        let tmp = TempDirectory()
+        let target = tmp.file("cache-state.json")
+        let blob = """
+        {
+          "settings": {"isEnabled": true, "scanInterval": "thirtyMinutes", "globalCapBytes": 60000000000, "aiLanguage": "en"},
+          "aiModel": "claude-sonnet-4-6",
+          "aiEngine": "codex",
+          "aiEvaluationsByPath": {},
+          "customPaths": [],
+          "autoCleanByPath": {},
+          "riskyAlertedPaths": [],
+          "sizesByPath": {},
+          "trashedItems": []
+        }
+        """
+        try Data(blob.utf8).write(to: target)
+        let loaded = CachePersistenceStore(url: target).load()
+        XCTAssertEqual(loaded.aiEngine, .codex,
+                       "present aiEngine should decode")
+        XCTAssertEqual(loaded.aiCodexModel, .codexDefault,
+                       "absent aiCodexModel should fall back to default")
+    }
+
+    func testLoadFallsBackToDefaultsOnUnrecognizedEnumRawValues() throws {
+        // A newer build wrote enum cases this binary doesn't know. The
+        // try?-with-default decode must swallow the unknown rawValue and
+        // fall back rather than wiping the whole persisted state.
+        let tmp = TempDirectory()
+        let target = tmp.file("cache-state.json")
+        let blob = """
+        {
+          "settings": {"isEnabled": true, "scanInterval": "thirtyMinutes", "globalCapBytes": 60000000000, "aiLanguage": "en"},
+          "aiModel": "claude-sonnet-4-6",
+          "aiEngine": "gemini",
+          "aiCodexModel": "gpt-99-turbo",
+          "aiEvaluationsByPath": {},
+          "customPaths": [],
+          "autoCleanByPath": {},
+          "riskyAlertedPaths": [],
+          "sizesByPath": {},
+          "trashedItems": []
+        }
+        """
+        try Data(blob.utf8).write(to: target)
+        let loaded = CachePersistenceStore(url: target).load()
+        XCTAssertEqual(loaded.aiEngine, .claude,
+                       "unrecognized aiEngine rawValue should fall back to default")
+        XCTAssertEqual(loaded.aiCodexModel, .codexDefault,
+                       "unrecognized aiCodexModel rawValue should fall back to default")
+        XCTAssertEqual(loaded.aiModel, .sonnet46,
+                       "the rest of the state must survive an unrecognized enum value")
+    }
+
     func testLoadReturnsInitialOnGarbageFile() throws {
         let tmp = TempDirectory()
         let target = tmp.file("cache-state.json")

@@ -3,11 +3,12 @@
 //  Kwota
 //
 //  Orchestrates a single cache-path or bulk AI evaluation. Routes the
-//  prompt through `ClaudeCLIRunner` (spawning `claude -p`) rather than
-//  calling `/v1/messages` directly — Anthropic gates third-party OAuth
-//  Bearer access to the messages endpoint, so the only path that
-//  consistently works is going through Claude Code's own CLI. The CLI
-//  consumes the user's normal subscription quota.
+//  prompt through an `AgentCLIInvocation` (Claude's `claude -p` or
+//  Codex's `codex exec`) rather than calling `/v1/messages` directly —
+//  Anthropic gates third-party OAuth Bearer access to the messages
+//  endpoint, so the only path that consistently works is going through
+//  the provider's own CLI. The CLI consumes the user's normal
+//  subscription quota.
 //
 //  Structured output is enforced by `--json-schema` (see
 //  `CacheEvaluationPrompts.singleJSONSchema` / `bulkJSONSchema`): the
@@ -18,13 +19,13 @@
 import Foundation
 
 final class CacheEvaluator {
-    let cliRunner: ClaudeCLIInvocation
+    let cliRunner: AgentCLIInvocation
     /// Generous default — a 15-row bulk on Sonnet, going through the CLI's
     /// multi-turn structured-output loop, can run well past a minute.
     /// Timing out is recoverable: the user just retries.
     let timeout: TimeInterval
 
-    init(cliRunner: ClaudeCLIInvocation, timeout: TimeInterval = 180) {
+    init(cliRunner: AgentCLIInvocation, timeout: TimeInterval = 180) {
         self.cliRunner = cliRunner
         self.timeout = timeout
     }
@@ -68,12 +69,13 @@ final class CacheEvaluator {
 
     // MARK: - Bulk eval
 
-    /// Bulk evaluation in a single CLI round-trip. Returns a map keyed by
-    /// the row's `path` so the caller can patch matching rows in place;
-    /// paths the model omitted simply aren't present in the dictionary.
+    /// Bulk evaluation in a single CLI round-trip. `model` is the raw CLI
+    /// model argument (nil = let the engine's own config decide);
+    /// `modelLabel` is what gets stamped into `modelUsed` for provenance.
     func evaluateBulk(
         rows: [CachePathRow],
-        model: AIModelChoice,
+        model: String?,
+        modelLabel: String,
         language: CacheAILanguage
     ) async -> Result<[URL: CacheAIEvaluation], EvaluationError> {
         guard !rows.isEmpty else { return .success([:]) }
@@ -122,7 +124,7 @@ final class CacheEvaluator {
                     warning: item.warning?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
                     purpose: item.purpose,
                     detail: item.detail?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-                    modelUsed: model.rawValue,
+                    modelUsed: modelLabel,
                     evaluatedAt: now
                 )
             }
@@ -134,7 +136,8 @@ final class CacheEvaluator {
 
     func evaluate(
         row: CachePathRow,
-        model: AIModelChoice,
+        model: String?,
+        modelLabel: String,
         language: CacheAILanguage
     ) async -> Result<CacheAIEvaluation, EvaluationError> {
         let systemPrompt = CacheEvaluationPrompts.systemSingle(language: language)
@@ -166,7 +169,7 @@ final class CacheEvaluator {
                 warning: parsed.warning?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
                 purpose: parsed.purpose,
                 detail: parsed.detail?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-                modelUsed: model.rawValue,
+                modelUsed: modelLabel,
                 evaluatedAt: Date()
             )
             return .success(eval)
@@ -181,29 +184,29 @@ final class CacheEvaluator {
     private func runCLI(
         systemPrompt: String,
         userPrompt: String,
-        model: AIModelChoice,
+        model: String?,
         jsonSchema: String
     ) async -> Result<String, EvaluationError> {
         do {
             let out = try await cliRunner.ask(
                 systemPrompt: systemPrompt,
                 userPrompt: userPrompt,
-                model: model.rawValue,
+                model: model,
                 jsonSchema: jsonSchema,
                 timeout: timeout
             )
             return .success(out)
-        } catch ClaudeCLIRunner.InvocationError.notInstalled {
+        } catch CLIInvocationError.notInstalled {
             return .failure(.cliNotInstalled)
-        } catch ClaudeCLIRunner.InvocationError.timeout {
+        } catch CLIInvocationError.timeout {
             return .failure(.timeout)
-        } catch ClaudeCLIRunner.InvocationError.cliReportedError(let msg) {
+        } catch CLIInvocationError.cliReportedError(let msg) {
             return .failure(.cliFailed(msg))
-        } catch ClaudeCLIRunner.InvocationError.nonZeroExit(_, let msg) {
+        } catch CLIInvocationError.nonZeroExit(_, let msg) {
             return .failure(.cliFailed(msg))
-        } catch ClaudeCLIRunner.InvocationError.launchFailed(let msg) {
+        } catch CLIInvocationError.launchFailed(let msg) {
             return .failure(.cliFailed(msg))
-        } catch ClaudeCLIRunner.InvocationError.malformedOutput(let msg) {
+        } catch CLIInvocationError.malformedOutput(let msg) {
             return .failure(.parseFailed(msg))
         } catch {
             return .failure(.cliFailed(String(describing: error)))

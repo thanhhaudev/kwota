@@ -12,11 +12,11 @@
 import XCTest
 @testable import Kwota
 
-/// Test double for `ClaudeCLIInvocation`. Either returns a canned
+/// Test double for `AgentCLIInvocation`. Either returns a canned
 /// `structured_output` JSON string or throws a canned error — covers the
 /// `EvaluationError` paths plus the happy path without spawning a
 /// subprocess.
-private final class StubCLIRunner: ClaudeCLIInvocation, @unchecked Sendable {
+private final class StubCLIRunner: AgentCLIInvocation, @unchecked Sendable {
     enum Outcome {
         case success(String)
         case failure(Error)
@@ -103,6 +103,33 @@ final class CacheAIEvaluationTests: XCTestCase {
         }
     }
 
+    func testJSONSchemasMarkEveryPropertyRequired() throws {
+        // OpenAI strict structured-output (codex --output-schema) rejects a
+        // schema unless `required` lists every key in `properties`;
+        // optionality must come from nullable types, not omission. Both
+        // schemas must satisfy this so the Codex engine doesn't 400.
+        func assertAllPropsRequired(_ json: String, file: StaticString = #filePath, line: UInt = #line) throws {
+            let obj = try JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: Any]
+            // Walk to the object that actually carries properties: the single
+            // schema is the root; the bulk schema nests under
+            // properties.evaluations.items.
+            func check(_ node: [String: Any]) {
+                guard let props = node["properties"] as? [String: Any] else { return }
+                let required = Set((node["required"] as? [String]) ?? [])
+                XCTAssertEqual(required, Set(props.keys),
+                               "every property must be in `required` for OpenAI strict mode", file: file, line: line)
+            }
+            check(obj)
+            if let props = obj["properties"] as? [String: Any],
+               let evals = props["evaluations"] as? [String: Any],
+               let items = evals["items"] as? [String: Any] {
+                check(items)
+            }
+        }
+        try assertAllPropsRequired(CacheEvaluationPrompts.singleJSONSchema)
+        try assertAllPropsRequired(CacheEvaluationPrompts.bulkJSONSchema)
+    }
+
     func testUserPromptIncludesPathAndHandCuratedHint() {
         let url = URL(fileURLWithPath: "/tmp/cache-x")
         let prompt = CacheEvaluationPrompts.userPrompt(
@@ -176,7 +203,12 @@ final class CacheAIEvaluationTests: XCTestCase {
         let evaluator = CacheEvaluator(cliRunner: runner)
         let row = makeRow(handCurated: .caution, eval: nil)
 
-        let result = await evaluator.evaluate(row: row, model: .sonnet46, language: .english)
+        let result = await evaluator.evaluate(
+            row: row,
+            model: AIModelChoice.sonnet46.rawValue,
+            modelLabel: AIModelChoice.sonnet46.rawValue,
+            language: .english
+        )
         switch result {
         case .success(let eval):
             XCTAssertEqual(eval.safety, .caution)
@@ -189,10 +221,14 @@ final class CacheAIEvaluationTests: XCTestCase {
     }
 
     func testEvaluateSurfacesCLINotInstalled() async {
-        let runner = StubCLIRunner(outcome: .failure(ClaudeCLIRunner.InvocationError.notInstalled))
+        let runner = StubCLIRunner(outcome: .failure(CLIInvocationError.notInstalled))
         let evaluator = CacheEvaluator(cliRunner: runner)
-        let result = await evaluator.evaluate(row: makeRow(handCurated: .safe, eval: nil),
-                                              model: .sonnet46, language: .english)
+        let result = await evaluator.evaluate(
+            row: makeRow(handCurated: .safe, eval: nil),
+            model: AIModelChoice.sonnet46.rawValue,
+            modelLabel: AIModelChoice.sonnet46.rawValue,
+            language: .english
+        )
         if case .failure(.cliNotInstalled) = result { return }
         XCTFail("expected .cliNotInstalled, got \(result)")
     }
@@ -201,11 +237,15 @@ final class CacheAIEvaluationTests: XCTestCase {
         // The "Not logged in" path: runner throws .cliReportedError, the
         // evaluator should fold it into .cliFailed for the inline alert.
         let runner = StubCLIRunner(outcome: .failure(
-            ClaudeCLIRunner.InvocationError.cliReportedError("Not logged in · Please run /login")
+            CLIInvocationError.cliReportedError("Not logged in · Please run /login")
         ))
         let evaluator = CacheEvaluator(cliRunner: runner)
-        let result = await evaluator.evaluate(row: makeRow(handCurated: .safe, eval: nil),
-                                              model: .sonnet46, language: .english)
+        let result = await evaluator.evaluate(
+            row: makeRow(handCurated: .safe, eval: nil),
+            model: AIModelChoice.sonnet46.rawValue,
+            modelLabel: AIModelChoice.sonnet46.rawValue,
+            language: .english
+        )
         if case .failure(.cliFailed(let msg)) = result {
             XCTAssertEqual(msg, "Not logged in · Please run /login")
             return
@@ -216,10 +256,56 @@ final class CacheAIEvaluationTests: XCTestCase {
     func testEvaluateSurfacesParseFailureWhenOutputIsNotJSON() async {
         let runner = StubCLIRunner(outcome: .success("not json at all"))
         let evaluator = CacheEvaluator(cliRunner: runner)
-        let result = await evaluator.evaluate(row: makeRow(handCurated: .safe, eval: nil),
-                                              model: .sonnet46, language: .english)
+        let result = await evaluator.evaluate(
+            row: makeRow(handCurated: .safe, eval: nil),
+            model: AIModelChoice.sonnet46.rawValue,
+            modelLabel: AIModelChoice.sonnet46.rawValue,
+            language: .english
+        )
         if case .failure(.parseFailed) = result { return }
         XCTFail("expected .parseFailed, got \(result)")
+    }
+
+    func testEvaluateStampsModelLabelNotModelArg() async {
+        // Codex-default: nil model arg (engine decides) but a stable label
+        // for provenance. The two must not be conflated.
+        let runner = StubCLIRunner(outcome: .success(
+            #"{"safety": "safe", "warning": null, "purpose": "p", "detail": null}"#
+        ))
+        let evaluator = CacheEvaluator(cliRunner: runner)
+        let result = await evaluator.evaluate(
+            row: makeRow(handCurated: .safe, eval: nil),
+            model: nil,
+            modelLabel: "codex-default",
+            language: .english
+        )
+        guard case .success(let eval) = result else {
+            return XCTFail("expected success, got \(result)")
+        }
+        XCTAssertEqual(eval.modelUsed, "codex-default")
+    }
+
+    func testEvaluationModelSelectionMapsEngineToArgs() {
+        // Claude: model arg and label are both the Anthropic ID.
+        let claude = MenuBarViewModel.evaluationModelSelection(
+            engine: .claude, claudeModel: .haiku45, codexModel: .gpt54Mini
+        )
+        XCTAssertEqual(claude.model, AIModelChoice.haiku45.rawValue)
+        XCTAssertEqual(claude.label, AIModelChoice.haiku45.rawValue)
+
+        // Codex explicit: slug for both.
+        let codex = MenuBarViewModel.evaluationModelSelection(
+            engine: .codex, claudeModel: .haiku45, codexModel: .gpt54Mini
+        )
+        XCTAssertEqual(codex.model, "gpt-5.4-mini")
+        XCTAssertEqual(codex.label, "gpt-5.4-mini")
+
+        // Codex default: nil arg (CLI config decides), placeholder label.
+        let codexDefault = MenuBarViewModel.evaluationModelSelection(
+            engine: .codex, claudeModel: .haiku45, codexModel: .codexDefault
+        )
+        XCTAssertNil(codexDefault.model)
+        XCTAssertEqual(codexDefault.label, "codex-default")
     }
 
     // MARK: - Bulk evaluate
@@ -238,9 +324,12 @@ final class CacheAIEvaluationTests: XCTestCase {
         let runner = StubCLIRunner(outcome: .success(cliOutput))
         let evaluator = CacheEvaluator(cliRunner: runner)
 
-        let result = await evaluator.evaluateBulk(rows: [rowA, rowB],
-                                                  model: .sonnet46,
-                                                  language: .english)
+        let result = await evaluator.evaluateBulk(
+            rows: [rowA, rowB],
+            model: AIModelChoice.sonnet46.rawValue,
+            modelLabel: AIModelChoice.sonnet46.rawValue,
+            language: .english
+        )
         switch result {
         case .success(let byURL):
             XCTAssertEqual(byURL.count, 2)
@@ -260,7 +349,12 @@ final class CacheAIEvaluationTests: XCTestCase {
         let runner = StubCLIRunner(outcome: .success(cliOutput))
         let evaluator = CacheEvaluator(cliRunner: runner)
 
-        let result = await evaluator.evaluateBulk(rows: [rowA], model: .sonnet46, language: .english)
+        let result = await evaluator.evaluateBulk(
+            rows: [rowA],
+            model: AIModelChoice.sonnet46.rawValue,
+            modelLabel: AIModelChoice.sonnet46.rawValue,
+            language: .english
+        )
         if case .success(let byURL) = result {
             XCTAssertTrue(byURL.isEmpty, "unknown path should not land on any row")
         } else {
@@ -271,9 +365,14 @@ final class CacheAIEvaluationTests: XCTestCase {
     func testEvaluateBulkOnEmptyRowsReturnsEmptyWithoutInvokingCLI() async {
         // Even a misbehaving CLI shouldn't be touched when there's nothing
         // to evaluate — the early return guards the user's quota.
-        let runner = StubCLIRunner(outcome: .failure(ClaudeCLIRunner.InvocationError.notInstalled))
+        let runner = StubCLIRunner(outcome: .failure(CLIInvocationError.notInstalled))
         let evaluator = CacheEvaluator(cliRunner: runner)
-        let result = await evaluator.evaluateBulk(rows: [], model: .sonnet46, language: .english)
+        let result = await evaluator.evaluateBulk(
+            rows: [],
+            model: AIModelChoice.sonnet46.rawValue,
+            modelLabel: AIModelChoice.sonnet46.rawValue,
+            language: .english
+        )
         if case .success(let byURL) = result {
             XCTAssertTrue(byURL.isEmpty)
         } else {
