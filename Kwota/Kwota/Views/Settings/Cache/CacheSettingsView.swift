@@ -26,7 +26,7 @@ struct CacheSettingsView: View {
 
                 SettingsGroupedSection(
                     caption: "AI evaluation",
-                    footer: "Kwota asks Claude to evaluate each tracked folder's safety. Results are cached so the same folder isn't re-evaluated on every popover open."
+                    footer: "Kwota asks the selected AI engine to evaluate each tracked folder's safety. Evaluations consume that engine's subscription quota. Results are cached so the same folder isn't re-evaluated on every popover open."
                 ) {
                     aiEvaluationRows
                 }
@@ -67,17 +67,50 @@ struct CacheSettingsView: View {
     @ViewBuilder
     private var aiEvaluationRows: some View {
         SettingsRow(
-            title: "Model",
-            subtitle: vm.cacheState.aiModel.caption
+            title: "Engine",
+            subtitle: engineSubtitle
         ) {
             CompactInlinePicker(
                 selection: Binding(
-                    get: { vm.cacheState.aiModel },
-                    set: { vm.cacheSetAIModel($0) }
+                    get: { vm.cacheState.aiEngine },
+                    set: { vm.cacheSetAIEngine($0) }
                 ),
-                options: AIModelChoice.allCases,
+                options: CacheAIEngine.allCases,
                 title: { $0.displayName }
             )
+        }
+        SettingsSectionDivider()
+        // One row, two option sets: the picker swaps with the engine while
+        // each engine's model choice survives a round-trip (state keeps
+        // both fields).
+        if vm.cacheState.aiEngine == .claude {
+            SettingsRow(
+                title: "Model",
+                subtitle: vm.cacheState.aiModel.caption
+            ) {
+                CompactInlinePicker(
+                    selection: Binding(
+                        get: { vm.cacheState.aiModel },
+                        set: { vm.cacheSetAIModel($0) }
+                    ),
+                    options: AIModelChoice.allCases,
+                    title: { $0.displayName }
+                )
+            }
+        } else {
+            SettingsRow(
+                title: "Model",
+                subtitle: vm.cacheState.aiCodexModel.caption
+            ) {
+                CompactInlinePicker(
+                    selection: Binding(
+                        get: { vm.cacheState.aiCodexModel },
+                        set: { vm.cacheSetCodexModel($0) }
+                    ),
+                    options: CodexModelChoice.allCases,
+                    title: { $0.displayName }
+                )
+            }
         }
         SettingsSectionDivider()
         SettingsRow(
@@ -127,6 +160,15 @@ struct CacheSettingsView: View {
             return "No evaluations cached yet."
         }
         return "Currently \(evaluated) of \(total) tracked folder\(total == 1 ? "" : "s") evaluated."
+    }
+
+    private var engineSubtitle: String {
+        switch vm.cacheState.aiEngine {
+        case .claude:
+            return "Evaluations run through the claude CLI and consume your Claude subscription quota."
+        case .codex:
+            return "Evaluations run through the codex CLI and consume your ChatGPT subscription quota."
+        }
     }
 
     // MARK: - Auto-clean section
