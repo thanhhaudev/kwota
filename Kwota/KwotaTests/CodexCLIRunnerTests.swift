@@ -193,6 +193,15 @@ final class CodexCLIRunnerTests: XCTestCase {
         XCTAssertEqual(env["FOO"], "bar")
     }
 
+    // MARK: - makeAnswer
+
+    func testAskWiringResolvedModelIsNilForCodex() {
+        // Codex doesn't expose the resolved model; ask must thread nil.
+        let answer = CodexCLIRunner.makeAnswer(output: "hello")
+        XCTAssertEqual(answer.output, "hello")
+        XCTAssertNil(answer.resolvedModel)
+    }
+
     // MARK: - ask (resolver seam only — no subprocess)
 
     func testAskThrowsNotInstalledWhenResolverFindsNothing() async {

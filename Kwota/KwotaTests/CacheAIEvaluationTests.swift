@@ -13,17 +13,21 @@ import XCTest
 @testable import Kwota
 
 /// Test double for `AgentCLIInvocation`. Either returns a canned
-/// `structured_output` JSON string or throws a canned error — covers the
-/// `EvaluationError` paths plus the happy path without spawning a
-/// subprocess.
+/// `CLIAnswer` or throws a canned error — covers the `EvaluationError`
+/// paths plus the happy path without spawning a subprocess.
 private final class StubCLIRunner: AgentCLIInvocation, @unchecked Sendable {
     enum Outcome {
-        case success(String)
+        case success(CLIAnswer)
         case failure(Error)
     }
     var outcome: Outcome
 
     init(outcome: Outcome) { self.outcome = outcome }
+
+    /// Convenience: most tests only care about the output JSON string.
+    convenience init(json: String, resolvedModel: String? = nil) {
+        self.init(outcome: .success(CLIAnswer(output: json, resolvedModel: resolvedModel)))
+    }
 
     func ask(
         systemPrompt: String,
@@ -31,9 +35,9 @@ private final class StubCLIRunner: AgentCLIInvocation, @unchecked Sendable {
         model: String?,
         jsonSchema: String?,
         timeout: TimeInterval
-    ) async throws -> String {
+    ) async throws -> CLIAnswer {
         switch outcome {
-        case .success(let out): return out
+        case .success(let answer): return answer
         case .failure(let err): throw err
         }
     }
@@ -153,11 +157,11 @@ final class CacheAIEvaluationTests: XCTestCase {
         let result = ClaudeCLIRunner.interpretResult(
             stdout: Data(envelope.utf8), stderr: "", exitCode: 0, jsonSchemaUsed: true
         )
-        guard case .success(let json) = result else {
+        guard case .success(let answer) = result else {
             return XCTFail("expected success, got \(result)")
         }
-        XCTAssertTrue(json.contains("\"safety\""))
-        XCTAssertTrue(json.contains("\"p\""))
+        XCTAssertTrue(answer.output.contains("\"safety\""))
+        XCTAssertTrue(answer.output.contains("\"p\""))
     }
 
     func testInterpretResultSurfacesCLIReportedError() {
@@ -194,12 +198,53 @@ final class CacheAIEvaluationTests: XCTestCase {
         XCTAssertEqual(status, 139)
     }
 
+    func testInterpretResultExtractsResolvedModelFromModelUsage() {
+        let envelope = #"""
+        {"is_error":false,"structured_output":{"safety":"safe","purpose":"p"},
+         "modelUsage":{"claude-opus-4-8":{"outputTokens":4}}}
+        """#
+        let result = ClaudeCLIRunner.interpretResult(
+            stdout: Data(envelope.utf8), stderr: "", exitCode: 0, jsonSchemaUsed: true
+        )
+        guard case .success(let answer) = result else {
+            return XCTFail("expected success, got \(result)")
+        }
+        XCTAssertEqual(answer.resolvedModel, "claude-opus-4-8")
+        XCTAssertTrue(answer.output.contains("\"safety\""))
+    }
+
+    func testInterpretResultPicksHighestOutputTokenModelOnFallback() {
+        let envelope = #"""
+        {"is_error":false,"structured_output":{"safety":"safe","purpose":"p"},
+         "modelUsage":{"claude-haiku-4-5":{"outputTokens":1},
+                       "claude-opus-4-8":{"outputTokens":50}}}
+        """#
+        let result = ClaudeCLIRunner.interpretResult(
+            stdout: Data(envelope.utf8), stderr: "", exitCode: 0, jsonSchemaUsed: true
+        )
+        guard case .success(let answer) = result else {
+            return XCTFail("expected success, got \(result)")
+        }
+        XCTAssertEqual(answer.resolvedModel, "claude-opus-4-8")
+    }
+
+    func testInterpretResultResolvedModelNilWhenNoModelUsage() {
+        let envelope = #"{"is_error":false,"structured_output":{"safety":"safe","purpose":"p"}}"#
+        let result = ClaudeCLIRunner.interpretResult(
+            stdout: Data(envelope.utf8), stderr: "", exitCode: 0, jsonSchemaUsed: true
+        )
+        guard case .success(let answer) = result else {
+            return XCTFail("expected success, got \(result)")
+        }
+        XCTAssertNil(answer.resolvedModel)
+    }
+
     // MARK: - Single evaluate (happy + error paths)
 
     func testEvaluateMapsCLIOutputToEvaluation() async {
-        let runner = StubCLIRunner(outcome: .success("""
+        let runner = StubCLIRunner(json: """
         {"safety": "caution", "warning": "Shared store", "purpose": "pnpm CAS store", "detail": null}
-        """))
+        """)
         let evaluator = CacheEvaluator(cliRunner: runner)
         let row = makeRow(handCurated: .caution, eval: nil)
 
@@ -254,7 +299,7 @@ final class CacheAIEvaluationTests: XCTestCase {
     }
 
     func testEvaluateSurfacesParseFailureWhenOutputIsNotJSON() async {
-        let runner = StubCLIRunner(outcome: .success("not json at all"))
+        let runner = StubCLIRunner(json: "not json at all")
         let evaluator = CacheEvaluator(cliRunner: runner)
         let result = await evaluator.evaluate(
             row: makeRow(handCurated: .safe, eval: nil),
@@ -269,9 +314,49 @@ final class CacheAIEvaluationTests: XCTestCase {
     func testEvaluateStampsModelLabelNotModelArg() async {
         // Codex-default: nil model arg (engine decides) but a stable label
         // for provenance. The two must not be conflated.
-        let runner = StubCLIRunner(outcome: .success(
+        let runner = StubCLIRunner(json:
             #"{"safety": "safe", "warning": null, "purpose": "p", "detail": null}"#
-        ))
+        )
+        let evaluator = CacheEvaluator(cliRunner: runner)
+        let result = await evaluator.evaluate(
+            row: makeRow(handCurated: .safe, eval: nil),
+            model: nil,
+            modelLabel: "codex-default",
+            language: .english
+        )
+        guard case .success(let eval) = result else {
+            return XCTFail("expected success, got \(result)")
+        }
+        XCTAssertEqual(eval.modelUsed, "codex-default")
+    }
+
+    func testEvaluateStampsResolvedModelOverLabelWhenPresent() async {
+        // Claude alias path: label is "opus" but the envelope reported the
+        // resolved version — provenance must show the real version.
+        let runner = StubCLIRunner(
+            json: #"{"safety":"safe","warning":null,"purpose":"p","detail":null}"#,
+            resolvedModel: "claude-opus-4-8"
+        )
+        let evaluator = CacheEvaluator(cliRunner: runner)
+        let result = await evaluator.evaluate(
+            row: makeRow(handCurated: .safe, eval: nil),
+            model: "opus",
+            modelLabel: "opus",
+            language: .english
+        )
+        guard case .success(let eval) = result else {
+            return XCTFail("expected success, got \(result)")
+        }
+        XCTAssertEqual(eval.modelUsed, "claude-opus-4-8",
+                       "resolved model from the envelope wins over the alias label")
+    }
+
+    func testEvaluateFallsBackToLabelWhenNoResolvedModel() async {
+        // Codex path: no resolved model → stamp the label.
+        let runner = StubCLIRunner(
+            json: #"{"safety":"safe","warning":null,"purpose":"p","detail":null}"#,
+            resolvedModel: nil
+        )
         let evaluator = CacheEvaluator(cliRunner: runner)
         let result = await evaluator.evaluate(
             row: makeRow(handCurated: .safe, eval: nil),
@@ -321,7 +406,7 @@ final class CacheAIEvaluationTests: XCTestCase {
           ]
         }
         """
-        let runner = StubCLIRunner(outcome: .success(cliOutput))
+        let runner = StubCLIRunner(json: cliOutput)
         let evaluator = CacheEvaluator(cliRunner: runner)
 
         let result = await evaluator.evaluateBulk(
@@ -346,7 +431,7 @@ final class CacheAIEvaluationTests: XCTestCase {
         // entry rather than silently writing to a wrong row.
         let rowA = makeRow(handCurated: .safe, eval: nil, path: URL(fileURLWithPath: "/tmp/a"))
         let cliOutput = #"{"evaluations":[{"path":"/tmp/SOMEWHERE_ELSE","safety":"safe","purpose":"p","warning":null,"detail":null}]}"#
-        let runner = StubCLIRunner(outcome: .success(cliOutput))
+        let runner = StubCLIRunner(json: cliOutput)
         let evaluator = CacheEvaluator(cliRunner: runner)
 
         let result = await evaluator.evaluateBulk(

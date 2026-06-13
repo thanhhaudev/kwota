@@ -9,11 +9,22 @@
 
 import Foundation
 
+/// The result of one headless CLI invocation: the model's answer plus,
+/// when the engine can report it, the exact model that actually ran
+/// (used for provenance — Claude resolves an alias like `opus` to a real
+/// version, which the envelope reports).
+struct CLIAnswer: Equatable {
+    let output: String
+    let resolvedModel: String?
+}
+
 /// Headless invocation of a vendor agent CLI.
 protocol AgentCLIInvocation: Sendable {
-    /// Runs the CLI headless and returns the model's answer as a JSON
-    /// string. When `jsonSchema` is non-nil the returned string is
-    /// guaranteed to be schema-conformant JSON; when nil it's plain text.
+    /// Runs the CLI headless and returns a `CLIAnswer` whose `output` is
+    /// a JSON string when `jsonSchema` is non-nil (schema-conformant) or
+    /// plain text when nil. `resolvedModel` is the real model ID the
+    /// engine used if it can report one (Claude reads it from the
+    /// `--output-format json` envelope), or nil when unavailable (Codex).
     /// Throws `CLIInvocationError` on any failure.
     func ask(
         systemPrompt: String,
@@ -21,7 +32,7 @@ protocol AgentCLIInvocation: Sendable {
         model: String?,
         jsonSchema: String?,
         timeout: TimeInterval
-    ) async throws -> String
+    ) async throws -> CLIAnswer
 }
 
 /// Failure modes the cache evaluator wants to distinguish in the UI.

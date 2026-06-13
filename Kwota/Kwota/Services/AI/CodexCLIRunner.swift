@@ -88,7 +88,7 @@ final class CodexCLIRunner: AgentCLIInvocation {
         model: String?,
         jsonSchema: String?,
         timeout: TimeInterval
-    ) async throws -> String {
+    ) async throws -> CLIAnswer {
         guard let binary = resolveBinary() else {
             throw CLIInvocationError.notInstalled
         }
@@ -144,9 +144,16 @@ final class CodexCLIRunner: AgentCLIInvocation {
             lastMessageData: try? Data(contentsOf: outputFile),
             jsonSchemaUsed: jsonSchema != nil
         ) {
-        case .success(let text): return text
+        case .success(let text): return Self.makeAnswer(output: text)
         case .failure(let err): throw err
         }
+    }
+
+    /// Wrap a codex output string in a `CLIAnswer`. Codex doesn't expose
+    /// the resolved model without parsing its event stream, so
+    /// `resolvedModel` is always nil — provenance falls back to the label.
+    static func makeAnswer(output: String) -> CLIAnswer {
+        CLIAnswer(output: output, resolvedModel: nil)
     }
 
     /// Environment for the spawned `codex` process. The nvm/Homebrew

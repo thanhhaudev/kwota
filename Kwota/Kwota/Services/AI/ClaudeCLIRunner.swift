@@ -70,7 +70,7 @@ final class ClaudeCLIRunner: AgentCLIInvocation {
         model: String?,
         jsonSchema: String?,
         timeout: TimeInterval
-    ) async throws -> String {
+    ) async throws -> CLIAnswer {
         guard let binary = resolveBinary() else {
             throw CLIInvocationError.notInstalled
         }
@@ -117,7 +117,7 @@ final class ClaudeCLIRunner: AgentCLIInvocation {
             exitCode: exitCode,
             jsonSchemaUsed: schemaUsed
         ) {
-        case .success(let text): return text
+        case .success(let answer): return answer
         case .failure(let err): throw err
         }
     }
@@ -137,7 +137,7 @@ final class ClaudeCLIRunner: AgentCLIInvocation {
         stderr: String,
         exitCode: Int32,
         jsonSchemaUsed: Bool
-    ) -> Result<String, CLIInvocationError> {
+    ) -> Result<CLIAnswer, CLIInvocationError> {
         guard
             let root = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any]
         else {
@@ -162,7 +162,7 @@ final class ClaudeCLIRunner: AgentCLIInvocation {
         }
 
         guard jsonSchemaUsed else {
-            return .success(resultText)
+            return .success(CLIAnswer(output: resultText, resolvedModel: Self.resolvedModel(from: root)))
         }
 
         // Schema was requested → the validated answer lives in
@@ -177,7 +177,20 @@ final class ClaudeCLIRunner: AgentCLIInvocation {
         else {
             return .failure(.malformedOutput("structured_output not re-serializable"))
         }
-        return .success(json)
+        return .success(CLIAnswer(output: json, resolvedModel: Self.resolvedModel(from: root)))
+    }
+
+    /// The real model the CLI used, from the `--output-format json`
+    /// envelope's `modelUsage` map (keyed by model ID). When an alias was
+    /// requested (e.g. `--model opus`) this is the resolved version. If a
+    /// fallback model kicked in mid-run there can be >1 key — pick the one
+    /// with the most output tokens (the primary responder). nil when absent.
+    static func resolvedModel(from root: [String: Any]) -> String? {
+        guard let usage = root["modelUsage"] as? [String: Any], !usage.isEmpty else {
+            return nil
+        }
+        func outputTokens(_ v: Any) -> Int { (v as? [String: Any])?["outputTokens"] as? Int ?? 0 }
+        return usage.max { outputTokens($0.value) < outputTokens($1.value) }?.key
     }
 
 }
