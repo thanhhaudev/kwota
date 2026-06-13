@@ -132,9 +132,21 @@ final class NotificationDispatcher {
         Intent(
             profileID: profile.id,
             rule: rule,
-            title: "Kwota — \(profile.name)",
-            body: bodyText(for: rule, profile: profile)
+            title: titleText(for: profile),
+            body: "\(profile.name): \(bodyText(for: rule, profile: profile))"
         )
+    }
+
+    /// "Kwota — {Provider}", with " · {Plan}" appended when the profile has a
+    /// non-blank subscription plan. Antigravity (and any unplanned account)
+    /// shows the provider alone.
+    private func titleText(for profile: Profile) -> String {
+        let base = "Kwota — \(profile.providerID.displayName)"
+        let plan = profile.subscriptionPlan?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let plan, !plan.isEmpty {
+            return "\(base) · \(plan)"
+        }
+        return base
     }
 
     private func bodyText(for rule: RuleID, profile: Profile) -> String {

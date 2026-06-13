@@ -57,7 +57,7 @@ final class NotificationDispatcherTests: XCTestCase {
 
         let first = d.evaluate(profile: p, settings: s, current: next, previous: prev, now: now)
         XCTAssertEqual(first.count, 1)
-        XCTAssertEqual(first.first?.body, "Short-window quota at 90%.")
+        XCTAssertEqual(first.first?.body, "P: Short-window quota at 90%.")
 
         let second = d.evaluate(profile: p, settings: s, current: next, previous: prev, now: now)
         XCTAssertTrue(second.isEmpty, "Should dedup until the next reset")
@@ -86,11 +86,11 @@ final class NotificationDispatcherTests: XCTestCase {
 
         let reset = summary(primary: 2, primaryReset: baseReset)
         let after = d.evaluate(profile: p, settings: s, current: reset, previous: high, now: now)
-        XCTAssertTrue(after.contains(where: { $0.body == "Short-window quota reset. Full quota available." }))
+        XCTAssertTrue(after.contains(where: { $0.body == "P: Short-window quota reset. Full quota available." }))
 
         let regrew = summary(primary: 95, primaryReset: baseReset)
         let again = d.evaluate(profile: p, settings: s, current: regrew, previous: reset, now: now)
-        XCTAssertTrue(again.contains(where: { $0.body == "Short-window quota at 90%." }))
+        XCTAssertTrue(again.contains(where: { $0.body == "P: Short-window quota at 90%." }))
     }
 
     func test_longWindow_threshold() {
@@ -101,7 +101,7 @@ final class NotificationDispatcherTests: XCTestCase {
         let next = summary(primary: 0, primaryReset: baseReset, secondary: 100, secondaryReset: baseReset)
 
         let intents = d.evaluate(profile: p, settings: s, current: next, previous: prev, now: now)
-        XCTAssertEqual(intents.first?.body, "Long-window quota at 100%.")
+        XCTAssertEqual(intents.first?.body, "P: Long-window quota at 100%.")
     }
 
     func test_antigravityProfile_usesProviderSpecificBodyText() {
@@ -114,23 +114,60 @@ final class NotificationDispatcherTests: XCTestCase {
         let preShort = summary(primary: 70, primaryReset: baseReset, secondary: 0, secondaryReset: baseReset)
         let crossShort = summary(primary: 95, primaryReset: baseReset, secondary: 0, secondaryReset: baseReset)
         let shortIntents = d.evaluate(profile: p, settings: s, current: crossShort, previous: preShort, now: now)
-        XCTAssertEqual(shortIntents.first?.body, "Top model rate limit at 90%.")
+        XCTAssertEqual(shortIntents.first?.body, "P: Top model rate limit at 90%.")
 
         // Threshold cross — long window (AI Credits)
         let preLong = summary(primary: 95, primaryReset: baseReset, secondary: 50, secondaryReset: baseReset)
         let crossLong = summary(primary: 95, primaryReset: baseReset, secondary: 100, secondaryReset: baseReset)
         let longIntents = d.evaluate(profile: p, settings: s, current: crossLong, previous: preLong, now: now)
-        XCTAssertEqual(longIntents.first?.body, "AI Credits at 100%.")
+        XCTAssertEqual(longIntents.first?.body, "P: AI Credits at 100%.")
 
         // Reset detection — short window (rate-limit clears)
         let resetShort = summary(primary: 0, primaryReset: baseReset, secondary: 100, secondaryReset: baseReset)
         let resetShortIntents = d.evaluate(profile: p, settings: s, current: resetShort, previous: crossLong, now: now)
-        XCTAssertTrue(resetShortIntents.contains(where: { $0.body == "Model rate limits cleared. All models full." }))
+        XCTAssertTrue(resetShortIntents.contains(where: { $0.body == "P: Model rate limits cleared. All models full." }))
 
         // Reset detection — long window (AI Credits refilled)
         let resetLong = summary(primary: 0, primaryReset: baseReset, secondary: 0, secondaryReset: baseReset)
         let resetLongIntents = d.evaluate(profile: p, settings: s, current: resetLong, previous: resetShort, now: now)
-        XCTAssertTrue(resetLongIntents.contains(where: { $0.body == "AI Credits refilled." }))
+        XCTAssertTrue(resetLongIntents.contains(where: { $0.body == "P: AI Credits refilled." }))
+    }
+
+    func test_title_includesProviderAndPlan() {
+        let d = NotificationDispatcher()
+        var p = makeProfile()
+        p.subscriptionPlan = "Pro"
+        let s = settings(short: [90])
+        let prev = summary(primary: 70, primaryReset: baseReset)
+        let next = summary(primary: 92, primaryReset: baseReset)
+
+        let intents = d.evaluate(profile: p, settings: s, current: next, previous: prev, now: now)
+        XCTAssertEqual(intents.first?.title, "Kwota — Claude · Pro")
+    }
+
+    func test_title_omitsPlanSegmentWhenBlank() {
+        let d = NotificationDispatcher()
+        var p = makeProfile()
+        p.providerID = .antigravity
+        p.subscriptionPlan = nil  // nil plan → no plan segment in the title
+        let s = settings(short: [90])
+        let prev = summary(primary: 70, primaryReset: baseReset)
+        let next = summary(primary: 92, primaryReset: baseReset)
+
+        let intents = d.evaluate(profile: p, settings: s, current: next, previous: prev, now: now)
+        XCTAssertEqual(intents.first?.title, "Kwota — Antigravity")
+    }
+
+    func test_title_omitsPlanSegmentWhenWhitespaceOnly() {
+        let d = NotificationDispatcher()
+        var p = makeProfile()
+        p.subscriptionPlan = "  \n "  // whitespace-only trims to empty → no plan segment
+        let s = settings(short: [90])
+        let prev = summary(primary: 70, primaryReset: baseReset)
+        let next = summary(primary: 92, primaryReset: baseReset)
+
+        let intents = d.evaluate(profile: p, settings: s, current: next, previous: prev, now: now)
+        XCTAssertEqual(intents.first?.title, "Kwota — Claude")
     }
 
     func test_tokenExpiry_onlyFiresForCliSyncProfile() {
