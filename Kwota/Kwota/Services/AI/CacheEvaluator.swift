@@ -94,10 +94,10 @@ final class CacheEvaluator {
         switch outputResult {
         case .failure(let err):
             return .failure(err)
-        case .success(let output):
+        case .success(let answer):
             let parsed: ParsedBulk
             do {
-                parsed = try Self.decode(ParsedBulk.self, from: output)
+                parsed = try Self.decode(ParsedBulk.self, from: answer.output)
             } catch {
                 return .failure(.parseFailed(String(describing: error)))
             }
@@ -124,7 +124,7 @@ final class CacheEvaluator {
                     warning: item.warning?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
                     purpose: item.purpose,
                     detail: item.detail?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-                    modelUsed: modelLabel,
+                    modelUsed: answer.resolvedModel ?? modelLabel,
                     evaluatedAt: now
                 )
             }
@@ -156,10 +156,10 @@ final class CacheEvaluator {
         switch outputResult {
         case .failure(let err):
             return .failure(err)
-        case .success(let output):
+        case .success(let answer):
             let parsed: ParsedSingle
             do {
-                parsed = try Self.decode(ParsedSingle.self, from: output)
+                parsed = try Self.decode(ParsedSingle.self, from: answer.output)
             } catch {
                 return .failure(.parseFailed(String(describing: error)))
             }
@@ -169,7 +169,7 @@ final class CacheEvaluator {
                 warning: parsed.warning?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
                 purpose: parsed.purpose,
                 detail: parsed.detail?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-                modelUsed: modelLabel,
+                modelUsed: answer.resolvedModel ?? modelLabel,
                 evaluatedAt: Date()
             )
             return .success(eval)
@@ -186,16 +186,16 @@ final class CacheEvaluator {
         userPrompt: String,
         model: String?,
         jsonSchema: String
-    ) async -> Result<String, EvaluationError> {
+    ) async -> Result<CLIAnswer, EvaluationError> {
         do {
-            let out = try await cliRunner.ask(
+            let answer = try await cliRunner.ask(
                 systemPrompt: systemPrompt,
                 userPrompt: userPrompt,
                 model: model,
                 jsonSchema: jsonSchema,
                 timeout: timeout
             )
-            return .success(out)
+            return .success(answer)
         } catch CLIInvocationError.notInstalled {
             return .failure(.cliNotInstalled)
         } catch CLIInvocationError.timeout {
