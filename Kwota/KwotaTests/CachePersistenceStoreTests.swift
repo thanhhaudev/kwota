@@ -224,6 +224,7 @@ final class CachePersistenceStoreTests: XCTestCase {
           "aiModel": "claude-sonnet-4-6",
           "aiEngine": "gemini",
           "aiCodexModel": "gpt-99-turbo",
+          "aiAntigravityModel": "gemini-99-ultra",
           "aiEvaluationsByPath": {},
           "customPaths": [],
           "autoCleanByPath": {},
@@ -238,6 +239,8 @@ final class CachePersistenceStoreTests: XCTestCase {
                        "unrecognized aiEngine rawValue should fall back to default")
         XCTAssertEqual(loaded.aiCodexModel, .codexDefault,
                        "unrecognized aiCodexModel rawValue should fall back to default")
+        XCTAssertEqual(loaded.aiAntigravityModel, .agyDefault,
+                       "unrecognized aiAntigravityModel rawValue should fall back to default")
         XCTAssertEqual(loaded.aiModel, .sonnet,
                        "legacy aiModel maps to the sonnet tier")
     }
