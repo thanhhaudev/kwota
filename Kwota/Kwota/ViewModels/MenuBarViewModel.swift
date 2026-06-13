@@ -495,6 +495,13 @@ final class MenuBarViewModel {
         var normalCleanError: String?
         /// User-selected model. Phase 2 will forward this to the API client.
         var aiModel: AIModelChoice = .default
+        /// Which CLI engine runs evaluations. Mirrors
+        /// `CachePersistedState.aiEngine`.
+        var aiEngine: CacheAIEngine = .default
+        /// Model used when `aiEngine == .codex`. The Claude model stays in
+        /// `aiModel` so switching engines round-trips without losing
+        /// either choice.
+        var aiCodexModel: CodexModelChoice = .default
         /// Paths the user has already been alerted about as "risky". Lives
         /// in-memory for now — Phase 5 persists it so the alert truly fires
         /// once per path across launches. Cleared by `cacheClearAIEvaluations`.
@@ -2771,6 +2778,8 @@ final class MenuBarViewModel {
         cacheState.rows = CacheStubData.defaultRows()
         cacheState.settings = .stubDefault
         cacheState.aiModel = .default
+        cacheState.aiEngine = .default
+        cacheState.aiCodexModel = .default
         cacheState.riskyAlertedPaths.removeAll()
         cacheState.removedDefaultPaths.removeAll()
         saveCacheState()
@@ -3004,6 +3013,8 @@ final class MenuBarViewModel {
     private func applyPersistedCacheState(_ state: CachePersistedState) {
         cacheState.settings = state.settings
         cacheState.aiModel = state.aiModel
+        cacheState.aiEngine = state.aiEngine
+        cacheState.aiCodexModel = state.aiCodexModel
         cacheState.riskyAlertedPaths = Set(state.riskyAlertedPaths.map { URL(fileURLWithPath: $0) })
         cacheState.trashedItems = state.trashedItems
 
@@ -3064,6 +3075,8 @@ final class MenuBarViewModel {
         return CachePersistedState(
             settings: cacheState.settings,
             aiModel: cacheState.aiModel,
+            aiEngine: cacheState.aiEngine,
+            aiCodexModel: cacheState.aiCodexModel,
             aiEvaluationsByPath: evalsByPath,
             customPaths: customPaths,
             autoCleanByPath: autoCleanByPath,
@@ -3156,6 +3169,16 @@ final class MenuBarViewModel {
 
     func cacheSetAIModel(_ model: AIModelChoice) {
         cacheState.aiModel = model
+        saveCacheState()
+    }
+
+    func cacheSetAIEngine(_ engine: CacheAIEngine) {
+        cacheState.aiEngine = engine
+        saveCacheState()
+    }
+
+    func cacheSetCodexModel(_ model: CodexModelChoice) {
+        cacheState.aiCodexModel = model
         saveCacheState()
     }
 
