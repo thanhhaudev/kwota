@@ -103,6 +103,33 @@ final class CacheAIEvaluationTests: XCTestCase {
         }
     }
 
+    func testJSONSchemasMarkEveryPropertyRequired() throws {
+        // OpenAI strict structured-output (codex --output-schema) rejects a
+        // schema unless `required` lists every key in `properties`;
+        // optionality must come from nullable types, not omission. Both
+        // schemas must satisfy this so the Codex engine doesn't 400.
+        func assertAllPropsRequired(_ json: String, file: StaticString = #filePath, line: UInt = #line) throws {
+            let obj = try JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: Any]
+            // Walk to the object that actually carries properties: the single
+            // schema is the root; the bulk schema nests under
+            // properties.evaluations.items.
+            func check(_ node: [String: Any]) {
+                guard let props = node["properties"] as? [String: Any] else { return }
+                let required = Set((node["required"] as? [String]) ?? [])
+                XCTAssertEqual(required, Set(props.keys),
+                               "every property must be in `required` for OpenAI strict mode", file: file, line: line)
+            }
+            check(obj)
+            if let props = obj["properties"] as? [String: Any],
+               let evals = props["evaluations"] as? [String: Any],
+               let items = evals["items"] as? [String: Any] {
+                check(items)
+            }
+        }
+        try assertAllPropsRequired(CacheEvaluationPrompts.singleJSONSchema)
+        try assertAllPropsRequired(CacheEvaluationPrompts.bulkJSONSchema)
+    }
+
     func testUserPromptIncludesPathAndHandCuratedHint() {
         let url = URL(fileURLWithPath: "/tmp/cache-x")
         let prompt = CacheEvaluationPrompts.userPrompt(

@@ -125,10 +125,12 @@ enum CacheEvaluationPrompts {
         "purpose": { "type": "string" },
         "detail": { "type": ["string", "null"] }
       },
-      "required": ["safety", "purpose"],
+      "required": ["safety", "warning", "purpose", "detail"],
       "additionalProperties": false
     }
     """
+    // All keys are listed so OpenAI strict mode (codex --output-schema) accepts
+    // the schema; warning/detail stay optional via their nullable types.
 
     /// Schema for a bulk evaluation. Wraps an `evaluations` array whose
     /// items match the single-path schema plus an echoed `path` field.
@@ -147,7 +149,7 @@ enum CacheEvaluationPrompts {
               "purpose": { "type": "string" },
               "detail": { "type": ["string", "null"] }
             },
-            "required": ["path", "safety", "purpose"],
+            "required": ["path", "safety", "warning", "purpose", "detail"],
             "additionalProperties": false
           }
         }
@@ -156,4 +158,6 @@ enum CacheEvaluationPrompts {
       "additionalProperties": false
     }
     """
+    // All keys are listed so OpenAI strict mode (codex --output-schema)
+    // accepts the schema; warning/detail stay optional via their nullable types.
 }
