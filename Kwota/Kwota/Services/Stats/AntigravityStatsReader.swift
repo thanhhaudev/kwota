@@ -90,6 +90,8 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
         let sessionId = db.deletingPathExtension().lastPathComponent
         var lastTS: Date?
         var maxSeen = highWater
+        var rowsExamined = 0
+        var rowsDecoded = 0
         while sqlite3_step(stmt) == SQLITE_ROW {
             let idx = UInt64(bitPattern: sqlite3_column_int64(stmt, 0))
             maxSeen = max(maxSeen ?? 0, idx)
@@ -98,12 +100,22 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
             guard n > 0 else { continue }
             let blob = Data(bytes: raw, count: n)
             lastLineLock.withLock { $0 = "\(sessionId)#\(idx)" }
+            rowsExamined += 1
             guard let usage = decodeAntigravityGenMetadata(blob), usage.tokens != .zero else { continue }
+            rowsDecoded += 1
             // Timestamp fallback chain: row ts → previous valid row ts → DB mtime → now.
             let ts = usage.timestamp ?? lastTS ?? mtime ?? clock()
             if usage.timestamp != nil { lastTS = usage.timestamp }
             emitted.append(UsageEvent(uuid: "\(sessionId)#\(idx)", sessionId: sessionId,
                                       timestamp: ts, tokens: usage.tokens, model: usage.model))
+        }
+        // Whole-batch decode failure is the drift signal: a single torn row is a
+        // normal soft-degrade (skipped per-row), but if every new row in this DB
+        // decoded to nothing, the reverse-engineered proto field-map likely moved.
+        if rowsExamined > 0, rowsDecoded == 0 {
+            AppLog.shared.log(
+                "AntigravityStatsReader: \(rowsExamined) row(s) in \(db.lastPathComponent) decoded to nothing — gen_metadata proto field-map may have drifted",
+                level: .warn)
         }
         if let maxSeen { offsets[db] = maxSeen }
     }
