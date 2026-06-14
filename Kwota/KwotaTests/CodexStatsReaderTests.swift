@@ -113,6 +113,20 @@ final class CodexStatsReaderTests: XCTestCase {
         XCTAssertEqual(second[0].tokens.input, 7)
     }
 
+    func test_mtimeChangeWithoutShrinkDoesNotReingest() {
+        // A `touch` / backup-restore on a fully-read rollout (same size, same
+        // content) must NOT re-read it — re-emitting token_count events would
+        // permanently double-count, since the ledger has no per-event dedup.
+        let (reader, file, _) = makeReader([
+            turnCtx,
+            tokenCount(ts: "2026-05-20T03:47:21.048Z", input: 100, cached: 0, output: 10, reasoning: 0),
+        ])
+        XCTAssertEqual(reader.read().count, 1)
+        try! FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 2_000_000_000)],
+                                               ofItemAtPath: file.path)
+        XCTAssertTrue(reader.read().isEmpty, "a touched-but-unchanged rollout must not re-emit")
+    }
+
     func test_fullReadPrunesCursorsForDeletedFiles() {
         // `state()` no longer stats per cursor; the full `read()` walk is what
         // drops cursors for vanished files, keeping the snapshot bounded.

@@ -84,8 +84,13 @@ final class CodexStatsReader: JSONLogReader, @unchecked Sendable {
         let mtime = attrs[.modificationDate] as? Date
         let stored = offsets[fileURL] ?? 0
         var startOffset = stored
-        let mtimeChanged = mtime != nil && mtime != mtimes[fileURL] && mtimes[fileURL] != nil
-        if size < startOffset || (mtimeChanged && size <= startOffset) {
+        // Reset ONLY on a genuine shrink (truncation/rotation). A bare mtime
+        // change at the same-or-larger size — `touch`, a backup/Time-Machine
+        // restore, a same-size rewrite — must NOT reset: re-reading a
+        // fully-consumed rollout re-emits every token_count event, and the
+        // ledger has no per-event dedup, so tokens double-count permanently.
+        // Rollouts are append-only, so a shrink is the only real rotation.
+        if size < startOffset {
             startOffset = 0
             models[fileURL] = nil
         }

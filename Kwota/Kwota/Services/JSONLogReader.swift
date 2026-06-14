@@ -154,10 +154,14 @@ final class FilesystemJSONLogReader: JSONLogReader, @unchecked Sendable {
         let mtime = attrs[.modificationDate] as? Date
         let stored = offsets[fileURL] ?? 0
         var startOffset = stored
-        // Reset on rotation: file size shrank OR mtime changed while offset >= size
-        // (atomic overwrite produces a new mtime even with same byte length)
-        let mtimeChanged = mtime != nil && mtime != mtimes[fileURL] && mtimes[fileURL] != nil
-        if size < startOffset || (mtimeChanged && size <= startOffset) {
+        // Reset ONLY on a genuine shrink (truncation/rotation). A bare mtime
+        // change at the same-or-larger size — `touch`, a backup/Time-Machine
+        // restore, a same-size rewrite — must NOT reset a fully-consumed file:
+        // re-reading it re-emits every event, and neither the stats ledger nor
+        // (post-v3) UsageMonitor dedups per event, so it double-counts. These
+        // session transcripts are append-only, so a shrink is the only real
+        // rotation signal.
+        if size < startOffset {
             startOffset = 0
         }
         if let m = mtime { mtimes[fileURL] = m }

@@ -57,17 +57,41 @@ final class JSONLogReaderTests: XCTestCase {
         let projectDir = tmp.file("p1")
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let file = projectDir.appendingPathComponent("session-1.jsonl")
+        // Two lines, so the rewrite below is genuinely SMALLER (a real shrink),
+        // not a same-size overwrite. Rotation now resets only on a shrink.
+        try ([line(uuid: "a", sessionId: "s1", ts: "2026-04-26T10:00:00.000Z"),
+              line(uuid: "b", sessionId: "s1", ts: "2026-04-26T10:00:01.000Z")]
+              .joined(separator: "\n") + "\n")
+            .data(using: .utf8)!.write(to: file)
+
+        let reader = FilesystemJSONLogReader(root: tmp.url)
+        XCTAssertEqual(reader.read().count, 2)
+
+        try (line(uuid: "c", sessionId: "s1", ts: "2026-04-26T10:00:02.000Z") + "\n")
+            .data(using: .utf8)!.write(to: file) // shrinks the file → cursor reset
+
+        let second = reader.read()
+        XCTAssertEqual(second.map(\.uuid), ["c"])
+    }
+
+    func testMtimeChangeWithoutShrinkDoesNotReingest() throws {
+        // A `touch`-style mtime bump on a fully-read file (same size, same
+        // content) must NOT re-read it — re-emitting events would double-count,
+        // since neither the stats ledger nor UsageMonitor dedups per event.
+        let tmp = TempDirectory()
+        let projectDir = tmp.file("p1")
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let file = projectDir.appendingPathComponent("session-1.jsonl")
         try (line(uuid: "a", sessionId: "s1", ts: "2026-04-26T10:00:00.000Z") + "\n")
             .data(using: .utf8)!.write(to: file)
 
         let reader = FilesystemJSONLogReader(root: tmp.url)
         XCTAssertEqual(reader.read().count, 1)
 
-        try (line(uuid: "c", sessionId: "s1", ts: "2026-04-26T10:00:02.000Z") + "\n")
-            .data(using: .utf8)!.write(to: file) // overwrites; smaller content possible
-
-        let second = reader.read()
-        XCTAssertEqual(second.map(\.uuid), ["c"])
+        // Bump only the mtime (content/size unchanged).
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 2_000_000_000)],
+                                              ofItemAtPath: file.path)
+        XCTAssertTrue(reader.read().isEmpty, "a touched-but-unchanged file must not re-emit events")
     }
 
     func testPartialFinalLineIsDeferredUntilNewlineArrives() throws {
