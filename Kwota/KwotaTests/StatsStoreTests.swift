@@ -231,6 +231,31 @@ final class StatsStoreTests: XCTestCase {
         XCTAssertEqual(store.total(provider: .claude, sinceDay: nil), TokenBreakdown(input: 5))
         XCTAssertEqual(store.total(provider: .codex, sinceDay: nil), TokenBreakdown(input: 7))
     }
+
+    /// A `clear(provider:)` that lands while a read is suspended off-main must
+    /// not be undone by that read re-ingesting the just-wiped history. Models
+    /// the dangerous case: Clear pressed during a long startup backfill.
+    func test_clearDuringInFlightRead_isNotReingested() async {
+        let claude = GatedReader()
+        claude.events = [UsageEvent(uuid: "h1", sessionId: "s",
+                                    timestamp: date("2026-06-13T03:00:00.000Z"),
+                                    tokens: TokenBreakdown(input: 100), model: "claude-opus-4-8")]
+        let store = StatsStore(readers: [.claude: claude],
+                               ledgerURL: URL(fileURLWithPath: "/dev/null"),
+                               clock: { self.date("2026-06-13T10:00:00.000Z") },
+                               persistDebounce: 0)
+
+        let entered = expectation(description: "backfill read in-flight")
+        claude.onEntered = { entered.fulfill() }
+        let first = Task { await store.readChanged(nil, provider: .claude) }
+        await fulfillment(of: [entered], timeout: 2)
+
+        store.clear(provider: .claude)   // wipe while the read is suspended
+        claude.proceed.signal()          // let the (pre-clear) batch return
+        await first.value
+
+        XCTAssertEqual(store.total(provider: .claude, sinceDay: nil), .zero)   // stays cleared
+    }
 }
 
 /// Test reader whose `read()` signals `onEntered` and then blocks on `proceed`,

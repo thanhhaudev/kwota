@@ -53,6 +53,12 @@ final class StatsStore {
     private struct Pending { var fullWalk = false; var paths: Set<URL> = [] }
     private var pending: [ProviderID: Pending] = [:]
 
+    /// Per-provider generation counter, bumped by `clear(provider:)`. A read
+    /// captures the generation before it suspends off-main and drops its batch
+    /// if `clear` bumped it meanwhile — otherwise an in-flight read (e.g. the
+    /// startup backfill) would re-ingest just-cleared history after the wipe.
+    private var generation: [ProviderID: Int] = [:]
+
     init(readers: [ProviderID: JSONLogReader],
          ledgerURL: URL = StatsStore.defaultLedgerURL(),
          clock: @escaping () -> Date = { Date() },
@@ -115,11 +121,18 @@ final class StatsStore {
         while true {
             guard let reader = readers[curProvider] else { return }
             let req = curPaths
+            let gen = generation[curProvider] ?? 0
             let events: [UsageEvent] = await OffMain.run {
                 if let req { return reader.read(only: req) }
                 return reader.read()
             }
-            ingest(events, provider: curProvider)
+            // If `clear(provider:)` ran while we were suspended off-main, the
+            // batch we just read is pre-clear history — dropping it (the reader
+            // already advanced past it) is what makes Clear stick. Without this,
+            // a Clear during the startup backfill would be silently undone.
+            if (generation[curProvider] ?? 0) == gen {
+                ingest(events, provider: curProvider)
+            }
             // Drain order across providers is unordered (Dictionary.first), which
             // is safe: each provider has independent offsets, so order can't
             // affect totals. Don't "fix" this into ordered iteration — it would
@@ -158,6 +171,9 @@ final class StatsStore {
         let now = clock()
         ledger.clear(provider: provider, now: now)
         hourly.clear(provider: provider, now: now)
+        // Invalidate any in-flight read for this provider so it can't re-ingest
+        // the history we just wiped after it resumes from off-main.
+        generation[provider, default: 0] += 1
         revision &+= 1
         schedulePersist()
     }
