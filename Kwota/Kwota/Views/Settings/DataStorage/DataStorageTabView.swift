@@ -21,6 +21,8 @@ struct DataStorageTabView: View {
                         ClearStatsCard(vm: vm, provider: .claude)
                         SettingsSectionDivider()
                         ClearStatsCard(vm: vm, provider: .codex)
+                        SettingsSectionDivider()
+                        ClearStatsCard(vm: vm, provider: .antigravity)
                     }
                     .id("data.tokenstats")
 

@@ -21,7 +21,8 @@ enum StatsModelPalette {
         "sonnet": .orange,
         "haiku": .teal,
         "fable": .pink,
-        "gpt": .teal
+        "gpt": .teal,
+        "gemini": .purple
     ]
 
     static func color(for model: String) -> Color {
@@ -38,11 +39,12 @@ enum StatsModelPalette {
         return colors[Int(hash % UInt64(colors.count))]
     }
 
-    /// Model family = first segment after an optional `claude-` prefix.
-    /// "claude-sonnet-4-6" -> "sonnet"; "gpt-5.5" -> "gpt".
+    /// Model family = first dash-or-space segment after an optional `claude-` prefix.
+    /// "claude-sonnet-4-6" -> "sonnet"; "gpt-5.5" -> "gpt"; "Gemini 3.1 Pro (High)" -> "gemini".
     static func family(of model: String) -> String {
         let stripped = model.hasPrefix("claude-") ? String(model.dropFirst("claude-".count)) : model
-        return (stripped.split(separator: "-").first.map(String.init) ?? stripped).lowercased()
+        let firstToken = stripped.split(whereSeparator: { $0 == "-" || $0 == " " }).first.map(String.init) ?? stripped
+        return firstToken.lowercased()
     }
 
     /// Friendly display name for a model id. For `claude-…` ids: strip the

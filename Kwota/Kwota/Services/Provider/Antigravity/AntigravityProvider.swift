@@ -218,6 +218,10 @@ final class AntigravityProvider: AccountProvider {
         }
     }
 
+    func statsDetailView(store: StatsStore, profile: Profile) -> AnyView {
+        AnyView(StatsDetailView(store: store, provider: .antigravity, profile: profile))
+    }
+
     func usageDetailView(summary: ProviderUsageSummary,
                         history: [UsageHistoryEntry],
                         profile: Profile) -> AnyView {
