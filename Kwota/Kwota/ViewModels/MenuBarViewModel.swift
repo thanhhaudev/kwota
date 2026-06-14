@@ -558,6 +558,7 @@ final class MenuBarViewModel {
     let usage: UsageMonitor
     let statsStore: StatsStore
     private let codexStatsWatcher: CodexStatsWatcher?
+    private let antigravityStatsWatcher: AntigravityStatsWatcher?
     let caffeine: CaffeinateManager
     let probe: ClaudeProbe
     let cache: CacheCleaner
@@ -576,6 +577,7 @@ final class MenuBarViewModel {
         usage: UsageMonitor? = nil,
         statsStore: StatsStore? = nil,
         codexStatsWatcher: CodexStatsWatcher? = nil,
+        antigravityStatsWatcher: AntigravityStatsWatcher? = nil,
         caffeine: CaffeinateManager? = nil,
         probe: ClaudeProbe? = nil,
         cache: CacheCleaner? = nil,
@@ -621,6 +623,7 @@ final class MenuBarViewModel {
         self.statsStore = statsStore ?? StatsStore(readers: [
             .claude: FilesystemJSONLogReader(),
             .codex: CodexStatsReader(),
+            .antigravity: AntigravityStatsReader(),
         ])
         // Codex stats need their own live watcher (the Codex activity source is
         // inside the awake CompositeActivitySource and not reachable here).
@@ -628,6 +631,9 @@ final class MenuBarViewModel {
         let resolvedCodexStatsWatcher = codexStatsWatcher
             ?? (startupMode == .live ? CodexStatsWatcher() : nil)
         self.codexStatsWatcher = resolvedCodexStatsWatcher
+        let resolvedAntigravityStatsWatcher = antigravityStatsWatcher
+            ?? (startupMode == .live ? AntigravityStatsWatcher() : nil)
+        self.antigravityStatsWatcher = resolvedAntigravityStatsWatcher
         self.caffeine = caffeine ?? CaffeinateManager()
         self.probe    = probe    ?? ClaudeProbe()
         self.cache    = cache    ?? CacheCleaner()
@@ -883,6 +889,11 @@ final class MenuBarViewModel {
                 await self?.statsStore.readChanged(paths, provider: .codex)
             }
         }
+        resolvedAntigravityStatsWatcher?.onChangedPaths = { [weak self] paths in
+            Task { @MainActor in
+                await self?.statsStore.readChanged(paths, provider: .antigravity)
+            }
+        }
 
         resolvedNotifier.isPermissionDeniedPublisher
             .receive(on: RunLoop.main)
@@ -921,6 +932,7 @@ final class MenuBarViewModel {
                 }
             }
             resolvedCodexStatsWatcher?.start()
+            resolvedAntigravityStatsWatcher?.start()
             // Migrator runs FIRST so an in-place promotion (legacy active
             // profile gets kind=.auto + a real ownershipBoundary) is reflected
             // in the immediately-following ownership rebind. Without this order
