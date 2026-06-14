@@ -30,7 +30,7 @@ final class StatsStore {
     /// 48h keeps the window intact across the UTC midnight boundary.
     private static let hourlyRetention: TimeInterval = 48 * 3600
 
-    private let reader: JSONLogReader
+    private let readers: [ProviderID: JSONLogReader]
     private let ledgerURL: URL
     private let clock: () -> Date
     /// Calendar/timezone for the hourly rollup + "today" key. Defaults to the
@@ -45,29 +45,40 @@ final class StatsStore {
     // MARK: Read serialization
 
     /// True while a `readChanged` session is in progress off-main.
-    /// Re-entrant calls coalesce into the pending state below instead of
-    /// racing on the reader's mutable offsets.
+    /// Re-entrant calls coalesce into the per-provider pending state below
+    /// instead of racing on a reader's mutable offsets. Each provider keeps
+    /// its own pending request so no provider's signal is dropped while
+    /// another provider's read is in flight.
     private var isReading = false
-    private var pendingFullWalk = false
-    private var pendingPaths: Set<URL> = []
-    /// Provider recorded for the coalesced request, so the in-flight loop
-    /// can use the right provider on the next iteration.
-    private var pendingProvider: ProviderID?
+    private struct Pending { var fullWalk = false; var paths: Set<URL> = [] }
+    private var pending: [ProviderID: Pending] = [:]
 
-    init(reader: JSONLogReader,
+    init(readers: [ProviderID: JSONLogReader],
          ledgerURL: URL = StatsStore.defaultLedgerURL(),
          clock: @escaping () -> Date = { Date() },
          calendar: Calendar = .current,
          persistDebounce: TimeInterval = 1.0) {
-        self.reader = reader
+        self.readers = readers
         self.ledgerURL = ledgerURL
         self.clock = clock
         self.calendar = calendar
         self.persistDebounce = persistDebounce
-        let (loaded, loadedHourly, readerState) = Self.loadEnvelope(at: ledgerURL)
+        let (loaded, loadedHourly, states) = Self.loadEnvelope(at: ledgerURL)
         self.ledger = loaded
         self.hourly = loadedHourly
-        reader.restore(readerState)
+        for (provider, reader) in readers {
+            reader.restore(states[provider] ?? ReaderState())
+        }
+    }
+
+    /// Back-compat convenience used by existing call sites and tests.
+    convenience init(reader: JSONLogReader,
+                     ledgerURL: URL = StatsStore.defaultLedgerURL(),
+                     clock: @escaping () -> Date = { Date() },
+                     calendar: Calendar = .current,
+                     persistDebounce: TimeInterval = 1.0) {
+        self.init(readers: [.claude: reader], ledgerURL: ledgerURL,
+                  clock: clock, calendar: calendar, persistDebounce: persistDebounce)
     }
 
     nonisolated static func defaultLedgerURL() -> URL {
@@ -80,44 +91,43 @@ final class StatsStore {
     /// and merge whatever events come back. Reuses `UsageMonitor`'s FSEvents
     /// signal but keeps independent offsets so backfill/incremental is correct.
     ///
-    /// Reads are serialized via `isReading` — `read()` mutates the reader's
+    /// Reads are serialized via `isReading` — `read()` mutates a reader's
     /// per-file offsets, so two concurrent walks would race. A call that
-    /// arrives mid-read is COALESCED into `pendingFullWalk`/`pendingPaths`;
-    /// the in-flight loop consumes that deferred state to drive the next
-    /// iteration. A nil (full-walk) request supersedes any pending paths;
-    /// a later path request is subsumed by a pending full walk.
+    /// arrives mid-read is COALESCED into the per-provider `pending` map; the
+    /// in-flight loop drains that deferred state to drive the next iteration.
+    /// Within a provider, a nil (full-walk) request supersedes any pending
+    /// paths; a later path request is subsumed by a pending full walk. Each
+    /// provider keeps an independent pending entry, so a signal for one
+    /// provider is never lost while another provider's read is in flight.
     func readChanged(_ paths: Set<URL>?, provider: ProviderID) async {
+        guard readers[provider] != nil else { return }
         if isReading {
-            if paths == nil { pendingFullWalk = true }
-            else if !pendingFullWalk { pendingPaths.formUnion(paths!) }
-            pendingProvider = provider
+            var p = pending[provider] ?? Pending()
+            if paths == nil { p.fullWalk = true; p.paths.removeAll() }
+            else if !p.fullWalk { p.paths.formUnion(paths!) }
+            pending[provider] = p
             return
         }
         isReading = true
         defer { isReading = false }
-        var current = paths
-        var currentProvider = provider
+        var curProvider = provider
+        var curPaths = paths
         while true {
-            let req = current
-            let events: [UsageEvent] = await OffMain.run { [reader] in
+            guard let reader = readers[curProvider] else { return }
+            let req = curPaths
+            let events: [UsageEvent] = await OffMain.run {
                 if let req { return reader.read(only: req) }
                 return reader.read()
             }
-            ingest(events, provider: currentProvider)
-            if pendingFullWalk {
-                pendingFullWalk = false
-                pendingPaths.removeAll(keepingCapacity: true)
-                current = nil
-                currentProvider = pendingProvider ?? currentProvider
-                pendingProvider = nil
-            } else if !pendingPaths.isEmpty {
-                current = pendingPaths
-                pendingPaths.removeAll(keepingCapacity: true)
-                currentProvider = pendingProvider ?? currentProvider
-                pendingProvider = nil
-            } else {
-                return
-            }
+            ingest(events, provider: curProvider)
+            // Drain order across providers is unordered (Dictionary.first), which
+            // is safe: each provider has independent offsets, so order can't
+            // affect totals. Don't "fix" this into ordered iteration — it would
+            // add churn for no correctness gain.
+            guard let (nextProvider, p) = pending.first else { return }
+            pending.removeValue(forKey: nextProvider)
+            curProvider = nextProvider
+            curPaths = p.fullWalk ? nil : p.paths
         }
     }
 
@@ -195,15 +205,31 @@ final class StatsStore {
     /// tailing where it left off.
     private struct Envelope: Codable {
         var ledger: StatsLedger
-        var readerState: ReaderState
+        /// Legacy single-reader (Claude) offsets from Plan 1. Still written so an
+        /// older binary can downgrade without re-backfilling Claude.
+        var readerState: ReaderState?
+        /// Per-provider offsets, keyed by `ProviderID.rawValue`. Preferred on load.
+        var readerStates: [String: ReaderState]?
         /// Optional so envelopes written before the hourly rollup decode cleanly
         /// (they simply start with an empty hourly window).
         var hourly: StatsLedger?
     }
 
+    private func makeEnvelope() -> Envelope {
+        // Snapshot each reader's offsets ONCE — `state()` does a fileExists scan
+        // per tracked file, so the legacy `readerState` reuses Claude's already-
+        // computed snapshot rather than scanning a second time.
+        var states: [String: ReaderState] = [:]
+        for (provider, reader) in readers { states[provider.rawValue] = reader.state() }
+        return Envelope(ledger: ledger,
+                        readerState: states[ProviderID.claude.rawValue],
+                        readerStates: states,
+                        hourly: hourly)
+    }
+
     private func schedulePersist() {
         pendingPersist?.cancel()
-        let snapshot = Envelope(ledger: ledger, readerState: reader.state(), hourly: hourly)
+        let snapshot = makeEnvelope()
         let url = ledgerURL
         let action = { Self.write(snapshot, to: url) }
         if persistDebounce <= 0 { persistQueue.async(execute: action); return }
@@ -218,7 +244,7 @@ final class StatsStore {
     /// ordering.
     func flush() {
         pendingPersist?.cancel()
-        let snapshot = Envelope(ledger: ledger, readerState: reader.state(), hourly: hourly)
+        let snapshot = makeEnvelope()
         persistQueue.sync { Self.write(snapshot, to: self.ledgerURL) }
     }
 
@@ -233,11 +259,18 @@ final class StatsStore {
         }
     }
 
-    nonisolated private static func loadEnvelope(at url: URL) -> (StatsLedger, StatsLedger, ReaderState) {
+    nonisolated private static func loadEnvelope(at url: URL)
+        -> (StatsLedger, StatsLedger, [ProviderID: ReaderState]) {
         guard let data = try? Data(contentsOf: url),
               let env = try? JSONDecoder().decode(Envelope.self, from: data) else {
-            return (StatsLedger(), StatsLedger(), ReaderState())
+            return (StatsLedger(), StatsLedger(), [:])
         }
-        return (env.ledger, env.hourly ?? StatsLedger(), env.readerState)
+        var states: [ProviderID: ReaderState] = [:]
+        if let perProvider = env.readerStates {
+            for (raw, st) in perProvider { states[ProviderID(rawValue: raw)] = st }
+        } else if let legacy = env.readerState {
+            states[.claude] = legacy   // Plan 1 envelope → Claude offsets
+        }
+        return (env.ledger, env.hourly ?? StatsLedger(), states)
     }
 }

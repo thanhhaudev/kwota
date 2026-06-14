@@ -165,4 +165,88 @@ final class StatsStoreTests: XCTestCase {
                             calendar: StatsLedger.utcCalendarForKeys, persistDebounce: 0)
         XCTAssertEqual(s2.hourlySeries(provider: .claude, dayKey: "2026-06-13").first?.hour, 3)
     }
+
+    // MARK: Multi-reader
+
+    func test_readChanged_routesToCodexReader() async {
+        let claude = FakeJSONLogReader()
+        let codex = FakeJSONLogReader()
+        codex.queue = [[UsageEvent(uuid: "c1", sessionId: "s",
+                                   timestamp: date("2026-06-13T03:00:00.000Z"),
+                                   tokens: TokenBreakdown(input: 40), model: "gpt-5.5")]]
+        let store = StatsStore(readers: [.claude: claude, .codex: codex],
+                               ledgerURL: URL(fileURLWithPath: "/dev/null"),
+                               clock: { self.date("2026-06-13T10:00:00.000Z") },
+                               persistDebounce: 0)
+        await store.readChanged(nil, provider: .codex)
+        XCTAssertEqual(store.total(provider: .codex, sinceDay: nil), TokenBreakdown(input: 40))
+        XCTAssertEqual(store.total(provider: .claude, sinceDay: nil), .zero)
+    }
+
+    func test_legacyEnvelope_migratesSingleReaderStateToClaude() throws {
+        let dir = TempDirectory()
+        let url = dir.url.appendingPathComponent("stats-ledger.json")
+        let legacy = """
+        {"ledger":{"entries":{}},"readerState":{"entries":{"/x/a.jsonl":{"offset":128,"mtime":0}}}}
+        """
+        try legacy.data(using: .utf8)!.write(to: url)
+        let claude = FakeJSONLogReader()
+        let store = StatsStore(readers: [.claude: claude],
+                               ledgerURL: url, clock: { self.date("2026-06-13T10:00:00.000Z") },
+                               persistDebounce: 0)
+        _ = store
+        XCTAssertEqual(claude.restoredState?.entries["/x/a.jsonl"]?.offset, 128)
+    }
+
+    /// The reason `pendingProvider` became a per-provider `pending` map: a signal
+    /// for a SECOND provider that arrives while a FIRST provider's read is in
+    /// flight must not be dropped. `GatedReader` blocks Claude's read inside
+    /// `OffMain.run`; while it's suspended we signal Codex, then release Claude
+    /// and assert Codex was still drained. Deterministic — gated on an
+    /// expectation, no sleeps.
+    func test_secondProviderPendingNotDroppedDuringInFlightRead() async {
+        let claude = GatedReader()
+        claude.events = [UsageEvent(uuid: "a1", sessionId: "s",
+                                    timestamp: date("2026-06-13T03:00:00.000Z"),
+                                    tokens: TokenBreakdown(input: 5), model: "claude-opus-4-8")]
+        let codex = FakeJSONLogReader()
+        codex.queue = [[UsageEvent(uuid: "c1", sessionId: "s",
+                                   timestamp: date("2026-06-13T03:00:00.000Z"),
+                                   tokens: TokenBreakdown(input: 7), model: "gpt-5.5")]]
+        let store = StatsStore(readers: [.claude: claude, .codex: codex],
+                               ledgerURL: URL(fileURLWithPath: "/dev/null"),
+                               clock: { self.date("2026-06-13T10:00:00.000Z") },
+                               persistDebounce: 0)
+
+        let entered = expectation(description: "claude read in-flight")
+        claude.onEntered = { entered.fulfill() }
+        let first = Task { await store.readChanged(nil, provider: .claude) }
+        await fulfillment(of: [entered], timeout: 2)
+
+        // Claude is suspended in OffMain.run; this signal must coalesce, not drop.
+        await store.readChanged(nil, provider: .codex)
+        claude.proceed.signal()          // release Claude's read → loop drains Codex
+        await first.value
+
+        XCTAssertEqual(store.total(provider: .claude, sinceDay: nil), TokenBreakdown(input: 5))
+        XCTAssertEqual(store.total(provider: .codex, sinceDay: nil), TokenBreakdown(input: 7))
+    }
+}
+
+/// Test reader whose `read()` signals `onEntered` and then blocks on `proceed`,
+/// so a test can hold one provider's read in flight while issuing another's.
+/// `@unchecked Sendable`: the closure/semaphore are the synchronization, and
+/// `read()` runs off-main via `OffMain.run` (GCD), so blocking it is safe.
+private final class GatedReader: JSONLogReader, @unchecked Sendable {
+    var events: [UsageEvent] = []
+    var onEntered: (() -> Void)?
+    let proceed = DispatchSemaphore(value: 0)
+
+    func read() -> [UsageEvent] {
+        onEntered?()
+        proceed.wait()
+        return events
+    }
+    func read(only paths: Set<URL>) -> [UsageEvent] { read() }
+    func lastSeenLine() -> String? { nil }
 }
