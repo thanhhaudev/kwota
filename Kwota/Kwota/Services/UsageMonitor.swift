@@ -95,6 +95,12 @@ final class UsageMonitor: ObservableObject {
     /// caller's responsibility.
     var onNewEvents: (([UsageEvent]) -> Void)?
 
+    /// Optional sink fired after each `tickAsync` read with the paths read
+    /// (nil = full walk). `StatsStore` uses this to drive its own
+    /// independent-offset reader off the same FSEvents pipeline. Unlike
+    /// `onNewEvents`, this is NOT deduped — the subscriber owns its own offsets.
+    var onChangedPaths: ((Set<URL>?) -> Void)?
+
     let reader: JSONLogReader   // intentionally non-private: DebugPanelView reads `lastSeenLine()`
     private let ledgerURL: URL
     private let dailyCounterURL: URL
@@ -296,6 +302,7 @@ final class UsageMonitor: ObservableObject {
                 }
             }
             ingest(events)
+            onChangedPaths?(p)
             // Consume any tick requests that arrived during the read.
             if pendingFullWalk {
                 pendingFullWalk = false

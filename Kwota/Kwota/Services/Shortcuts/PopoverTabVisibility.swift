@@ -24,6 +24,8 @@ struct PopoverTabVisibility {
             defaults.object(forKey: AppStorageKeys.displayPopoverShowAwake) as? Bool ?? true
         case .cache:
             defaults.object(forKey: AppStorageKeys.displayPopoverShowCache) as? Bool ?? true
+        case .stats:
+            defaults.object(forKey: AppStorageKeys.displayPopoverShowStats) as? Bool ?? true
         }
     }
 }

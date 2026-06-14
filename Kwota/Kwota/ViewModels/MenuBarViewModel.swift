@@ -21,13 +21,14 @@ final class MenuBarViewModel {
     // MARK: - Tabs
 
     enum Tab: String, CaseIterable, Identifiable {
-        case usage, awake, cache
+        case usage, stats, awake, cache
         var id: String { rawValue }
         var label: String {
             switch self {
             case .usage: return "Usage"
             case .awake: return "Awake"
             case .cache: return "Cache"
+            case .stats: return "Stats"
             }
         }
         var icon: String {
@@ -35,6 +36,7 @@ final class MenuBarViewModel {
             case .usage: return "chart.bar.fill"
             case .awake: return "cup.and.saucer.fill"
             case .cache: return "internaldrive.fill"
+            case .stats: return "chart.line.uptrend.xyaxis"
             }
         }
     }
@@ -554,6 +556,7 @@ final class MenuBarViewModel {
     // MARK: - Services
 
     let usage: UsageMonitor
+    let statsStore: StatsStore
     let caffeine: CaffeinateManager
     let probe: ClaudeProbe
     let cache: CacheCleaner
@@ -570,6 +573,7 @@ final class MenuBarViewModel {
 
     init(
         usage: UsageMonitor? = nil,
+        statsStore: StatsStore? = nil,
         caffeine: CaffeinateManager? = nil,
         probe: ClaudeProbe? = nil,
         cache: CacheCleaner? = nil,
@@ -609,6 +613,10 @@ final class MenuBarViewModel {
     ) {
         self.now = now
         self.usage    = usage    ?? UsageMonitor.live()
+        // Stats reader: its OWN FilesystemJSONLogReader instance + offsets, so
+        // first launch backfills ~/.claude history and later ticks are
+        // incremental. Driven by usage.onChangedPaths below — no 2nd watcher.
+        self.statsStore = statsStore ?? StatsStore(reader: FilesystemJSONLogReader())
         self.caffeine = caffeine ?? CaffeinateManager()
         self.probe    = probe    ?? ClaudeProbe()
         self.cache    = cache    ?? CacheCleaner()
@@ -852,6 +860,11 @@ final class MenuBarViewModel {
         self.usage.onNewEvents = { [weak self] events in
             Task { @MainActor in
                 self?.activityHistorian.record(events)
+            }
+        }
+        self.usage.onChangedPaths = { [weak self] paths in
+            Task { @MainActor in
+                await self?.statsStore.readChanged(paths, provider: .claude)
             }
         }
 

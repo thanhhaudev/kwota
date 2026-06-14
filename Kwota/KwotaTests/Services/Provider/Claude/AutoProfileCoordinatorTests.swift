@@ -26,6 +26,33 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         )
     }
 
+    /// Builds a coordinator with hermetic keychain dependencies by default, so
+    /// tests never touch the real macOS Keychain (which prompts for access).
+    /// Call sites that pass `keychain:`/`credentialReader:` explicitly override
+    /// these defaults, preserving their existing behavior.
+    private func makeCoordinator(
+        watcher: any CLIAccountWatching,
+        profileStore: ProfileStore,
+        keychain: KeychainCredentialStore? = nil,
+        credentialReader: (any CLICredentialReading)? = nil,
+        profileFetcher: any OAuthProfileFetching = OAuthProfileFetcher(),
+        clock: @escaping () -> Date = { Date() },
+        alwaysAllowRefresh: Bool = false
+    ) -> AutoProfileCoordinator {
+        AutoProfileCoordinator(
+            watcher: watcher,
+            profileStore: profileStore,
+            keychain: keychain ?? KeychainCredentialStore(service: "com.thanhhaudev.Kwota.test.\(UUID())"),
+            credentialReader: credentialReader ?? CLICredentialReader(
+                credentialsFile: URL(fileURLWithPath: "/nonexistent"),
+                keychainProbe: { nil }
+            ),
+            profileFetcher: profileFetcher,
+            clock: clock,
+            alwaysAllowRefresh: alwaysAllowRefresh
+        )
+    }
+
     // MARK: - identity handling
 
     func test_nilIdentity_clearsActiveProfile() throws {
@@ -34,7 +61,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                               organizationId: "o", email: "a@x.com",
                               kind: .auto))
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -46,7 +73,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
     func test_unknownIdentity_createsAutoProfile_withBoundary() {
         let store = makeStore()
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -69,7 +96,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                               kind: .auto,
                               ownershipBoundary: oldBoundary))
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -89,7 +116,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                               kind: .archived,
                               ownershipBoundary: t0.addingTimeInterval(-100)))
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -102,7 +129,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
     func test_identityRepeat_noOp() {
         let store = makeStore()
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -119,7 +146,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
     func test_guardRefresh_allowsMatchingAutoProfile() {
         let store = makeStore()
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -137,7 +164,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         archived.kind = .archived
         try store.add(archived)
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -152,7 +179,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         p.kind = .auto
         try store.add(p)
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -174,7 +201,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         p.kind = .auto
         try store.add(p)
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -194,7 +221,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         p.kind = .auto
         try store.add(p)
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -212,7 +239,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         p.kind = .auto
         try store.add(p)
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -229,7 +256,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                                ownershipBoundary: t0.addingTimeInterval(-500))
         try store.add(existing)
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -254,7 +281,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                                ownershipBoundary: t0.addingTimeInterval(-200))
         try store.add(archived)
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -281,7 +308,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         try store.add(pA)
         try store.add(pB)
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -304,7 +331,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                               email: "a@x.com", kind: .auto,
                               ownershipBoundary: originalBoundary))
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher, profileStore: store,
+        let coord = makeCoordinator(watcher: watcher, profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
         coord.start()
@@ -342,7 +369,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         let originalId = legacy.id
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher, profileStore: store,
+        let coord = makeCoordinator(watcher: watcher, profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
         coord.start()
@@ -373,7 +400,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         let originalId = legacy.id
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher, profileStore: store,
+        let coord = makeCoordinator(watcher: watcher, profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
         coord.start()
@@ -400,7 +427,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                               email: "a@x.com", kind: .archived))
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher, profileStore: store,
+        let coord = makeCoordinator(watcher: watcher, profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
         coord.start()
@@ -425,7 +452,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                               email: "a@x.com", kind: .archived))
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher, profileStore: store,
+        let coord = makeCoordinator(watcher: watcher, profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
         coord.start()
@@ -467,7 +494,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         let bId = archivedOtherOrg.id
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher, profileStore: store,
+        let coord = makeCoordinator(watcher: watcher, profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
         coord.start()
@@ -506,7 +533,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                               email: "a@x.com", kind: .auto))
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher, profileStore: store,
+        let coord = makeCoordinator(watcher: watcher, profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
         coord.start()
@@ -533,7 +560,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                               email: "a@x.com", kind: .archived))
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher, profileStore: store,
+        let coord = makeCoordinator(watcher: watcher, profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
         coord.start()
@@ -560,7 +587,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         let originalArchivedId = archivedA.id
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher, profileStore: store,
+        let coord = makeCoordinator(watcher: watcher, profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
         coord.start()
@@ -593,7 +620,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
             }
         )
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(
+        let coord = makeCoordinator(
             watcher: watcher,
             profileStore: store,
             keychain: keychain,
@@ -636,7 +663,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
             }
         )
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(
+        let coord = makeCoordinator(
             watcher: watcher,
             profileStore: store,
             keychain: keychain,
@@ -662,7 +689,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                             ownershipBoundary: t0)
         try store.add(stale)
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(
+        let coord = makeCoordinator(
             watcher: watcher,
             profileStore: store,
             profileFetcher: AlwaysNilOAuthProfileFetcher(),
@@ -707,7 +734,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         let reader = StubCredentialReader(stub: newToken)
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(
+        let coord = makeCoordinator(
             watcher: watcher,
             profileStore: store,
             keychain: kwotaKeychain,
@@ -746,7 +773,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
 
         let reader = StubCredentialReader(stub: token)
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(
+        let coord = makeCoordinator(
             watcher: watcher,
             profileStore: store,
             keychain: kwotaKeychain,
@@ -788,7 +815,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
             keychainProbe: { readerCallCount += 1; return nil }
         )
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(
+        let coord = makeCoordinator(
             watcher: watcher,
             profileStore: store,
             keychain: kwotaKeychain,
@@ -817,7 +844,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         try store.add(p1)
         try store.add(p2)
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -837,7 +864,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         try store.add(p)
         try store.setActive(id: p.id)
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -863,7 +890,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                               email: "h@x.com", kind: .auto,
                               ownershipBoundary: t0))
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -886,7 +913,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                               email: "h@x.com", kind: .auto,
                               ownershipBoundary: t0))
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -955,7 +982,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
             organizationName: nil, subscriptionStatus: nil, billingType: nil
         ))
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(
+        let coord = makeCoordinator(
             watcher: watcher, profileStore: store, keychain: kc,
             credentialReader: StubCredentialReader(stub: .cliToken(
                 accessToken: "T", refreshToken: "r", expiresAt: .distantFuture
@@ -983,7 +1010,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         let stub = StubOAuthProfileFetcher()
         // Default outcome is .success with planLabel: nil.
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(
+        let coord = makeCoordinator(
             watcher: watcher, profileStore: store, keychain: kc,
             credentialReader: StubCredentialReader(stub: .cliToken(
                 accessToken: "T", refreshToken: "r", expiresAt: .distantFuture
@@ -1013,7 +1040,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         let stub = StubOAuthProfileFetcher()
         stub.outcome = .failure(ClaudeAPIClient.APIError.unauthorized)
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(
+        let coord = makeCoordinator(
             watcher: watcher, profileStore: store, keychain: kc,
             credentialReader: StubCredentialReader(stub: .cliToken(
                 accessToken: "T", refreshToken: "r", expiresAt: .distantFuture
@@ -1050,7 +1077,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
             organizationName: nil, subscriptionStatus: nil, billingType: nil
         ))
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(
+        let coord = makeCoordinator(
             watcher: watcher, profileStore: store, keychain: kc,
             credentialReader: credReader,
             profileFetcher: stub,
@@ -1083,7 +1110,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         try store.setActive(id: codex.id)
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(
+        let coord = makeCoordinator(
             watcher: watcher,
             profileStore: store,
             profileFetcher: AlwaysNilOAuthProfileFetcher(),
@@ -1107,7 +1134,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         let store = makeStore()
         let watcher = FakeWatcher()  // current is nil — Claude CLI not logged in
         let keychain = KeychainCredentialStore(service: "com.thanhhaudev.Kwota.test.\(UUID())")
-        let coord = AutoProfileCoordinator(
+        let coord = makeCoordinator(
             watcher: watcher,
             profileStore: store,
             keychain: keychain,
@@ -1150,7 +1177,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         try store.setActive(id: codex.id)
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(
+        let coord = makeCoordinator(
             watcher: watcher,
             profileStore: store,
             profileFetcher: AlwaysNilOAuthProfileFetcher(),
@@ -1178,7 +1205,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         let store = makeStore()
         let stub = StubOAuthProfileFetcher()
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(
+        let coord = makeCoordinator(
             watcher: watcher, profileStore: store,
             profileFetcher: stub,
             clock: { self.t0 }
@@ -1201,7 +1228,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         try store.setActive(id: codexId)
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -1224,7 +1251,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         try store.setActive(id: codexId)
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -1247,7 +1274,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         try store.setActive(id: aId)
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -1268,7 +1295,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         try store.setActive(id: aId)
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -1284,7 +1311,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
     func test_firstEmit_persistedRemovedWhileClosed_autoDetects() throws {
         let store = makeStore()
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -1305,7 +1332,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         try store.setActive(id: aId)
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -1335,7 +1362,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         try store.setActive(id: claudeId)
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })
@@ -1359,7 +1386,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         try store.setActive(id: claudeId)
 
         let watcher = FakeWatcher()
-        let coord = AutoProfileCoordinator(watcher: watcher,
+        let coord = makeCoordinator(watcher: watcher,
                                             profileStore: store,
                                             profileFetcher: AlwaysNilOAuthProfileFetcher(),
                                             clock: { self.t0 })

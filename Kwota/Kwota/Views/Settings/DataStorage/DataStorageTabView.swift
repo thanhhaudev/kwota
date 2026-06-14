@@ -17,6 +17,11 @@ struct DataStorageTabView: View {
                     }
                     .id("data.storage")
 
+                    SettingsGroupedSection(caption: "Token stats") {
+                        ClearStatsCard(vm: vm)
+                    }
+                    .id("data.tokenstats")
+
                     SettingsGroupedSection(caption: "Usage history",
                                            footer: "Older entries are removed automatically when these limits are reached.") {
                         UsageHistoryCapsCard(vm: vm)

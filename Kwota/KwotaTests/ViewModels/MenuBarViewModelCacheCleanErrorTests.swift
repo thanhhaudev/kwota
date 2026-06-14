@@ -63,6 +63,7 @@ final class MenuBarViewModelCacheCleanErrorTests: XCTestCase {
         )
         return MenuBarViewModel(
             usage: usage,
+            statsStore: makeHermeticStatsStore(),
             cachePersistence: CachePersistenceStore(url: temp.file("cache-state.json")),
             profileStore: store,
             credentialStore: keychain,

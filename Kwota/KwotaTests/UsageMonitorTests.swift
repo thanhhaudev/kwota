@@ -1101,6 +1101,51 @@ final class UsageMonitorTests: XCTestCase {
         XCTAssertFalse(monitor.pendingFullWalkForTesting)
     }
 
+    // MARK: - onChangedPaths hook
+
+    func test_onChangedPaths_firesOnFullWalkWithNil() async {
+        let tmp = TempDirectory()
+        let reader = FakeJSONLogReader()
+        let clock = InMemoryClock(date("2026-04-26T12:00:00Z"))
+        let monitor = UsageMonitor(
+            reader: reader,
+            ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
+            appLaunchInstant: date("2026-04-26T11:00:00Z"),
+            clock: clock.dateProvider,
+            legacyDailyQuotaEstimate: 1_000
+        )
+        reader.queue = [[]]
+        monitor.ownership = .init(profileId: UUID(), boundary: .distantPast)
+        var fired: [Set<URL>?] = []
+        monitor.onChangedPaths = { fired.append($0) }
+        await monitor.tickAsync()           // full walk → nil
+        XCTAssertEqual(fired.count, 1)
+        XCTAssertNil(fired.first ?? nil)
+    }
+
+    func test_onChangedPaths_firesWithPathsOnIncrementalRead() async {
+        let tmp = TempDirectory()
+        let reader = FakeJSONLogReader()
+        let clock = InMemoryClock(date("2026-04-26T12:00:00Z"))
+        let monitor = UsageMonitor(
+            reader: reader,
+            ledgerURL: tmp.file("ledger.json"),
+            dailyCounterURL: tmp.file("daily-counter.json"),
+            appLaunchInstant: date("2026-04-26T11:00:00Z"),
+            clock: clock.dateProvider,
+            legacyDailyQuotaEstimate: 1_000
+        )
+        reader.queue = [[]]
+        monitor.ownership = .init(profileId: UUID(), boundary: .distantPast)
+        let paths: Set<URL> = [URL(fileURLWithPath: "/tmp/fake.jsonl")]
+        var fired: [Set<URL>?] = []
+        monitor.onChangedPaths = { fired.append($0) }
+        await monitor.tickAsync(only: paths)   // incremental read → paths
+        XCTAssertEqual(fired.count, 1)
+        XCTAssertEqual(fired.first ?? nil, paths)
+    }
+
     func testTickAsync_loopConsumesPendingFullWalk_afterIncremental() async {
         // First iteration: read(only:) with the call-site filter.
         // Deferred state has fullWalk=true, so second iteration is read().

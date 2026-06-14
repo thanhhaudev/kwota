@@ -112,6 +112,7 @@ final class MenuBarViewModelActivityForwardingTests: XCTestCase {
         let awakeDefaults = UserDefaults(suiteName: "kwota-activity-fwd-awake-\(UUID())")!
         return MenuBarViewModel(
             usage: usage,
+            statsStore: makeHermeticStatsStore(),
             caffeine: CaffeinateManager(holder: MockSleepAssertionHolder()),
             cachePersistence: CachePersistenceStore(url: temp.file("cache-state-\(UUID().uuidString).json")),
             profileStore: profileStore,

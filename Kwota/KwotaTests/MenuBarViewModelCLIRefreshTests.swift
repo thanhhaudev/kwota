@@ -231,6 +231,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         let (codexWatcher1, codexCoord1) = makeCodexStubs()
         let vm = MenuBarViewModel(
             usage: makeHermeticUsage(),
+            statsStore: makeHermeticStatsStore(),
             cachePersistence: makeHermeticCachePersistence(),
             profileStore: profileStore,
             credentialStore: keychain,
@@ -288,6 +289,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         let (codexWatcher2, codexCoord2) = makeCodexStubs()
         let vm = MenuBarViewModel(
             usage: makeHermeticUsage(),
+            statsStore: makeHermeticStatsStore(),
             cachePersistence: makeHermeticCachePersistence(),
             profileStore: profileStore,
             credentialStore: keychain,
@@ -343,6 +345,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         let (codexWatcher3, codexCoord3) = makeCodexStubs()
         let vm = MenuBarViewModel(
             usage: makeHermeticUsage(),
+            statsStore: makeHermeticStatsStore(),
             cachePersistence: makeHermeticCachePersistence(),
             profileStore: profileStore,
             credentialStore: keychain,
@@ -385,6 +388,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         let (codexWatcher4, codexCoord4) = makeCodexStubs()
         let vm = MenuBarViewModel(
             usage: makeHermeticUsage(),
+            statsStore: makeHermeticStatsStore(),
             cachePersistence: makeHermeticCachePersistence(),
             profileStore: profileStore,
             credentialStore: keychain,
@@ -443,6 +447,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         let (codexWatcher5, codexCoord5) = makeCodexStubs()
         let vm = MenuBarViewModel(
             usage: makeHermeticUsage(),
+            statsStore: makeHermeticStatsStore(),
             cachePersistence: makeHermeticCachePersistence(),
             profileStore: profileStore,
             credentialStore: keychain,
@@ -517,6 +522,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         let (codexWatcher6, codexCoord6) = makeCodexStubs()
         let vm = MenuBarViewModel(
             usage: makeHermeticUsage(),
+            statsStore: makeHermeticStatsStore(),
             cachePersistence: makeHermeticCachePersistence(),
             profileStore: profileStore,
             credentialStore: keychain,
@@ -559,6 +565,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         let (codexWatcher7, codexCoord7) = makeCodexStubs()
         let vm = MenuBarViewModel(
             usage: makeHermeticUsage(),
+            statsStore: makeHermeticStatsStore(),
             cachePersistence: makeHermeticCachePersistence(),
             profileStore: profileStore,
             credentialStore: keychain,
@@ -596,6 +603,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         let (codexWatcher8, codexCoord8) = makeCodexStubs()
         let vm = MenuBarViewModel(
             usage: makeHermeticUsage(),
+            statsStore: makeHermeticStatsStore(),
             cachePersistence: makeHermeticCachePersistence(),
             profileStore: profileStore,
             credentialStore: keychain,

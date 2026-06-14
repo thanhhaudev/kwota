@@ -18,17 +18,27 @@ final class PopoverTabVisibilityTests: XCTestCase {
         super.tearDown()
     }
 
-    func test_visibleTabs_defaultsToUsageAwakeCache() {
+    func test_visibleTabs_defaultsToUsageStatsAwakeCache() {
         let visibility = PopoverTabVisibility(defaults: defaults)
 
-        XCTAssertEqual(visibility.visibleTabs, [.usage, .awake, .cache])
+        XCTAssertEqual(visibility.visibleTabs, [.usage, .stats, .awake, .cache])
+    }
+
+    func test_statsTab_isVisibleByDefault_andHideable() {
+        let onByDefault = PopoverTabVisibility(defaults: defaults)
+        XCTAssertTrue(onByDefault.isVisible(.stats))
+
+        defaults.set(false, forKey: "display.popover.showStats")
+        let hidden = PopoverTabVisibility(defaults: defaults)
+        XCTAssertFalse(hidden.isVisible(.stats))
+        XCTAssertEqual(hidden.visibleTabs, [.usage, .awake, .cache])
     }
 
     func test_visibleTabs_omitsHiddenTabs() {
         defaults.set(false, forKey: "display.popover.showAwake")
         let visibility = PopoverTabVisibility(defaults: defaults)
 
-        XCTAssertEqual(visibility.visibleTabs, [.usage, .cache])
+        XCTAssertEqual(visibility.visibleTabs, [.usage, .stats, .cache])
         XCTAssertFalse(visibility.isVisible(.awake))
         XCTAssertTrue(visibility.isVisible(.usage))
     }

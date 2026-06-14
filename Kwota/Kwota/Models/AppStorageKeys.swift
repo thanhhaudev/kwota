@@ -17,6 +17,7 @@ enum AppStorageKeys {
     static let displayChartShowPaceHint    = "display.chart.showPaceHint"
     static let displayPopoverShowAwake     = "display.popover.showAwake"
     static let displayPopoverShowCache     = "display.popover.showCache"
+    static let displayPopoverShowStats     = "display.popover.showStats"
 
     // MARK: General
     static let generalPollingMode          = "general.pollingMode"
