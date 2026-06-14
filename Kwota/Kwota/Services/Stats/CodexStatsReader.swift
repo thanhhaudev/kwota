@@ -51,10 +51,13 @@ final class CodexStatsReader: JSONLogReader, @unchecked Sendable {
     func read(only paths: Set<URL>) -> [UsageEvent] {
         guard fm.fileExists(atPath: root.path) else { return [] }
         var emitted: [UsageEvent] = []
-        let rootPath = Self.canonicalize(root).path
+        // Trailing separator so the prefix test rejects sibling dirs like
+        // `~/.codex/sessions-backup/...` (a bare `hasPrefix("…/sessions")`
+        // would accept them and fold backup/synced history into the ledger).
+        let rootPrefix = Self.canonicalize(root).path + "/"
         for fileURL in paths {
             let normalized = Self.canonicalize(fileURL)
-            guard normalized.path.hasPrefix(rootPath) else { continue }
+            guard normalized.path.hasPrefix(rootPrefix) else { continue }
             guard normalized.pathExtension == "jsonl",
                   normalized.lastPathComponent.hasPrefix("rollout-") else { continue }
             readOne(normalized, into: &emitted)

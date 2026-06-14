@@ -113,6 +113,24 @@ final class CodexStatsReaderTests: XCTestCase {
         XCTAssertEqual(second[0].tokens.input, 7)
     }
 
+    func test_rejectsRolloutInSiblingBackupDir() {
+        // A `rollout-*.jsonl` under a sibling like `sessions-backup` must NOT be
+        // read by a reader rooted at `sessions` — the prefix check has to reject
+        // it rather than fold backup/synced history into the ledger.
+        let dir = TempDirectory(); tempDirs.append(dir)
+        let sessions = dir.url.appendingPathComponent("sessions")
+        try! FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let backup = dir.url.appendingPathComponent("sessions-backup/2026/05/20")
+        try! FileManager.default.createDirectory(at: backup, withIntermediateDirectories: true)
+        let backupFile = backup.appendingPathComponent("rollout-x.jsonl")
+        try! (([turnCtx, tokenCount(ts: "2026-05-20T03:47:21.048Z", input: 100, cached: 0, output: 10, reasoning: 0)]
+                .joined(separator: "\n")) + "\n")
+            .write(to: backupFile, atomically: true, encoding: .utf8)
+
+        let reader = CodexStatsReader(root: sessions)
+        XCTAssertTrue(reader.read(only: [backupFile]).isEmpty)   // sibling dir rejected
+    }
+
     func test_modelSurvivesStateRestoreRoundTrip() {
         let dir = TempDirectory(); tempDirs.append(dir)
         let sessionsRoot = dir.url.appendingPathComponent("sessions")
