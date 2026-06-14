@@ -46,4 +46,23 @@ final class AntigravityGenMetadataTests: XCTestCase {
         let blob = F.genBlob(input: 10, output: 999_000_000, cache: 0, thinking: 0, ts: 1_781_344_349)
         XCTAssertNil(decodeAntigravityGenMetadata(blob))   // output > 1e8 cap
     }
+
+    func test_decode_modelFallsBackToApiId_when1_21Absent() {
+        let blob = F.genBlob(input: 10, output: 5, cache: 0, thinking: 0, ts: nil,
+                             apiModel: "gemini-pro-api", displayModel: nil)
+        XCTAssertEqual(decodeAntigravityGenMetadata(blob)?.model, "gemini-pro-api")
+    }
+
+    func test_decode_returnsNil_on1_4_6Drift() {
+        let inner4 = F.vfield(1, 1016) + F.vfield(2, 10) + F.vfield(3, 20) + F.vfield(6, 99) + F.vfield(9, 0)
+        let blob = F.mfield(1, F.mfield(4, inner4))
+        XCTAssertNil(decodeAntigravityGenMetadata(blob))
+    }
+
+    func test_decode_returnsNilTimestamp_whenOutOfWindow() {
+        // 1_000_000_000 (Sep 2001) is below the plausibility floor ⇒ no timestamp.
+        let blob = F.genBlob(input: 10, output: 5, cache: 0, thinking: 0, ts: 1_000_000_000)
+        XCTAssertNil(decodeAntigravityGenMetadata(blob)?.timestamp)
+        XCTAssertNotNil(decodeAntigravityGenMetadata(blob)?.tokens)
+    }
 }

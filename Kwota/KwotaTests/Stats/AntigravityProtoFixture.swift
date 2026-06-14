@@ -71,7 +71,9 @@ enum AntigravityProtoFixture {
         let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
         for (offset, blob) in blobs.enumerated() {
             var stmt: OpaquePointer?
-            sqlite3_prepare_v2(handle, "INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?);", -1, &stmt, nil)
+            guard sqlite3_prepare_v2(handle, "INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?);", -1, &stmt, nil) == SQLITE_OK else {
+                throw NSError(domain: "agy-stats-test", code: 4)
+            }
             defer { sqlite3_finalize(stmt) }
             sqlite3_bind_int64(stmt, 1, Int64(startIdx + offset))
             _ = blob.withUnsafeBytes { buf in
