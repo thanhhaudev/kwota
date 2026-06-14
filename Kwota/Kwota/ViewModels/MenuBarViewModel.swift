@@ -557,6 +557,7 @@ final class MenuBarViewModel {
 
     let usage: UsageMonitor
     let statsStore: StatsStore
+    private let codexStatsWatcher: CodexStatsWatcher?
     let caffeine: CaffeinateManager
     let probe: ClaudeProbe
     let cache: CacheCleaner
@@ -574,6 +575,7 @@ final class MenuBarViewModel {
     init(
         usage: UsageMonitor? = nil,
         statsStore: StatsStore? = nil,
+        codexStatsWatcher: CodexStatsWatcher? = nil,
         caffeine: CaffeinateManager? = nil,
         probe: ClaudeProbe? = nil,
         cache: CacheCleaner? = nil,
@@ -613,10 +615,19 @@ final class MenuBarViewModel {
     ) {
         self.now = now
         self.usage    = usage    ?? UsageMonitor.live()
-        // Stats reader: its OWN FilesystemJSONLogReader instance + offsets, so
-        // first launch backfills ~/.claude history and later ticks are
-        // incremental. Driven by usage.onChangedPaths below — no 2nd watcher.
-        self.statsStore = statsStore ?? StatsStore(reader: FilesystemJSONLogReader())
+        // Stats readers: Claude tails ~/.claude (driven by usage.onChangedPaths);
+        // Codex tails ~/.codex/sessions (driven by the CodexStatsWatcher below).
+        // Each keeps its own offsets so backfill/incremental is correct per provider.
+        self.statsStore = statsStore ?? StatsStore(readers: [
+            .claude: FilesystemJSONLogReader(),
+            .codex: CodexStatsReader(),
+        ])
+        // Codex stats need their own live watcher (the Codex activity source is
+        // inside the awake CompositeActivitySource and not reachable here).
+        // Live-only + injectable so non-live test hosts never touch real ~/.codex.
+        let resolvedCodexStatsWatcher = codexStatsWatcher
+            ?? (startupMode == .live ? CodexStatsWatcher() : nil)
+        self.codexStatsWatcher = resolvedCodexStatsWatcher
         self.caffeine = caffeine ?? CaffeinateManager()
         self.probe    = probe    ?? ClaudeProbe()
         self.cache    = cache    ?? CacheCleaner()
@@ -867,6 +878,11 @@ final class MenuBarViewModel {
                 await self?.statsStore.readChanged(paths, provider: .claude)
             }
         }
+        resolvedCodexStatsWatcher?.onChangedPaths = { [weak self] paths in
+            Task { @MainActor in
+                await self?.statsStore.readChanged(paths, provider: .codex)
+            }
+        }
 
         resolvedNotifier.isPermissionDeniedPublisher
             .receive(on: RunLoop.main)
@@ -904,6 +920,7 @@ final class MenuBarViewModel {
                     await self?.activityHistorian.backfillProvidersAsync(scanners)
                 }
             }
+            resolvedCodexStatsWatcher?.start()
             // Migrator runs FIRST so an in-place promotion (legacy active
             // profile gets kind=.auto + a real ownershipBoundary) is reflected
             // in the immediately-following ownership rebind. Without this order
