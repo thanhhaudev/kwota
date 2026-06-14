@@ -640,7 +640,7 @@ final class UsageMonitor: ObservableObject {
     private func persistLedger() {
         pendingLedgerPersist?.cancel()
         let snapshot = ledger
-        let readerSnapshot = reader.state()   // ≤100 fileExists checks; ≤1 Hz under debounce; safe on main
+        let readerSnapshot = reader.state()   // in-memory cursor snapshot (no fileExists); called only post-read from ingest, so it never races the off-main read()
         let url = ledgerURL
         let onWrite = persistDidWriteForTesting
         let action: () -> Void = {

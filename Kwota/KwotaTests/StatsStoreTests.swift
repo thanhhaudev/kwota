@@ -282,6 +282,39 @@ final class StatsStoreTests: XCTestCase {
 
         XCTAssertFalse(claude.stateCalledDuringRead, "reader was snapshotted during a live read")
     }
+
+    /// The reviewer's specific worry: a Clear during an in-flight read must NOT
+    /// leave the PRE-read cursor on disk, or the next launch re-reads (and
+    /// re-counts) the history that was just wiped. After clear-during-read +
+    /// exit-flush, the persisted cursor must be the post-read (advanced) one.
+    func test_clearDuringInFlightRead_persistsAdvancedCursor() async {
+        let dir = TempDirectory()
+        let url = dir.url.appendingPathComponent("stats-ledger.json")
+        let claude = GatedReader()
+        claude.offsetAfterRead = 100   // read() advances the cursor 0 → 100
+        claude.events = [UsageEvent(uuid: "h1", sessionId: "s",
+                                    timestamp: date("2026-06-13T03:00:00.000Z"),
+                                    tokens: TokenBreakdown(input: 100), model: "opus")]
+        let store = StatsStore(readers: [.claude: claude], ledgerURL: url,
+                               clock: { self.date("2026-06-13T10:00:00.000Z") }, persistDebounce: 0)
+
+        let entered = expectation(description: "read in-flight")
+        claude.onEntered = { entered.fulfill() }
+        let first = Task { await store.readChanged(nil, provider: .claude) }
+        await fulfillment(of: [entered], timeout: 2)
+        store.clear(provider: .claude)   // persists with the stale (offset 0) cache
+        claude.proceed.signal()
+        await first.value
+        store.flush()                    // exit path
+
+        // Reload with a fresh reader: it must restore the ADVANCED cursor (100),
+        // so the wiped history is not re-read.
+        let claude2 = GatedReader()
+        let reloaded = StatsStore(readers: [.claude: claude2], ledgerURL: url,
+                                  clock: { self.date("2026-06-13T10:00:00.000Z") }, persistDebounce: 0)
+        XCTAssertEqual(claude2.restoredOffset, 100, "stale pre-read cursor was persisted")
+        XCTAssertEqual(reloaded.total(provider: .claude, sinceDay: nil), .zero, "clear didn't survive reload")
+    }
 }
 
 /// Test reader whose `read()` signals `onEntered` and then blocks on `proceed`,
@@ -296,11 +329,18 @@ private final class GatedReader: JSONLogReader, @unchecked Sendable {
     /// here, something snapshotted the reader during a live read (a data race).
     private(set) var inRead = false
     private(set) var stateCalledDuringRead = false
+    /// Simulated cursor: `read()` advances it to `offsetAfterRead`, and `state()`
+    /// surfaces it — so a test can prove the persisted envelope carries the
+    /// post-read cursor, not a stale pre-read one.
+    var offsetAfterRead: UInt64 = 0
+    private var currentOffset: UInt64 = 0
+    private(set) var restoredOffset: UInt64?
 
     func read() -> [UsageEvent] {
         inRead = true
         onEntered?()
         proceed.wait()
+        currentOffset = offsetAfterRead
         inRead = false
         return events
     }
@@ -308,6 +348,7 @@ private final class GatedReader: JSONLogReader, @unchecked Sendable {
     func lastSeenLine() -> String? { nil }
     func state() -> ReaderState {
         if inRead { stateCalledDuringRead = true }
-        return ReaderState()
+        return ReaderState(entries: ["f": .init(offset: currentOffset, mtime: .distantPast)])
     }
+    func restore(_ state: ReaderState) { restoredOffset = state.entries["f"]?.offset }
 }
