@@ -35,6 +35,18 @@ enum AppPaths {
             .appendingPathComponent("state.vscdb")
     }
 
+    /// Antigravity conversation SQLite DBs. Per-turn token usage lives in each
+    /// DB's `gen_metadata` table. The IDE and the `agy` CLI keep separate trees.
+    /// Read-only consumers must open these with `SQLITE_OPEN_READONLY` + the
+    /// `unix-none` VFS (the DBs are WAL-mode while Antigravity runs).
+    static var antigravityConversationDirs: [URL] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return [
+            home.appendingPathComponent(".gemini/antigravity/conversations", isDirectory: true),
+            home.appendingPathComponent(".gemini/antigravity-cli/conversations", isDirectory: true),
+        ]
+    }
+
     static var profilesFile: URL {
         applicationSupportDirectory.appendingPathComponent("profiles.json")
     }
