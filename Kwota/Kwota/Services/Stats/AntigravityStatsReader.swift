@@ -23,6 +23,7 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
     private let clock: () -> Date
     private var offsets: [URL: UInt64] = [:]   // high-water idx consumed per DB
     private var mtimes: [URL: Date] = [:]
+    private var gateSig: [URL: String] = [:]   // change-detection signature (main + -wal)
     private let lastLineLock = OSAllocatedUnfairLock<String?>(initialState: nil)
 
     init(roots: [URL] = AppPaths.antigravityConversationDirs,
@@ -43,6 +44,7 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
         let live = Set(dbs)
         offsets = offsets.filter { live.contains($0.key) }
         mtimes = mtimes.filter { live.contains($0.key) }
+        gateSig = gateSig.filter { live.contains($0.key) }
         for db in dbs { readOne(db, into: &emitted) }
         return emitted
     }
@@ -61,8 +63,13 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
     private func readOne(_ db: URL, into emitted: inout [UsageEvent]) {
         let attrs = (try? fm.attributesOfItem(atPath: db.path)) ?? [:]
         let mtime = attrs[.modificationDate] as? Date
-        // mtime gate: skip an unchanged DB we've already consumed (no sqlite open).
-        if let known = mtimes[db], let mtime, known == mtime, offsets[db] != nil { return }
+        // These DBs are WAL-mode: an appended turn lands in `<db>-wal` and does NOT
+        // bump the main DB's mtime/size until a checkpoint. Gate on a signature that
+        // spans the main file AND its -wal sidecar (size is the reliable per-commit
+        // signal), or live updates are skipped until a checkpoint.
+        let sig = changeSignature(db, attrs: attrs)
+        if let known = gateSig[db], known == sig, offsets[db] != nil { return }
+        gateSig[db] = sig
         if let mtime { mtimes[db] = mtime }
 
         guard let handle = openReadOnly(db) else { return }   // soft-degrade: keep cursor, skip
@@ -118,6 +125,15 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
                 level: .warn)
         }
         if let maxSeen { offsets[db] = maxSeen }
+    }
+
+    private func changeSignature(_ db: URL, attrs: [FileAttributeKey: Any]) -> String {
+        let dbMtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let dbSize = (attrs[.size] as? UInt64) ?? 0
+        let walAttrs = try? fm.attributesOfItem(atPath: db.path + "-wal")
+        let walMtime = (walAttrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let walSize = (walAttrs?[.size] as? UInt64) ?? 0
+        return "\(dbMtime)|\(dbSize)|\(walMtime)|\(walSize)"
     }
 
     private func maxIdx(_ handle: OpaquePointer) -> UInt64? {

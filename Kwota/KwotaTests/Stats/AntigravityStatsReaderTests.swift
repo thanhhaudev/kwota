@@ -2,6 +2,7 @@
 //  KwotaTests
 
 import XCTest
+import SQLite3
 @testable import Kwota
 
 final class AntigravityStatsReaderTests: XCTestCase {
@@ -127,6 +128,36 @@ final class AntigravityStatsReaderTests: XCTestCase {
         let after = reader.read()
         XCTAssertEqual(after.count, 1)            // re-read from scratch, not skipped
         XCTAssertEqual(after[0].tokens.input, 999)
+    }
+
+    /// WAL-mode append: a new row lands in the `-wal` sidecar without changing
+    /// the main DB file's mtime/size. The gate must not skip it (it must read
+    /// the new WAL-committed row), or live token usage goes missing until a
+    /// checkpoint. Faithful repro: a held-open WAL writer that never checkpoints.
+    func test_read_walAppendNotSkipped_whenMainDbUnchanged() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agy-wal-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = root.appendingPathComponent("\(UUID().uuidString).db")
+
+        let writer = try F.openWALWriter(db: db)
+        defer { sqlite3_close(writer) }
+
+        try F.insertWAL(writer, blobs: [F.genBlob(input: 100, output: 10, cache: 0, thinking: 0, ts: 1_781_344_340)], startIdx: 0)
+        let reader = AntigravityStatsReader(roots: [root])
+        XCTAssertEqual(reader.read().count, 1, "first read should see the WAL-committed row 0")
+
+        let mainBefore = try FileManager.default.attributesOfItem(atPath: db.path)
+        try F.insertWAL(writer, blobs: [F.genBlob(input: 200, output: 20, cache: 0, thinking: 0, ts: 1_781_344_350)], startIdx: 1)
+        let mainAfter = try FileManager.default.attributesOfItem(atPath: db.path)
+        // Sanity: the WAL append really did leave the main DB file unchanged.
+        XCTAssertEqual(mainBefore[.size] as? UInt64, mainAfter[.size] as? UInt64)
+        XCTAssertEqual(mainBefore[.modificationDate] as? Date, mainAfter[.modificationDate] as? Date)
+
+        let events = reader.read()
+        XCTAssertEqual(events.count, 1, "WAL append must not be skipped by the change gate")
+        XCTAssertEqual(events[0].tokens.input, 200)
     }
 
     /// A DB with an empty gen_metadata table emits nothing and records no cursor.

@@ -83,4 +83,42 @@ enum AntigravityProtoFixture {
             guard sqlite3_step(stmt) == SQLITE_DONE else { throw NSError(domain: "agy-stats-test", code: 3) }
         }
     }
+
+    /// Open a WAL-mode writer connection on `db` and return the open handle.
+    /// The caller MUST keep it open (and `sqlite3_close` it at end of test) so
+    /// inserted rows stay in the `-wal` sidecar (no checkpoint migrates them to
+    /// the main DB file) — faithfully reproducing Antigravity's live WAL writes.
+    static func openWALWriter(db: URL) throws -> OpaquePointer {
+        var ptr: OpaquePointer?
+        guard sqlite3_open_v2(db.path, &ptr,
+                              SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK,
+              let handle = ptr else { throw NSError(domain: "agy-stats-test", code: 10) }
+        sqlite3_exec(handle, "PRAGMA journal_mode=WAL;", nil, nil, nil)
+        sqlite3_exec(handle, "PRAGMA wal_autocheckpoint=0;", nil, nil, nil)
+        guard sqlite3_exec(handle,
+            "CREATE TABLE IF NOT EXISTS gen_metadata (idx INTEGER PRIMARY KEY, data BLOB, size INTEGER NOT NULL DEFAULT 0);",
+            nil, nil, nil) == SQLITE_OK else {
+            sqlite3_close(handle); throw NSError(domain: "agy-stats-test", code: 11)
+        }
+        return handle
+    }
+
+    /// Insert `blobs` (idx from `startIdx`) on an open WAL-writer handle, committed
+    /// to the WAL but NOT checkpointed.
+    static func insertWAL(_ handle: OpaquePointer, blobs: [Data], startIdx: Int) throws {
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        for (offset, blob) in blobs.enumerated() {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, "INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?);", -1, &stmt, nil) == SQLITE_OK else {
+                throw NSError(domain: "agy-stats-test", code: 12)
+            }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int64(stmt, 1, Int64(startIdx + offset))
+            _ = blob.withUnsafeBytes { buf in
+                sqlite3_bind_blob(stmt, 2, buf.baseAddress, Int32(buf.count), transient)
+            }
+            sqlite3_bind_int64(stmt, 3, Int64(blob.count))
+            guard sqlite3_step(stmt) == SQLITE_DONE else { throw NSError(domain: "agy-stats-test", code: 13) }
+        }
+    }
 }
