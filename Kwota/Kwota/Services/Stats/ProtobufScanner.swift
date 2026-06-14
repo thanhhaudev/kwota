@@ -50,7 +50,7 @@ enum ProtobufScanner {
                     guard let n = safeLength(4, cursor: cursor, in: data) else { return }
                     cursor = data.index(cursor, offsetBy: n)
                 default:
-                    return
+                    if !skipField(data, &cursor, tag: tag) { return }
                 }
             }
         }
@@ -70,7 +70,7 @@ enum ProtobufScanner {
             result |= UInt64(byte & 0x7f) << shift
             if byte & 0x80 == 0 { return result }
             shift += 7; read += 1
-            if read > 10 { return nil }
+            if read >= 10 { return nil }
         }
         return nil
     }

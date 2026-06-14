@@ -37,8 +37,24 @@ final class ProtobufScannerTests: XCTestCase {
 
     /// A truncated length-delimited field must not crash; scan returns what it had.
     func test_scan_returnsCleanlyOnTruncation() {
-        let blob = Data([0x0a, 0xff])   // field 1, len 0x7f… but no payload
+        let blob = Data([0x0a, 0xff])   // field 1, wire=2, length varint truncated mid-read
         let r = ProtobufScanner.scan(blob, wanted: ["1.4.2"])
         XCTAssertNil(r.varints["1.4.2"]?.first)
+    }
+
+    /// A valid length that overruns the remaining payload must be rejected by
+    /// safeLength (not trap, not over-read).
+    func test_scan_rejectsLengthOverrunningPayload() {
+        // field 1, wire=2, len=4, but only 2 payload bytes follow.
+        let blob = Data([0x0a, 0x04, 0xde, 0xad])
+        let r = ProtobufScanner.scan(blob, wanted: ["1"])
+        XCTAssertNil(r.strings["1"]?.first)
+    }
+
+    /// Empty input yields an empty result, no crash.
+    func test_scan_handlesEmptyInput() {
+        let r = ProtobufScanner.scan(Data(), wanted: ["1.2.3"])
+        XCTAssertTrue(r.varints.isEmpty)
+        XCTAssertTrue(r.strings.isEmpty)
     }
 }
