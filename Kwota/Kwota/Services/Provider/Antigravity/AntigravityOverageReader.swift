@@ -153,14 +153,14 @@ func decodeModelCreditsState(_ data: Data) -> AntigravityModelCredits {
     var minimum: Int64?
     var cursor = data.startIndex
     while cursor < data.endIndex {
-        guard let tag = readVarint(data, &cursor) else { break }
+        guard let tag = ProtobufScanner.readVarint(data, &cursor) else { break }
         // We only care about field 1, wire-type 2 (= 0x0a). Skip others.
         if tag != 0x0a {
-            guard skipField(data, &cursor, tag: tag) else { break }
+            guard ProtobufScanner.skipField(data, &cursor, tag: tag) else { break }
             continue
         }
-        guard let entryLen = readVarint(data, &cursor),
-              let n = safeLength(entryLen, cursor: cursor, in: data)
+        guard let entryLen = ProtobufScanner.readVarint(data, &cursor),
+              let n = ProtobufScanner.safeLength(entryLen, cursor: cursor, in: data)
         else { break }
         let entryEnd = data.index(cursor, offsetBy: n)
         let entry = Data(data[cursor..<entryEnd])
@@ -199,25 +199,25 @@ private func decodeKVEntry(_ data: Data) -> (key: String, value: UInt64)? {
     var key: String?
     var valueBytes: Data?
     while cursor < data.endIndex {
-        guard let tag = readVarint(data, &cursor) else { return nil }
+        guard let tag = ProtobufScanner.readVarint(data, &cursor) else { return nil }
         switch tag {
         case 0x0a: // string key
-            guard let len = readVarint(data, &cursor),
-                  let n = safeLength(len, cursor: cursor, in: data)
+            guard let len = ProtobufScanner.readVarint(data, &cursor),
+                  let n = ProtobufScanner.safeLength(len, cursor: cursor, in: data)
             else { return nil }
             let end = data.index(cursor, offsetBy: n)
             guard let s = String(data: data[cursor..<end], encoding: .utf8) else { return nil }
             key = s
             cursor = end
         case 0x12: // value bytes (contains the base64-string proto)
-            guard let len = readVarint(data, &cursor),
-                  let n = safeLength(len, cursor: cursor, in: data)
+            guard let len = ProtobufScanner.readVarint(data, &cursor),
+                  let n = ProtobufScanner.safeLength(len, cursor: cursor, in: data)
             else { return nil }
             let end = data.index(cursor, offsetBy: n)
             valueBytes = Data(data[cursor..<end])
             cursor = end
         default:
-            guard skipField(data, &cursor, tag: tag) else { return nil }
+            guard ProtobufScanner.skipField(data, &cursor, tag: tag) else { return nil }
         }
     }
     guard let key, let value = decodeInnerSentinel(valueBytes) else { return nil }
@@ -234,80 +234,18 @@ private func decodeKVEntry(_ data: Data) -> (key: String, value: UInt64)? {
 private func decodeInnerSentinel(_ bytes: Data?) -> UInt64? {
     guard let bytes = bytes else { return nil }
     var cursor = bytes.startIndex
-    guard let tag = readVarint(bytes, &cursor), tag == 0x0a,
-          let len = readVarint(bytes, &cursor),
-          let n = safeLength(len, cursor: cursor, in: bytes)
+    guard let tag = ProtobufScanner.readVarint(bytes, &cursor), tag == 0x0a,
+          let len = ProtobufScanner.readVarint(bytes, &cursor),
+          let n = ProtobufScanner.safeLength(len, cursor: cursor, in: bytes)
     else { return nil }
     let end = bytes.index(cursor, offsetBy: n)
     guard let b64 = String(data: bytes[cursor..<end], encoding: .ascii),
           let inner = Data(base64Encoded: b64)
     else { return nil }
     var innerCursor = inner.startIndex
-    guard let innerTag = readVarint(inner, &innerCursor),
+    guard let innerTag = ProtobufScanner.readVarint(inner, &innerCursor),
           innerTag == 0x08 || innerTag == 0x10,
-          let value = readVarint(inner, &innerCursor)
+          let value = ProtobufScanner.readVarint(inner, &innerCursor)
     else { return nil }
     return value
-}
-
-// MARK: - Protobuf varint primitives
-
-/// Read a base-128 varint at `cursor`, advancing it. Returns nil on
-/// truncation. Caps at 10 bytes (proto3 max).
-private func readVarint(_ data: Data, _ cursor: inout Data.Index) -> UInt64? {
-    var result: UInt64 = 0
-    var shift: UInt64 = 0
-    var read = 0
-    while cursor < data.endIndex {
-        let byte = data[cursor]
-        cursor = data.index(after: cursor)
-        result |= UInt64(byte & 0x7f) << shift
-        if byte & 0x80 == 0 { return result }
-        shift += 7
-        read += 1
-        if read > 10 { return nil }
-    }
-    return nil
-}
-
-/// Skip an unknown field given its tag. Wire types:
-///   0 varint, 1 fixed64, 2 length-delimited, 5 fixed32. We never see
-///   1 or 5 in this DB but handle them so a schema bump won't crash.
-private func skipField(_ data: Data, _ cursor: inout Data.Index, tag: UInt64) -> Bool {
-    let wireType = tag & 0x7
-    switch wireType {
-    case 0:
-        return readVarint(data, &cursor) != nil
-    case 1:
-        guard let n = safeLength(8, cursor: cursor, in: data) else { return false }
-        cursor = data.index(cursor, offsetBy: n)
-        return true
-    case 2:
-        guard let len = readVarint(data, &cursor),
-              let n = safeLength(len, cursor: cursor, in: data)
-        else { return false }
-        cursor = data.index(cursor, offsetBy: n)
-        return true
-    case 5:
-        guard let n = safeLength(4, cursor: cursor, in: data) else { return false }
-        cursor = data.index(cursor, offsetBy: n)
-        return true
-    default:
-        return false
-    }
-}
-
-/// Convert a wire-encoded `UInt64` length into a safe `Int` byte count,
-/// or nil if the length doesn't fit in `Int` or would overrun the
-/// remaining buffer from `cursor`. Used by every length-delimited
-/// decode step so a torn-page / schema-drift blob can never trap on
-/// `Int(len)` cast or on `cursor + Int(len)` arithmetic.
-///
-/// 64-bit macOS: `Int(exactly:)` rejects any `UInt64` > `Int.max`
-/// (which the unchecked `Int(_:)` cast would otherwise trap on).
-private func safeLength(_ len: UInt64, cursor: Data.Index, in data: Data) -> Int? {
-    guard let n = Int(exactly: len) else { return nil }
-    let remaining = data.distance(from: cursor, to: data.endIndex)
-    guard n >= 0, n <= remaining else { return nil }
-    return n
 }
