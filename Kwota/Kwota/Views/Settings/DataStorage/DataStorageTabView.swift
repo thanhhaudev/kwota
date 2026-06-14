@@ -18,7 +18,9 @@ struct DataStorageTabView: View {
                     .id("data.storage")
 
                     SettingsGroupedSection(caption: "Token stats") {
-                        ClearStatsCard(vm: vm)
+                        ClearStatsCard(vm: vm, provider: .claude)
+                        SettingsSectionDivider()
+                        ClearStatsCard(vm: vm, provider: .codex)
                     }
                     .id("data.tokenstats")
 
