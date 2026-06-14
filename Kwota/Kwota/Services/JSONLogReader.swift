@@ -94,7 +94,15 @@ final class FilesystemJSONLogReader: JSONLogReader, @unchecked Sendable {
     func read() -> [UsageEvent] {
         guard fm.fileExists(atPath: root.path) else { return [] }
         var emitted: [UsageEvent] = []
-        for fileURL in discoverFiles() {
+        let files = discoverFiles()
+        // Prune cursors for files that no longer exist HERE, on the full walk,
+        // rather than stat'ing every cursor inside `state()` on the persist hot
+        // path. `discoverFiles()` already enumerated the live set, so this costs
+        // no extra syscalls and keeps the persisted snapshot bounded.
+        let live = Set(files)
+        offsets = offsets.filter { live.contains($0.key) }
+        mtimes = mtimes.filter { live.contains($0.key) }
+        for fileURL in files {
             readOne(fileURL, into: &emitted)
         }
         return emitted
@@ -113,8 +121,10 @@ final class FilesystemJSONLogReader: JSONLogReader, @unchecked Sendable {
             // full read() would land in two different dictionary keys.
             let normalized = Self.canonicalize(fileURL)
             // Defense-in-depth: only consume paths under our root. FSEvents
-            // can (rarely) deliver paths outside the watched dir.
-            guard normalized.path.hasPrefix(Self.canonicalize(root).path) else { continue }
+            // can (rarely) deliver paths outside the watched dir. Trailing
+            // separator so a sibling like `projects-backup` isn't accepted by
+            // a bare prefix match on `projects`.
+            guard normalized.path.hasPrefix(Self.canonicalize(root).path + "/") else { continue }
             guard normalized.pathExtension == "jsonl" else { continue }
             readOne(normalized, into: &emitted)
         }
@@ -234,10 +244,12 @@ final class FilesystemJSONLogReader: JSONLogReader, @unchecked Sendable {
     // `restore()` before its first `read()` and `state()` after a read
     // completes, so they share the same single-task confinement.
     func state() -> ReaderState {
+        // Pure in-memory snapshot — no per-file `fileExists`. This runs on the
+        // persist hot path (every ingest, on the main actor), so stat'ing every
+        // tracked cursor here was O(history) syscalls per event batch. Dead
+        // cursors are dropped instead on the next full `read()` walk.
         var snapshot: [String: ReaderState.Entry] = [:]
         for (url, offset) in offsets {
-            // Drop entries whose file no longer exists.
-            guard fm.fileExists(atPath: url.path) else { continue }
             let mtime = mtimes[url] ?? .distantPast
             snapshot[url.path] = .init(offset: offset, mtime: mtime)
         }

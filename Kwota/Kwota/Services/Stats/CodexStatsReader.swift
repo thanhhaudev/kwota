@@ -44,7 +44,14 @@ final class CodexStatsReader: JSONLogReader, @unchecked Sendable {
     func read() -> [UsageEvent] {
         guard fm.fileExists(atPath: root.path) else { return [] }
         var emitted: [UsageEvent] = []
-        for fileURL in discoverFiles() { readOne(fileURL, into: &emitted) }
+        let files = discoverFiles()
+        // Prune cursors (+ models) for vanished files on the full walk, so
+        // `state()` stays a syscall-free in-memory snapshot on the persist path.
+        let live = Set(files)
+        offsets = offsets.filter { live.contains($0.key) }
+        mtimes = mtimes.filter { live.contains($0.key) }
+        models = models.filter { live.contains($0.key) }
+        for fileURL in files { readOne(fileURL, into: &emitted) }
         return emitted
     }
 
@@ -150,9 +157,10 @@ final class CodexStatsReader: JSONLogReader, @unchecked Sendable {
     }
 
     func state() -> ReaderState {
+        // Syscall-free in-memory snapshot (runs on the persist hot path); dead
+        // cursors are pruned on the next full `read()` walk, not stat'd here.
         var snapshot: [String: ReaderState.Entry] = [:]
         for (url, offset) in offsets {
-            guard fm.fileExists(atPath: url.path) else { continue }
             snapshot[url.path] = .init(offset: offset, mtime: mtimes[url] ?? .distantPast, model: models[url])
         }
         return ReaderState(entries: snapshot)

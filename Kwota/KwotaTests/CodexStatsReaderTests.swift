@@ -113,6 +113,20 @@ final class CodexStatsReaderTests: XCTestCase {
         XCTAssertEqual(second[0].tokens.input, 7)
     }
 
+    func test_fullReadPrunesCursorsForDeletedFiles() {
+        // `state()` no longer stats per cursor; the full `read()` walk is what
+        // drops cursors for vanished files, keeping the snapshot bounded.
+        let (reader, file, _) = makeReader([
+            turnCtx,
+            tokenCount(ts: "2026-05-20T03:47:21.048Z", input: 100, cached: 0, output: 10, reasoning: 0),
+        ])
+        _ = reader.read()
+        XCTAssertFalse(reader.state().entries.isEmpty)        // cursor recorded
+        try! FileManager.default.removeItem(at: file)
+        _ = reader.read()                                     // full walk prunes it
+        XCTAssertTrue(reader.state().entries.isEmpty)         // cursor dropped
+    }
+
     func test_rejectsRolloutInSiblingBackupDir() {
         // A `rollout-*.jsonl` under a sibling like `sessions-backup` must NOT be
         // read by a reader rooted at `sessions` — the prefix check has to reject

@@ -156,7 +156,7 @@ final class JSONLogReaderTests: XCTestCase {
         XCTAssertTrue(events.isEmpty, "restoring offset must mean read() emits no events for unchanged content")
     }
 
-    func testState_prunesEntriesForDeletedFiles() throws {
+    func testFullRead_prunesEntriesForDeletedFiles() throws {
         let tmp = TempDirectory()
         let projects = tmp.file("projects")
         try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
@@ -169,9 +169,14 @@ final class JSONLogReaderTests: XCTestCase {
         _ = reader.read()
         XCTAssertEqual(reader.state().entries.count, 1)
 
+        // `state()` is a syscall-free in-memory snapshot now (it runs on the
+        // persist hot path), so deleting the file does NOT immediately drop the
+        // cursor — the full `read()` walk is what prunes it.
         try FileManager.default.removeItem(at: file)
-        let pruned = reader.state()
-        XCTAssertEqual(pruned.entries.count, 0, "state() must drop entries for files no longer on disk")
+        XCTAssertEqual(reader.state().entries.count, 1, "state() no longer stats the filesystem")
+
+        _ = reader.read()
+        XCTAssertEqual(reader.state().entries.count, 0, "full read() drops cursors for files no longer on disk")
     }
 
     func testStateIsCodable() throws {
