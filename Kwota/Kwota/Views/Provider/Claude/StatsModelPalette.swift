@@ -20,7 +20,8 @@ enum StatsModelPalette {
         "opus": .blue,
         "sonnet": .orange,
         "haiku": .teal,
-        "fable": .pink
+        "fable": .pink,
+        "gpt": .teal
     ]
 
     static func color(for model: String) -> Color {

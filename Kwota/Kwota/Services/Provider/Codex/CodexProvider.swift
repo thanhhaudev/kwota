@@ -227,6 +227,10 @@ final class CodexProvider: AccountProvider {
         ))
     }
 
+    func statsDetailView(store: StatsStore, profile: Profile) -> AnyView {
+        AnyView(StatsDetailView(store: store, provider: .codex, profile: profile))
+    }
+
     func planBadgeView(profile: Profile) -> AnyView {
         AnyView(PlanTextBadge(plan: profile.subscriptionPlan))
     }

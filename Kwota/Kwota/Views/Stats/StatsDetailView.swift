@@ -1,13 +1,14 @@
 //
-//  ClaudeStatsDetailView.swift
+//  StatsDetailView.swift
 //  Kwota
 //
 
 import SwiftUI
 import Charts
 
-struct ClaudeStatsDetailView: View {
+struct StatsDetailView: View {
     let store: StatsStore
+    let provider: ProviderID
     let profile: Profile
 
     enum Range: String, CaseIterable, Identifiable {
@@ -42,7 +43,7 @@ struct ClaudeStatsDetailView: View {
         // the UTC daily ledger.
         let byModel = range == .today
             ? hourlyTotalsByModel
-            : store.totalsByModel(provider: .claude, sinceDay: sinceDay)
+            : store.totalsByModel(provider: provider, sinceDay: sinceDay)
         return byModel
             .map { (model: $0.key, tokens: $0.value) }
             .sorted { $0.tokens.billable > $1.tokens.billable }
@@ -51,7 +52,7 @@ struct ClaudeStatsDetailView: View {
     /// Per-model totals for the local "today" summed from the hourly rollup.
     private var hourlyTotalsByModel: [String: TokenBreakdown] {
         var out: [String: TokenBreakdown] = [:]
-        for entry in store.hourlySeries(provider: .claude, dayKey: store.currentDayKey()) {
+        for entry in store.hourlySeries(provider: provider, dayKey: store.currentDayKey()) {
             for (model, tokens) in entry.byModel {
                 out[model] = (out[model] ?? .zero) + tokens
             }
@@ -62,7 +63,7 @@ struct ClaudeStatsDetailView: View {
     /// Provider has recorded usage in *some* range (all-time, range-independent).
     /// Distinguishes "brand new" from "selected range is empty".
     private var hasAnyData: Bool {
-        store.total(provider: .claude, sinceDay: nil) != .zero
+        store.total(provider: provider, sinceDay: nil) != .zero
     }
 
     /// Two equal columns for the per-model mini-card grid. Two (not three) so a
@@ -80,7 +81,7 @@ struct ClaudeStatsDetailView: View {
                 ContentUnavailableView {
                     Label("No Token Usage Yet", systemImage: "chart.bar.xaxis")
                 } description: {
-                    Text("Token usage will appear here as you work with Claude. Stats are kept until you clear them.")
+                    Text("Token usage will appear here as you work with \(provider.displayName). Stats are kept until you clear them.")
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -115,7 +116,7 @@ struct ClaudeStatsDetailView: View {
                     .font(.title2).foregroundStyle(.secondary)
                 Text("No usage in \(range.menuLabel.lowercased())")
                     .font(.callout).fontWeight(.semibold)
-                Text("Try a wider range, or come back after using Claude.")
+                Text("Try a wider range, or come back after using \(provider.displayName).")
                     .font(.caption).foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
@@ -154,7 +155,7 @@ struct ClaudeStatsDetailView: View {
         VStack(spacing: 6) {
             Image(systemName: "clock.badge")
                 .font(.title3).foregroundStyle(.secondary)
-            Text("Hourly breakdown starts from your next Claude activity today.")
+            Text("Hourly breakdown starts from your next \(provider.displayName) activity today.")
                 .font(.caption).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
@@ -162,7 +163,7 @@ struct ClaudeStatsDetailView: View {
     }
 
     private var dailyPoints: [StatsTimeChart.Point] {
-        store.dailySeries(provider: .claude, sinceDay: sinceDay).compactMap { e in
+        store.dailySeries(provider: provider, sinceDay: sinceDay).compactMap { e in
             guard let (y, m, d) = StatsTimeChart.parseDayKey(e.day),
                   let date = StatsTimeChart.date(year: y, month: m, day: d) else { return nil }
             return .init(date: date, key: e.day, byModel: e.byModel)
@@ -172,7 +173,7 @@ struct ClaudeStatsDetailView: View {
     private var hourlyPoints: [StatsTimeChart.Point] {
         let today = store.currentDayKey()
         guard let (y, m, d) = StatsTimeChart.parseDayKey(today) else { return [] }
-        return store.hourlySeries(provider: .claude, dayKey: today).compactMap { e in
+        return store.hourlySeries(provider: provider, dayKey: today).compactMap { e in
             guard let date = StatsTimeChart.date(year: y, month: m, day: d, hour: e.hour) else { return nil }
             return .init(date: date, key: "\(today) \(e.hour)", byModel: e.byModel)
         }
