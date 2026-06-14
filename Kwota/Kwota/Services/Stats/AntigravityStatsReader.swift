@@ -72,6 +72,9 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
         // Rotation: if the table shrank below our high-water (conversation reset
         // reusing the same file), reset and re-read from scratch.
         var highWater = stored
+        // `idx` is a monotonic PRIMARY KEY, so a genuine shrink is the only
+        // rotation we can detect; a reset that reuses idx without net-shrinking
+        // is (acceptably) not caught — same append-only assumption as the JSONL readers.
         if let stored, let maxIdx = maxIdx(handle), maxIdx < stored { highWater = nil }
 
         let sql: String
@@ -97,7 +100,7 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
             lastLineLock.withLock { $0 = "\(sessionId)#\(idx)" }
             guard let usage = decodeAntigravityGenMetadata(blob), usage.tokens != .zero else { continue }
             // Timestamp fallback chain: row ts → previous valid row ts → DB mtime → now.
-            let ts = usage.timestamp ?? lastTS ?? mtimes[db] ?? clock()
+            let ts = usage.timestamp ?? lastTS ?? mtime ?? clock()
             if usage.timestamp != nil { lastTS = usage.timestamp }
             emitted.append(UsageEvent(uuid: "\(sessionId)#\(idx)", sessionId: sessionId,
                                       timestamp: ts, tokens: usage.tokens, model: usage.model))

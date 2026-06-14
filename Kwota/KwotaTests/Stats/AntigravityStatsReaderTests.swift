@@ -103,4 +103,39 @@ final class AntigravityStatsReaderTests: XCTestCase {
         _ = reader.read()
         XCTAssertEqual(reader.state().entries.count, 0)
     }
+
+    /// A DB reset that shrinks the table below the high-water is detected and
+    /// re-read from scratch (the reader's one novel double-count guard).
+    func test_read_resetsAndReReadsOnShrink() throws {
+        let b0 = F.genBlob(input: 100, output: 10, cache: 0, thinking: 0, ts: 1_781_344_340)
+        let b1 = F.genBlob(input: 200, output: 20, cache: 0, thinking: 0, ts: 1_781_344_350)
+        let b2 = F.genBlob(input: 300, output: 30, cache: 0, thinking: 0, ts: 1_781_344_360)
+        let (root, db) = try F.makeConversationDB(blobs: [b0, b1, b2])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let reader = AntigravityStatsReader(roots: [root])
+        XCTAssertEqual(reader.read().count, 3)   // backfill, high-water = idx 2
+
+        // Simulate a conversation reset: recreate the DB with a single low-idx row.
+        try FileManager.default.removeItem(at: db)
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: db.path + "-wal"))
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: db.path + "-shm"))
+        let fresh = F.genBlob(input: 999, output: 1, cache: 0, thinking: 0, ts: 1_781_344_999)
+        try F.writeGenMetadata(db: db, blobs: [fresh], startIdx: 0)
+        try FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: db.path)
+
+        let after = reader.read()
+        XCTAssertEqual(after.count, 1)            // re-read from scratch, not skipped
+        XCTAssertEqual(after[0].tokens.input, 999)
+    }
+
+    /// A DB with an empty gen_metadata table emits nothing and records no cursor.
+    func test_read_handlesEmptyTable() throws {
+        let (root, _) = try F.makeConversationDB(blobs: [])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let reader = AntigravityStatsReader(roots: [root])
+        XCTAssertEqual(reader.read().count, 0)
+        XCTAssertEqual(reader.state().entries.count, 0)
+    }
 }
