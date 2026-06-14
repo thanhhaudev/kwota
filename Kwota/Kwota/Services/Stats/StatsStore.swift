@@ -59,6 +59,14 @@ final class StatsStore {
     /// startup backfill) would re-ingest just-cleared history after the wipe.
     private var generation: [ProviderID: Int] = [:]
 
+    /// Cached cursor snapshot per provider, refreshed only at the safe point
+    /// right after a read completes (no read is then concurrent). `clear`,
+    /// `flush`, and `schedulePersist` build the envelope from THIS cache, so
+    /// `reader.state()` is never called on the main actor while `reader.read()`
+    /// mutates the same offset dictionaries off-main — which would be a data
+    /// race on those (unlocked) dictionaries.
+    private var lastReaderStates: [ProviderID: ReaderState] = [:]
+
     init(readers: [ProviderID: JSONLogReader],
          ledgerURL: URL = StatsStore.defaultLedgerURL(),
          clock: @escaping () -> Date = { Date() },
@@ -73,7 +81,9 @@ final class StatsStore {
         self.ledger = loaded
         self.hourly = loadedHourly
         for (provider, reader) in readers {
-            reader.restore(states[provider] ?? ReaderState())
+            let restored = states[provider] ?? ReaderState()
+            reader.restore(restored)
+            lastReaderStates[provider] = restored
         }
     }
 
@@ -126,12 +136,21 @@ final class StatsStore {
                 if let req { return reader.read(only: req) }
                 return reader.read()
             }
+            // Safe point: the read has completed and the next one hasn't begun,
+            // so reading the reader's cursors here can't race `read()`. Refresh
+            // the cache that clear/flush/persist snapshot from.
+            lastReaderStates[curProvider] = reader.state()
             // If `clear(provider:)` ran while we were suspended off-main, the
             // batch we just read is pre-clear history — dropping it (the reader
             // already advanced past it) is what makes Clear stick. Without this,
             // a Clear during the startup backfill would be silently undone.
             if (generation[curProvider] ?? 0) == gen {
                 ingest(events, provider: curProvider)
+            } else {
+                // Cleared mid-read: the batch is dropped, but the cursor moved —
+                // persist the cleared ledger WITH the advanced cursor so the
+                // wiped history isn't re-read (and re-counted) on next launch.
+                schedulePersist()
             }
             // Drain order across providers is unordered (Dictionary.first), which
             // is safe: each provider has independent offsets, so order can't
@@ -232,11 +251,12 @@ final class StatsStore {
     }
 
     private func makeEnvelope() -> Envelope {
-        // Snapshot each reader's offsets ONCE — `state()` does a fileExists scan
-        // per tracked file, so the legacy `readerState` reuses Claude's already-
-        // computed snapshot rather than scanning a second time.
+        // Build from the cached cursor snapshots (refreshed at the safe post-read
+        // point), NOT live `reader.state()` — this runs from clear/flush/persist
+        // on the main actor, possibly while a read mutates the reader's offsets
+        // off-main, so touching the reader here would be a data race.
         var states: [String: ReaderState] = [:]
-        for (provider, reader) in readers { states[provider.rawValue] = reader.state() }
+        for (provider, snapshot) in lastReaderStates { states[provider.rawValue] = snapshot }
         return Envelope(ledger: ledger,
                         readerState: states[ProviderID.claude.rawValue],
                         readerStates: states,

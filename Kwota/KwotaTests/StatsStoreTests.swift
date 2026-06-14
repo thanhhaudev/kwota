@@ -256,6 +256,32 @@ final class StatsStoreTests: XCTestCase {
 
         XCTAssertEqual(store.total(provider: .claude, sinceDay: nil), .zero)   // stays cleared
     }
+
+    /// `clear` (→ schedulePersist → makeEnvelope) must NOT snapshot the reader
+    /// while a read is mutating its offsets off-main. The envelope is built from
+    /// the cached cursor snapshot instead, so `reader.state()` is never called
+    /// during the in-flight read.
+    func test_clearDuringInFlightRead_doesNotSnapshotReader() async {
+        let claude = GatedReader()
+        claude.events = [UsageEvent(uuid: "h1", sessionId: "s",
+                                    timestamp: date("2026-06-13T03:00:00.000Z"),
+                                    tokens: TokenBreakdown(input: 100), model: "opus")]
+        let store = StatsStore(readers: [.claude: claude],
+                               ledgerURL: URL(fileURLWithPath: "/dev/null"),
+                               clock: { self.date("2026-06-13T10:00:00.000Z") },
+                               persistDebounce: 0)
+
+        let entered = expectation(description: "read in-flight")
+        claude.onEntered = { entered.fulfill() }
+        let first = Task { await store.readChanged(nil, provider: .claude) }
+        await fulfillment(of: [entered], timeout: 2)
+
+        store.clear(provider: .claude)   // builds the envelope — must use the cache
+        claude.proceed.signal()
+        await first.value
+
+        XCTAssertFalse(claude.stateCalledDuringRead, "reader was snapshotted during a live read")
+    }
 }
 
 /// Test reader whose `read()` signals `onEntered` and then blocks on `proceed`,
@@ -266,12 +292,22 @@ private final class GatedReader: JSONLogReader, @unchecked Sendable {
     var events: [UsageEvent] = []
     var onEntered: (() -> Void)?
     let proceed = DispatchSemaphore(value: 0)
+    /// True while `read()` is blocked off-main. If `state()` is observed true
+    /// here, something snapshotted the reader during a live read (a data race).
+    private(set) var inRead = false
+    private(set) var stateCalledDuringRead = false
 
     func read() -> [UsageEvent] {
+        inRead = true
         onEntered?()
         proceed.wait()
+        inRead = false
         return events
     }
     func read(only paths: Set<URL>) -> [UsageEvent] { read() }
     func lastSeenLine() -> String? { nil }
+    func state() -> ReaderState {
+        if inRead { stateCalledDuringRead = true }
+        return ReaderState()
+    }
 }
