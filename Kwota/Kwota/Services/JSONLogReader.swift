@@ -45,6 +45,16 @@ struct ReaderState: Codable, Equatable, Sendable {
     struct Entry: Codable, Equatable, Sendable {
         var offset: UInt64
         var mtime: Date
+        /// Codex only: last-seen `turn_context.model` for this file, so model
+        /// attribution survives a read that begins after the turn_context line
+        /// was already consumed. Always nil for the Claude reader.
+        var model: String?
+
+        init(offset: UInt64, mtime: Date, model: String? = nil) {
+            self.offset = offset
+            self.mtime = mtime
+            self.model = model
+        }
     }
 
     init(entries: [String: Entry] = [:]) {
