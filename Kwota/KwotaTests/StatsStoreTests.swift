@@ -315,6 +315,43 @@ final class StatsStoreTests: XCTestCase {
         XCTAssertEqual(claude2.restoredOffset, 100, "stale pre-read cursor was persisted")
         XCTAssertEqual(reloaded.total(provider: .claude, sinceDay: nil), .zero, "clear didn't survive reload")
     }
+
+    /// A clear that lands while a provider's backfill is still PENDING (queued
+    /// behind another provider's in-flight read) must not be undone when that
+    /// pending read finally drains. Regression for the generation guard only
+    /// covering clears DURING a read, not before a pending one starts.
+    func test_clearBeforePendingBackfill_isNotReingested() async {
+        let claude = GatedReader()
+        claude.events = [UsageEvent(uuid: "c1", sessionId: "s",
+                                    timestamp: date("2026-06-13T03:00:00.000Z"),
+                                    tokens: TokenBreakdown(input: 100), model: "opus")]
+        let codex = GatedReader()
+        codex.events = [UsageEvent(uuid: "x1", sessionId: "s",
+                                   timestamp: date("2026-06-13T03:00:00.000Z"),
+                                   tokens: TokenBreakdown(input: 999), model: "gpt-5.5")]
+        codex.proceed.signal()   // codex's drained read must not block
+        let store = StatsStore(readers: [.claude: claude, .codex: codex],
+                               ledgerURL: URL(fileURLWithPath: "/dev/null"),
+                               clock: { self.date("2026-06-13T10:00:00.000Z") },
+                               persistDebounce: 0)
+
+        let entered = expectation(description: "claude backfill in-flight")
+        claude.onEntered = { entered.fulfill() }
+        let first = Task { await store.readChanged(nil, provider: .claude) }
+        await fulfillment(of: [entered], timeout: 2)
+
+        // Codex backfill enqueues behind claude (pending), THEN the user clears codex.
+        await store.readChanged(nil, provider: .codex)   // isReading → pending[.codex]
+        store.clear(provider: .codex)
+
+        claude.proceed.signal()   // claude returns; the loop drains the pending codex read
+        await first.value
+
+        XCTAssertEqual(store.total(provider: .codex, sinceDay: nil), .zero,
+                       "a clear before the pending backfill drained was undone")
+        XCTAssertEqual(store.total(provider: .claude, sinceDay: nil).input, 100,
+                       "claude (not cleared) should still ingest normally")
+    }
 }
 
 /// Test reader whose `read()` signals `onEntered` and then blocks on `proceed`,

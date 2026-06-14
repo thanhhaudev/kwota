@@ -50,7 +50,7 @@ final class StatsStore {
     /// its own pending request so no provider's signal is dropped while
     /// another provider's read is in flight.
     private var isReading = false
-    private struct Pending { var fullWalk = false; var paths: Set<URL> = [] }
+    private struct Pending { var fullWalk = false; var paths: Set<URL> = []; var gen = 0 }
     private var pending: [ProviderID: Pending] = [:]
 
     /// Per-provider generation counter, bumped by `clear(provider:)`. A read
@@ -118,7 +118,10 @@ final class StatsStore {
     func readChanged(_ paths: Set<URL>?, provider: ProviderID) async {
         guard readers[provider] != nil else { return }
         if isReading {
-            var p = pending[provider] ?? Pending()
+            // Stamp the generation when the pending entry is first created so a
+            // clear AFTER enqueue but BEFORE the read drains is caught by the
+            // post-read guard. Keep the earliest (pre-clear) gen on coalesce.
+            var p = pending[provider] ?? Pending(gen: generation[provider] ?? 0)
             if paths == nil { p.fullWalk = true; p.paths.removeAll() }
             else if !p.fullWalk { p.paths.formUnion(paths!) }
             pending[provider] = p
@@ -128,10 +131,13 @@ final class StatsStore {
         defer { isReading = false }
         var curProvider = provider
         var curPaths = paths
+        // The initial (non-pending) request's generation, captured at entry; no
+        // `await` happens before the loop body, so this matches today's behavior.
+        var curGen = generation[curProvider] ?? 0
         while true {
             guard let reader = readers[curProvider] else { return }
             let req = curPaths
-            let gen = generation[curProvider] ?? 0
+            let gen = curGen
             let events: [UsageEvent] = await OffMain.run {
                 if let req { return reader.read(only: req) }
                 return reader.read()
@@ -160,6 +166,7 @@ final class StatsStore {
             pending.removeValue(forKey: nextProvider)
             curProvider = nextProvider
             curPaths = p.fullWalk ? nil : p.paths
+            curGen = p.gen
         }
     }
 
