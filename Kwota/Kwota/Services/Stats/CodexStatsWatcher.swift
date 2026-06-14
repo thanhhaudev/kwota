@@ -8,10 +8,13 @@ import Foundation
 /// Live trigger for Codex stats reads. Consumes the Codex FSEvents stream
 /// (reusing `CodexActivitySource.defaultFileEvents()`), keeps only rollout
 /// `.jsonl` appends, debounces them into a batch, and forwards via
-/// `onChangedPaths`. A periodic poll backstop covers any FSEvents the kernel
+/// `onChangedPaths`. A 5-minute poll backstop covers any FSEvents the kernel
 /// coalesces or drops, and `start()` fires one initial nil (full-walk) backfill.
 /// Mirrors how `UsageMonitor` drives Claude stats, but as its own watcher since
 /// the Codex activity source is buried inside the awake `CompositeActivitySource`.
+/// The poll is a backstop only — live appends arrive incrementally via FSEvents
+/// — so it's deliberately infrequent (a full walk enumerates + stats the whole
+/// `~/.codex/sessions` tree, which scales with history).
 @MainActor
 final class CodexStatsWatcher {
     /// `nil` = read every tracked file incrementally (backfill / poll);
@@ -27,7 +30,7 @@ final class CodexStatsWatcher {
     private var pendingPaths: Set<URL> = []
 
     init(makeFileEvents: @escaping () -> AsyncStream<String> = { CodexActivitySource.defaultFileEvents() },
-         pollInterval: TimeInterval = 60,
+         pollInterval: TimeInterval = 300,
          debounce: TimeInterval = 0.5) {
         self.makeFileEvents = makeFileEvents
         self.pollInterval = pollInterval
