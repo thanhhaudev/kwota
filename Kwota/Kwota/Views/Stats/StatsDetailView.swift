@@ -162,7 +162,9 @@ struct StatsDetailView: View {
             } else if modelRows.isEmpty {
                 StatsDailySkeletonChart().frame(height: 96)
             } else {
-                StatsTimeChart(points: dailyPoints, mode: .daily, colors: modelColors)
+                let series = store.chartSeries(provider: provider, daysAgo: range.daysAgo)
+                StatsTimeChart(points: dailyPoints(from: series.points),
+                               mode: .daily, granularity: series.granularity, colors: modelColors)
             }
         }
         .kwotaCard()
@@ -181,8 +183,9 @@ struct StatsDetailView: View {
         .frame(maxWidth: .infinity).frame(height: 96)
     }
 
-    private var dailyPoints: [StatsTimeChart.Point] {
-        store.paddedDailySeries(provider: provider, daysAgo: range.daysAgo).compactMap { e in
+    private func dailyPoints(from series: [(day: String, byModel: [String: TokenBreakdown])])
+        -> [StatsTimeChart.Point] {
+        series.compactMap { e in
             guard let (y, m, d) = StatsTimeChart.parseDayKey(e.day),
                   let date = StatsTimeChart.date(year: y, month: m, day: d) else { return nil }
             return .init(date: date, key: e.day, byModel: e.byModel)
@@ -298,6 +301,9 @@ struct StatsTimeChart: View {
 
     let points: [Point]
     let mode: Mode
+    /// Bucket size for daily mode (ignored for hourly). Drives the bar unit,
+    /// x-axis domain/labels, avg unit, and the selected-bucket label.
+    var granularity: StatsGranularity = .day
     /// Raw model id → color, supplied by the caller so the bars match the
     /// per-model cards (and stay distinct within this view).
     let colors: [String: Color]
@@ -380,7 +386,7 @@ struct StatsTimeChart: View {
     private var isWeekScale: Bool { mode == .daily && totals.count <= 8 }
     /// The daily-average rule only belongs on the multi-day view.
     private var showsAverage: Bool { mode == .daily && average > 0 }
-    private var unit: Calendar.Component { mode == .hourly ? .hour : .day }
+    private var unit: Calendar.Component { mode == .hourly ? .hour : granularity.component }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -395,15 +401,14 @@ struct StatsTimeChart: View {
     /// small bar at its position (Screen Time dayChart), not one giant bar.
     @ViewBuilder
     private var chartWithScale: some View {
-        // `.plotDimension` insets the plot a little at both ends so the first/last
-        // bar and their date labels don't sit flush against the chart edges — in
-        // particular the last label clearing the trailing value-axis gutter (the
-        // gap Apple's Screen Time chart leaves between the last bar and the
-        // right-hand values). endPadding is wider since the values live trailing.
+        // A small symmetric `.plotDimension` inset so bars aren't flush to the
+        // edges. The last date label no longer needs a wide trailing gap — it's
+        // right-anchored (see chartXAxis) so it grows left, clearing the trailing
+        // value-axis gutter on its own.
         if mode == .hourly, let domain = hourDomain {
-            chart.chartXScale(domain: domain, range: .plotDimension(startPadding: 6, endPadding: 18))
+            chart.chartXScale(domain: domain, range: .plotDimension(startPadding: 6, endPadding: 6))
         } else if mode == .daily, let domain = dayDomain {
-            chart.chartXScale(domain: domain, range: .plotDimension(startPadding: 6, endPadding: 18))
+            chart.chartXScale(domain: domain, range: .plotDimension(startPadding: 6, endPadding: 6))
         } else {
             chart
         }
@@ -418,8 +423,10 @@ struct StatsTimeChart: View {
 
     private var dayDomain: ClosedRange<Date>? {
         guard mode == .daily, let first = points.first?.date, let last = points.last?.date else { return nil }
-        let start = Calendar.current.startOfDay(for: first)
-        let end = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: last)) ?? last
+        let cal = Calendar.current
+        let start = cal.startOfDay(for: first)
+        // +1 of the granularity unit so the last bucket's bar isn't clipped.
+        let end = cal.date(byAdding: granularity.component, value: 1, to: cal.startOfDay(for: last)) ?? last
         return start...end
     }
 
@@ -436,18 +443,43 @@ struct StatsTimeChart: View {
                 Text("\(StatsFormat.tokens(dayTotal)) tokens today")
                     .font(.caption).foregroundStyle(.secondary).monospacedDigit()
             } else if average > 0 {
-                Text("Avg \(StatsFormat.tokens(Int(average.rounded())))/day")
+                Text("Avg \(StatsFormat.tokens(Int(average.rounded())))/\(granularity.avgUnit)")
                     .font(.caption).foregroundStyle(.secondary).monospacedDigit()
             }
             Spacer(minLength: 0)
         }
     }
 
-    /// "3 PM" for the hourly (Today) view, "Jun 13" for the daily view.
+    /// Label for the selected bucket: hourly → "3 PM"; daily → "Jun 13";
+    /// weekly → "Jun 9 – 15"; monthly → "Jun 2026"; yearly → "2026".
     private func selectedLabel(for date: Date) -> String {
         let f = DateFormatter()
         f.locale = .current
-        f.dateFormat = mode == .hourly ? "h a" : "MMM d"
+        if mode == .hourly { f.dateFormat = "h a"; return f.string(from: date) }
+        switch granularity {
+        case .day:
+            f.dateFormat = "MMM d"; return f.string(from: date)
+        case .week:
+            f.dateFormat = "MMM d"
+            let end = Calendar.current.date(byAdding: .day, value: 6, to: date) ?? date
+            return "\(f.string(from: date)) – \(f.string(from: end))"
+        case .month:
+            f.dateFormat = "MMM yyyy"; return f.string(from: date)
+        case .year:
+            f.dateFormat = "yyyy"; return f.string(from: date)
+        }
+    }
+
+    /// X-axis tick label per granularity. day/week → "MM-dd" (week = its start
+    /// day); month → "MMM ''yy" (e.g. "Jun '26"); year → "yyyy".
+    static func xLabel(for date: Date, granularity: StatsGranularity) -> String {
+        let f = DateFormatter()
+        f.locale = .current
+        switch granularity {
+        case .day, .week: f.dateFormat = "MM-dd"
+        case .month:      f.dateFormat = "MMM ''yy"
+        case .year:       f.dateFormat = "yyyy"
+        }
         return f.string(from: date)
     }
 
@@ -491,17 +523,26 @@ struct StatsTimeChart: View {
                     AxisTick()
                     AxisValueLabel(format: .dateTime.hour())
                 }
-            } else if isWeekScale {
+            } else if granularity == .day, isWeekScale {
+                // ≤8 days: single weekday letters, centered (too narrow to clip).
                 AxisMarks(values: .stride(by: .day)) { _ in
                     AxisGridLine()
                     AxisTick()
                     AxisValueLabel(format: .dateTime.weekday(.narrow))
                 }
             } else {
-                AxisMarks(values: .automatic(desiredCount: 6)) { _ in
+                // Right-anchored so the trailing-most label grows LEFT and never
+                // overflows into the trailing value-axis gutter (no truncation),
+                // while the value axis stays on the right.
+                AxisMarks(values: .automatic(desiredCount: 6)) { value in
                     AxisGridLine()
                     AxisTick()
-                    AxisValueLabel(format: .dateTime.month(.twoDigits).day(.twoDigits))
+                    AxisValueLabel(anchor: .topTrailing) {
+                        if let d = value.as(Date.self) {
+                            Text(Self.xLabel(for: d, granularity: granularity))
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
         }
