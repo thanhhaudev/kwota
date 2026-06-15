@@ -5,38 +5,47 @@
 
 import SwiftUI
 
-/// Maps a raw model id to a stable display label + color for Stats charts.
-/// Shared across providers (later plans reuse it). Colors are assigned by a
-/// deterministic hash so the same model keeps its color across launches and
-/// across surfaces (the daily chart and the per-model cards match).
+/// Maps raw model ids to stable display labels + colors for Stats charts.
+/// Shared across providers. Colors are assigned per *set* of models present in
+/// a view (`colorMap`), not per individual model, so every model on screen gets
+/// a distinct color instead of two unrelated models colliding on the same hash.
 enum StatsModelPalette {
-    private static let colors: [Color] = [
-        .blue, .purple, .teal, .orange, .pink, .green, .indigo, .red, .mint, .brown
+    /// Distinct colors for non-pinned models. Two colors are intentionally
+    /// absent: `.orange` is reserved for the Sonnet family (matching the weekly
+    /// `PerModelCard` "Sonnet only"), and `.green` is reserved for the chart's
+    /// daily-average rule — so no model bar is ever mistaken for the avg line.
+    private static let palette: [Color] = [
+        .blue, .purple, .teal, .pink, .indigo, .red, .mint, .brown
     ]
 
-    /// Brand colors for known Claude model families, matching the app's
-    /// existing per-model usage UI (`PerModelCard`: Opus = blue, Sonnet = orange).
-    private static let familyColors: [String: Color] = [
-        "opus": .blue,
-        "sonnet": .orange,
-        "haiku": .teal,
-        "fable": .pink,
-        "gpt": .teal,
-        "gemini": .purple
-    ]
+    /// Families pinned to a fixed brand color that must match other surfaces.
+    /// Only Sonnet is pinned (weekly `PerModelCard` shows "Sonnet only" in
+    /// orange). Every other model — including Opus — draws a distinct color from
+    /// `palette` so families like "gpt"/"gemini" with many variants don't all
+    /// collapse onto one color.
+    private static let pinnedFamilyColor: [String: Color] = ["sonnet": .orange]
 
-    static func color(for model: String) -> Color {
-        guard !colors.isEmpty else { return .gray }
-        if let fixed = familyColors[family(of: model)] { return fixed }
-        // Deterministic FNV-1a hash for unknown families, so a model keeps the
-        // SAME color across launches (and matches the per-model cards). Swift's
-        // `Hasher` is seeded per-process, which reshuffled colors every run.
-        var hash: UInt64 = 1469598103934665603
-        for byte in model.utf8 {
-            hash ^= UInt64(byte)
-            hash = hash &* 1099511628211
+    /// A color for each model in `models`, distinct within the set. Pinned
+    /// families keep their brand color; the rest draw from `palette` in a
+    /// deterministic sorted order, so a given set yields the same assignment
+    /// across launches and no two models in one provider's view collide. Keyed
+    /// by raw model id; the chart and the per-model cards both read this map so
+    /// a model's color matches across surfaces.
+    static func colorMap(for models: [String]) -> [String: Color] {
+        var map: [String: Color] = [:]
+        // Pinned brand colors first (all Sonnet versions share orange).
+        for model in models {
+            if let pinned = pinnedFamilyColor[family(of: model)] {
+                map[model] = pinned
+            }
         }
-        return colors[Int(hash % UInt64(colors.count))]
+        // Remaining models get distinct palette colors. `palette` excludes
+        // orange, so nothing collides with a pinned Sonnet.
+        let rest = models.filter { map[$0] == nil }.sorted()
+        for (index, model) in rest.enumerated() {
+            map[model] = palette.isEmpty ? .gray : palette[index % palette.count]
+        }
+        return map
     }
 
     /// Model family = first dash-or-space segment after an optional `claude-` prefix.
@@ -50,7 +59,7 @@ enum StatsModelPalette {
     /// Friendly display name for a model id. For `claude-…` ids: strip the
     /// prefix, take the first segment as the model name and re-join the rest as
     /// a dotted version, e.g. "claude-opus-4-8" -> "opus 4.8". `unknown` and any
-    /// non-`claude-` id (e.g. future "gpt-5.5") pass through unchanged so later
+    /// non-`claude-` id (e.g. "gpt-5.5") pass through unchanged so later
     /// providers aren't pre-empted.
     static func label(for model: String) -> String {
         guard model != "unknown" else { return "unknown" }

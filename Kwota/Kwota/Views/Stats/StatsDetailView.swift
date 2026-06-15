@@ -49,6 +49,17 @@ struct StatsDetailView: View {
             .sorted { $0.tokens.billable > $1.tokens.billable }
     }
 
+    /// Distinct color per model, shared by the chart and the per-model cards so
+    /// a model's color matches across both. Built from the provider's *all-time*
+    /// model set (not the range-filtered one) so a model keeps the same color
+    /// when you switch ranges; the union with the visible rows covers any
+    /// today-only model not yet in the all-time daily ledger.
+    private var modelColors: [String: Color] {
+        var models = Set(store.totalsByModel(provider: provider, sinceDay: nil).keys)
+        models.formUnion(modelRows.map(\.model))
+        return StatsModelPalette.colorMap(for: Array(models))
+    }
+
     /// Per-model totals for the local "today" summed from the hourly rollup.
     private var hourlyTotalsByModel: [String: TokenBreakdown] {
         var out: [String: TokenBreakdown] = [:]
@@ -126,7 +137,8 @@ struct StatsDetailView: View {
         } else {
             LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 8) {
                 ForEach(modelRows, id: \.model) { row in
-                    StatsModelMiniCard(model: row.model, tokens: row.tokens)
+                    StatsModelMiniCard(model: row.model, tokens: row.tokens,
+                                       color: modelColors[row.model] ?? .gray)
                 }
             }
         }
@@ -134,16 +146,20 @@ struct StatsDetailView: View {
 
     private var dailyCard: some View {
         Group {
-            if modelRows.isEmpty {
-                StatsDailySkeletonChart().frame(height: 96)
-            } else if range == .today {
+            // Today routes by its own hourly points before the generic empty
+            // check: `modelRows` for today is the hourly rollup, so an empty
+            // today would otherwise fall into the weekly-style skeleton instead
+            // of the dedicated "hourly starts going forward" note.
+            if range == .today {
                 if hourlyPoints.isEmpty {
                     hourlyCollectingNote
                 } else {
-                    StatsTimeChart(points: hourlyPoints, mode: .hourly)
+                    StatsTimeChart(points: hourlyPoints, mode: .hourly, colors: modelColors)
                 }
+            } else if modelRows.isEmpty {
+                StatsDailySkeletonChart().frame(height: 96)
             } else {
-                StatsTimeChart(points: dailyPoints, mode: .daily)
+                StatsTimeChart(points: dailyPoints, mode: .daily, colors: modelColors)
             }
         }
         .kwotaCard()
@@ -190,15 +206,20 @@ struct StatsDetailView: View {
         } label: {
             HStack(spacing: 4) {
                 Text(range.menuLabel)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 11, weight: .medium))   // match SectionHeader title
                     .tracking(1.5)
                     .textCase(.uppercase)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: 8, weight: .semibold))
             }
             .foregroundStyle(.secondary)
         }
-        .menuStyle(.borderlessButton)
+        // `.button` + `.plain` instead of `.borderlessButton`: the borderless
+        // style injects its own leading indicator and re-tints the label, which
+        // pushed the chevron left and overrode `.secondary`. Plain renders the
+        // label verbatim — chevron stays trailing, muted color sticks.
+        .menuStyle(.button)
+        .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
     }
@@ -210,12 +231,13 @@ struct StatsDetailView: View {
 private struct StatsModelMiniCard: View {
     let model: String
     let tokens: TokenBreakdown
+    let color: Color
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Circle()
-                    .fill(StatsModelPalette.color(for: model))
+                    .fill(color)
                     .frame(width: 7, height: 7)
                 Text(StatsModelPalette.label(for: model))
                     .font(.system(size: 12, weight: .semibold))
@@ -273,6 +295,9 @@ struct StatsTimeChart: View {
 
     let points: [Point]
     let mode: Mode
+    /// Raw model id → color, supplied by the caller so the bars match the
+    /// per-model cards (and stay distinct within this view).
+    let colors: [String: Color]
 
     @State private var selectedDate: Date?
 
@@ -337,7 +362,7 @@ struct StatsTimeChart: View {
         var map: [String: Color] = [:]
         for p in points {
             for model in p.byModel.keys {
-                map[StatsModelPalette.label(for: model)] = StatsModelPalette.color(for: model)
+                map[StatsModelPalette.label(for: model)] = colors[model] ?? .gray
             }
         }
         return map

@@ -64,20 +64,40 @@ final class StatsFormatTests: XCTestCase {
         XCTAssertEqual(StatsModelPalette.label(for: "gpt-5.5"), "gpt-5.5")
     }
 
-    // MARK: StatsModelPalette.color stability within a run
+    // MARK: StatsModelPalette.colorMap — set-based distinct assignment
 
-    func test_color_sameModelReturnsSameColor() {
-        let a = StatsModelPalette.color(for: "claude-opus-4-8")
-        let b = StatsModelPalette.color(for: "claude-opus-4-8")
-        XCTAssertEqual(a, b, "Same model must yield same color within a process run")
+    func test_colorMap_stableForSameSet() {
+        let models = ["claude-opus-4-8", "claude-sonnet-4-6", "gpt-5.5"]
+        XCTAssertEqual(StatsModelPalette.colorMap(for: models),
+                       StatsModelPalette.colorMap(for: models),
+                       "Same set must yield the same assignment")
     }
 
-    func test_color_brandFamiliesMatchUsageUI() {
-        // Must match PerModelCard: Opus = blue, Sonnet = orange.
-        XCTAssertEqual(StatsModelPalette.color(for: "claude-sonnet-4-6"), .orange)
-        XCTAssertEqual(StatsModelPalette.color(for: "claude-opus-4-8"), .blue)
-        XCTAssertEqual(StatsModelPalette.color(for: "claude-opus-4-7"), .blue)   // versions share family color
-        XCTAssertEqual(StatsModelPalette.color(for: "claude-haiku-4-5-20251001"), .teal)
+    func test_colorMap_pinsSonnetToOrange() {
+        // Sonnet must stay orange to match PerModelCard's "Sonnet only".
+        let map = StatsModelPalette.colorMap(for: ["claude-sonnet-4-6", "claude-sonnet-4-5", "claude-opus-4-8"])
+        XCTAssertEqual(map["claude-sonnet-4-6"], .orange)
+        XCTAssertEqual(map["claude-sonnet-4-5"], .orange, "all sonnet versions share orange")
+    }
+
+    func test_colorMap_avoidsReservedColors() {
+        // Orange is reserved for Sonnet, green for the daily-average rule;
+        // no model may take either.
+        let map = StatsModelPalette.colorMap(for: ["claude-opus-4-8", "claude-haiku-4-5-20251001", "gpt-5.5"])
+        for (_, color) in map {
+            XCTAssertNotEqual(color, .orange)
+            XCTAssertNotEqual(color, .green)
+        }
+    }
+
+    func test_colorMap_assignsDistinctColors() {
+        let models = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "codex-auto-review"]
+        let colors = StatsModelPalette.colorMap(for: models).values.map { $0 }
+        for i in colors.indices {
+            for j in colors.indices where j > i {
+                XCTAssertNotEqual(colors[i], colors[j], "models in one view must not collide on a color")
+            }
+        }
     }
 
     func test_family_extractsModelFamily() {
