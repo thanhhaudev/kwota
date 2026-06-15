@@ -59,9 +59,12 @@ final class StatsStore {
     /// startup backfill) would re-ingest just-cleared history after the wipe.
     private var generation: [ProviderID: Int] = [:]
 
-    /// Wall-clock time of the last `clear(provider:)`. When a clear races an
-    /// in-flight read, the dropped batch is split at this instant: events at or
-    /// after it arrived post-clear and are kept; earlier ones are wiped history.
+    /// Wall-clock time of the last `clear(provider:)`, persisted in the envelope.
+    /// Two roles, both keyed on this instant: (1) when a Clear races an in-flight
+    /// read, the dropped batch is split here (events at/after it are kept); (2)
+    /// `ingest` drops anything older than it, so a Clear survives even a quit
+    /// during a backfill — the next launch re-reads the wiped history but filters
+    /// it out instead of repopulating the ledger.
     private var clearTime: [ProviderID: Date] = [:]
 
     /// Cached cursor snapshot per provider, refreshed only at the safe point
@@ -82,9 +85,10 @@ final class StatsStore {
         self.clock = clock
         self.calendar = calendar
         self.persistDebounce = persistDebounce
-        let (loaded, loadedHourly, states) = Self.loadEnvelope(at: ledgerURL)
+        let (loaded, loadedHourly, states, cleared) = Self.loadEnvelope(at: ledgerURL)
         self.ledger = loaded
         self.hourly = loadedHourly
+        self.clearTime = cleared
         for (provider, reader) in readers {
             let restored = states[provider] ?? ReaderState()
             reader.restore(restored)
@@ -189,7 +193,13 @@ final class StatsStore {
         guard !events.isEmpty else { return }
         let now = clock()
         let hourCutoffDate = now.addingTimeInterval(-Self.hourlyRetention)
+        // Drop anything older than the Clear watermark. This is what makes a
+        // Clear stick across a quit-during-backfill: on the next launch the
+        // backfill re-reads the wiped history (the cursor was never advanced),
+        // and these events are filtered here instead of repopulating the ledger.
+        let clearedBefore = clearTime[provider]
         for e in events {
+            if let clearedBefore, e.timestamp < clearedBefore { continue }
             let model = e.model ?? "unknown"
             let day = ledger.dayKey(for: e.timestamp)
             ledger.merge(provider: provider, day: day, model: model, delta: e.tokens, now: now)
@@ -270,6 +280,11 @@ final class StatsStore {
         /// Optional so envelopes written before the hourly rollup decode cleanly
         /// (they simply start with an empty hourly window).
         var hourly: StatsLedger?
+        /// Per-provider Clear watermark, keyed by `ProviderID.rawValue`. Events
+        /// older than this are dropped on ingest so a Clear survives even if the
+        /// app quits while a backfill is still in flight (the cursor would then
+        /// be stale on disk and re-read the wiped history next launch).
+        var clearedAt: [String: Date]?
     }
 
     private func makeEnvelope() -> Envelope {
@@ -279,10 +294,13 @@ final class StatsStore {
         // off-main, so touching the reader here would be a data race.
         var states: [String: ReaderState] = [:]
         for (provider, snapshot) in lastReaderStates { states[provider.rawValue] = snapshot }
+        var cleared: [String: Date] = [:]
+        for (provider, date) in clearTime { cleared[provider.rawValue] = date }
         return Envelope(ledger: ledger,
                         readerState: states[ProviderID.claude.rawValue],
                         readerStates: states,
-                        hourly: hourly)
+                        hourly: hourly,
+                        clearedAt: cleared.isEmpty ? nil : cleared)
     }
 
     private func schedulePersist() {
@@ -318,10 +336,10 @@ final class StatsStore {
     }
 
     nonisolated private static func loadEnvelope(at url: URL)
-        -> (StatsLedger, StatsLedger, [ProviderID: ReaderState]) {
+        -> (StatsLedger, StatsLedger, [ProviderID: ReaderState], [ProviderID: Date]) {
         guard let data = try? Data(contentsOf: url),
               let env = try? JSONDecoder().decode(Envelope.self, from: data) else {
-            return (StatsLedger(), StatsLedger(), [:])
+            return (StatsLedger(), StatsLedger(), [:], [:])
         }
         var states: [ProviderID: ReaderState] = [:]
         if let perProvider = env.readerStates {
@@ -329,6 +347,8 @@ final class StatsStore {
         } else if let legacy = env.readerState {
             states[.claude] = legacy   // Plan 1 envelope → Claude offsets
         }
-        return (env.ledger, env.hourly ?? StatsLedger(), states)
+        var cleared: [ProviderID: Date] = [:]
+        for (raw, date) in env.clearedAt ?? [:] { cleared[ProviderID(rawValue: raw)] = date }
+        return (env.ledger, env.hourly ?? StatsLedger(), states, cleared)
     }
 }

@@ -316,6 +316,35 @@ final class StatsStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.total(provider: .claude, sinceDay: nil), .zero, "clear didn't survive reload")
     }
 
+    /// If the app quits while a backfill is still in flight, the cursor on disk
+    /// is stale, so the next launch re-reads the cleared history. The persisted
+    /// Clear watermark must drop that re-read history while still counting new
+    /// (post-clear) activity.
+    func test_clearWatermark_survivesReloadAndDropsReReadHistory() {
+        let dir = TempDirectory()
+        let url = dir.url.appendingPathComponent("stats-ledger.json")
+        let old = UsageEvent(uuid: "h", sessionId: "s", timestamp: date("2026-06-13T03:00:00.000Z"),
+                             tokens: TokenBreakdown(input: 100), model: "opus")
+        let store = StatsStore(readers: [.claude: FakeJSONLogReader()], ledgerURL: url,
+                               clock: { self.date("2026-06-13T10:00:00.000Z") }, persistDebounce: 0)
+        store.ingest([old], provider: .claude)
+        XCTAssertEqual(store.total(provider: .claude, sinceDay: nil).input, 100)
+        store.clear(provider: .claude)   // clearedAt = 10:00:00, persisted in the envelope
+        store.flush()
+
+        // Relaunch with a stale cursor: the backfill re-reads the wiped history.
+        let reloaded = StatsStore(readers: [.claude: FakeJSONLogReader()], ledgerURL: url,
+                                  clock: { self.date("2026-06-13T10:00:00.000Z") }, persistDebounce: 0)
+        reloaded.ingest([old], provider: .claude)
+        XCTAssertEqual(reloaded.total(provider: .claude, sinceDay: nil), .zero,
+                       "re-read cleared history must be dropped by the persisted watermark")
+
+        // New post-clear activity is still counted.
+        reloaded.ingest([UsageEvent(uuid: "n", sessionId: "s", timestamp: date("2026-06-13T11:00:00.000Z"),
+                                    tokens: TokenBreakdown(input: 7), model: "opus")], provider: .claude)
+        XCTAssertEqual(reloaded.total(provider: .claude, sinceDay: nil).input, 7)
+    }
+
     /// A Clear that races an in-flight read must still count activity that
     /// arrived AFTER the clear and got swept into the otherwise-dropped batch —
     /// only the pre-clear history is wiped. Regression for post-clear appends
