@@ -395,10 +395,15 @@ struct StatsTimeChart: View {
     /// small bar at its position (Screen Time dayChart), not one giant bar.
     @ViewBuilder
     private var chartWithScale: some View {
+        // `.plotDimension` insets the plot a little at both ends so the first/last
+        // bar and their date labels don't sit flush against the chart edges — in
+        // particular the last label clearing the trailing value-axis gutter (the
+        // gap Apple's Screen Time chart leaves between the last bar and the
+        // right-hand values). endPadding is wider since the values live trailing.
         if mode == .hourly, let domain = hourDomain {
-            chart.chartXScale(domain: domain)
+            chart.chartXScale(domain: domain, range: .plotDimension(startPadding: 6, endPadding: 18))
         } else if mode == .daily, let domain = dayDomain {
-            chart.chartXScale(domain: domain)
+            chart.chartXScale(domain: domain, range: .plotDimension(startPadding: 6, endPadding: 18))
         } else {
             chart
         }
