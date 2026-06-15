@@ -206,6 +206,7 @@ final class CodexTraceReaderTests: XCTestCase {
         XCTAssertEqual(spy.enumeratorCalls, 0, "no usage rows → no sessions walk")
         XCTAssertFalse(reader.state().entries.isEmpty, "cursor advanced past unrelated rows")
         // A later USAGE row IS picked up (cursor advanced, not stuck).
+        CodexTraceFixture.addRollout(home: home, threadId: "tUnrelated")   // make sessions/ exist so the walk enumerates
         CodexTraceFixture.writeDB(at: home.appendingPathComponent("logs_2.sqlite"), rows: [
             .init(id: 1, ts: 1_781_481_600, threadId: "tA",
                   body: "unrelated trace line", target: "codex_core::session::turn"),

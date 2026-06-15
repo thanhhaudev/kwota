@@ -145,28 +145,17 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
         return items.filter { $0.lastPathComponent.hasPrefix("logs_") && $0.pathExtension == "sqlite" }
     }
 
-    /// Returns nil when the set can't be trusted — either the sessions dir
-    /// exists but can't be enumerated, OR a traversal error occurs mid-walk
-    /// (which would otherwise yield a partial set and fail OPEN, double-counting
-    /// rollout-backed threads). A missing sessions dir is a trusted empty set.
+    /// Returns nil when the set can't be trusted, so the caller skips rather than
+    /// fail-OPEN double-counting rollout-backed threads. Untrusted = the sessions
+    /// dir exists but the enumerator can't start, OR ANY error occurs mid-walk
+    /// (e.g. a descendant deleted during enumeration → partial set). A missing
+    /// sessions dir is a trusted empty set (no rollouts exist) and is NOT walked.
     private func rolloutThreadIDs() -> Set<String>? {
+        guard fm.fileExists(atPath: sessionsRoot.path) else { return [] }
         var traversalFailed = false
-        let en = fm.enumerator(at: sessionsRoot, includingPropertiesForKeys: nil,
-                               options: [.skipsHiddenFiles],
-                               errorHandler: { _, err in
-                                   let nsErr = err as NSError
-                                   // "No such file" on the root itself → sessions dir absent → trusted empty.
-                                   // Any other mid-walk error (permissions, I/O) → untrusted.
-                                   if !(nsErr.domain == NSCocoaErrorDomain && nsErr.code == NSFileReadNoSuchFileError) {
-                                       traversalFailed = true
-                                   }
-                                   return true
-                               })
-        guard let en else {
-            // Enumerator itself couldn't start — could not even open the directory.
-            // Trusted empty when the dir doesn't exist; untrusted when it does.
-            return fm.fileExists(atPath: sessionsRoot.path) ? nil : []
-        }
+        guard let en = fm.enumerator(at: sessionsRoot, includingPropertiesForKeys: nil,
+                                     options: [.skipsHiddenFiles],
+                                     errorHandler: { _, _ in traversalFailed = true; return true }) else { return nil }
         var out = Set<String>()
         for case let url as URL in en
         where url.pathExtension == "jsonl" && url.lastPathComponent.hasPrefix("rollout-") {
@@ -174,7 +163,7 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
                 out.insert(uuid)
             }
         }
-        return traversalFailed ? nil : out   // any non-ENOENT error → discard (untrusted)
+        return traversalFailed ? nil : out
     }
 
     /// Thread ID embedded in a rollout filename stem shaped
