@@ -33,7 +33,10 @@ struct StatsDetailView: View {
         }
     }
 
-    @State private var range: Range = .week
+    // Persisted so the popover/app reopens on the last-chosen range. `Range` is a
+    // String-raw enum, which @AppStorage binds directly via its RawRepresentable
+    // initializer. One global key — the picker preference is shared across providers.
+    @AppStorage("statsRangeSelection") private var range: Range = .week
 
     private var sinceDay: String? { store.sinceDayKey(daysAgo: range.daysAgo) }
 
@@ -179,7 +182,7 @@ struct StatsDetailView: View {
     }
 
     private var dailyPoints: [StatsTimeChart.Point] {
-        store.dailySeries(provider: provider, sinceDay: sinceDay).compactMap { e in
+        store.paddedDailySeries(provider: provider, daysAgo: range.daysAgo).compactMap { e in
             guard let (y, m, d) = StatsTimeChart.parseDayKey(e.day),
                   let date = StatsTimeChart.date(year: y, month: m, day: d) else { return nil }
             return .init(date: date, key: e.day, byModel: e.byModel)
@@ -394,6 +397,8 @@ struct StatsTimeChart: View {
     private var chartWithScale: some View {
         if mode == .hourly, let domain = hourDomain {
             chart.chartXScale(domain: domain)
+        } else if mode == .daily, let domain = dayDomain {
+            chart.chartXScale(domain: domain)
         } else {
             chart
         }
@@ -403,6 +408,13 @@ struct StatsTimeChart: View {
         guard mode == .hourly, let anchor = points.first?.date else { return nil }
         let start = Calendar.current.startOfDay(for: anchor)
         let end = Calendar.current.date(byAdding: .day, value: 1, to: start) ?? start.addingTimeInterval(86_400)
+        return start...end
+    }
+
+    private var dayDomain: ClosedRange<Date>? {
+        guard mode == .daily, let first = points.first?.date, let last = points.last?.date else { return nil }
+        let start = Calendar.current.startOfDay(for: first)
+        let end = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: last)) ?? last
         return start...end
     }
 
