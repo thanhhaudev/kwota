@@ -44,6 +44,7 @@ enum CodexTraceFixture {
               level TEXT NOT NULL DEFAULT 'TRACE', target TEXT NOT NULL,
               feedback_log_body TEXT, thread_id TEXT);
             """, nil, nil, nil)
+        sqlite3_exec(h, "DELETE FROM logs;", nil, nil, nil)
         for r in rows {
             var st: OpaquePointer?
             guard sqlite3_prepare_v2(h, """
