@@ -281,4 +281,32 @@ final class CodexStatsReaderTests: XCTestCase {
         XCTAssertEqual(events.count, 1)
         XCTAssertEqual(events[0].model, "gpt-5.5")   // attribution survived persist + restart
     }
+
+    func test_malformedTimestamp_doesNotLoseNextDelta() {
+        // Cumulative input 100 → 150 → 200. The middle event has a broken
+        // timestamp: it must NOT advance the baseline, so the third event's
+        // delta spans it (200-100) and no tokens are lost.
+        let (reader, _, _) = makeReader([
+            turnCtx,
+            tcLine(ts: "2026-05-20T03:47:15.100Z", totInput: 100, totCached: 0, totOutput: 0,
+                   lastInput: 100, lastCached: 0, lastOutput: 0),
+            tcLine(ts: "not-a-timestamp",          totInput: 150, totCached: 0, totOutput: 0,
+                   lastInput: 50,  lastCached: 0, lastOutput: 0),
+            tcLine(ts: "2026-05-20T03:47:15.300Z", totInput: 200, totCached: 0, totOutput: 0,
+                   lastInput: 50,  lastCached: 0, lastOutput: 0),
+        ])
+        let total = reader.read().reduce(0) { $0 + $1.tokens.input }
+        XCTAssertEqual(total, 200, "skipped (bad-timestamp) event's delta must fold into the next event")
+    }
+
+    func test_timestampWithoutFractionalSeconds_isAccepted() {
+        let (reader, _, _) = makeReader([
+            turnCtx,
+            tcLine(ts: "2026-05-20T03:47:16Z", totInput: 42, totCached: 0, totOutput: 0,
+                   lastInput: 42, lastCached: 0, lastOutput: 0),
+        ])
+        let events = reader.read()
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.tokens.input, 42)
+    }
 }

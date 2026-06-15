@@ -31,6 +31,17 @@ final class CodexStatsReader: JSONLogReader, @unchecked Sendable {
         return f
     }()
 
+    private static let isoParserNoFrac: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    /// Parse an ISO-8601 timestamp with OR without fractional seconds.
+    private static func parseTimestamp(_ s: String) -> Date? {
+        isoParser.date(from: s) ?? isoParserNoFrac.date(from: s)
+    }
+
     init(root: URL = CodexStatsReader.defaultRoot(), fileManager: FileManager = .default) {
         self.root = root
         self.fm = fileManager
@@ -149,6 +160,13 @@ final class CodexStatsReader: JSONLogReader, @unchecked Sendable {
               let info = payload["info"] as? [String: Any],
               let total = info["total_token_usage"] as? [String: Any] else { return }
 
+        // Validate the timestamp BEFORE mutating `runningTotal`: a dropped event
+        // must NOT advance the cumulative baseline, or its delta is lost forever
+        // (the next event would diff against a total we skipped). Tolerate ISO
+        // with or without fractional seconds.
+        guard let tsString = obj["timestamp"] as? String,
+              let ts = Self.parseTimestamp(tsString) else { return }
+
         let cur = ReaderState.CodexTotals(input: (total["input_tokens"] as? Int) ?? 0,
                                           cached: (total["cached_input_tokens"] as? Int) ?? 0,
                                           output: (total["output_tokens"] as? Int) ?? 0)
@@ -168,8 +186,6 @@ final class CodexStatsReader: JSONLogReader, @unchecked Sendable {
                                     cacheCreation: 0, cacheRead: dCached)
         guard tokens != .zero else { return }
 
-        guard let tsString = obj["timestamp"] as? String,
-              let ts = Self.isoParser.date(from: tsString) else { return }
         let sessionId = file.deletingPathExtension().lastPathComponent
         emitted.append(UsageEvent(uuid: "\(sessionId)@\(tsString)", sessionId: sessionId,
                                   timestamp: ts, tokens: tokens, model: currentModel))
