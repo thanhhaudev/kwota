@@ -59,6 +59,11 @@ final class StatsStore {
     /// startup backfill) would re-ingest just-cleared history after the wipe.
     private var generation: [ProviderID: Int] = [:]
 
+    /// Wall-clock time of the last `clear(provider:)`. When a clear races an
+    /// in-flight read, the dropped batch is split at this instant: events at or
+    /// after it arrived post-clear and are kept; earlier ones are wiped history.
+    private var clearTime: [ProviderID: Date] = [:]
+
     /// Cached cursor snapshot per provider, refreshed only at the safe point
     /// right after a read completes (no read is then concurrent). `clear`,
     /// `flush`, and `schedulePersist` build the envelope from THIS cache, so
@@ -153,10 +158,19 @@ final class StatsStore {
             if (generation[curProvider] ?? 0) == gen {
                 ingest(events, provider: curProvider)
             } else {
-                // Cleared mid-read: the batch is dropped, but the cursor moved —
-                // persist the cleared ledger WITH the advanced cursor so the
-                // wiped history isn't re-read (and re-counted) on next launch.
-                schedulePersist()
+                // Cleared mid-read. The batch is pre-clear history being wiped —
+                // EXCEPT any events that arrived after the clear (timestamp >=
+                // clearTime) and got swept into this same batch; dropping those
+                // would permanently lose post-clear activity. Keep them, drop the
+                // rest. The cursor advanced either way, so the wiped history isn't
+                // re-read (and re-counted) on next launch.
+                let cutoff = clearTime[curProvider]
+                let postClear = cutoff.map { c in events.filter { $0.timestamp >= c } } ?? []
+                if postClear.isEmpty {
+                    schedulePersist()
+                } else {
+                    ingest(postClear, provider: curProvider)   // ingest() persists
+                }
             }
             // Drain order across providers is unordered (Dictionary.first), which
             // is safe: each provider has independent offsets, so order can't
@@ -200,6 +214,7 @@ final class StatsStore {
         // Invalidate any in-flight read for this provider so it can't re-ingest
         // the history we just wiped after it resumes from off-main.
         generation[provider, default: 0] += 1
+        clearTime[provider] = now
         revision &+= 1
         schedulePersist()
     }

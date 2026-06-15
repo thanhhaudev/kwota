@@ -316,6 +316,38 @@ final class StatsStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.total(provider: .claude, sinceDay: nil), .zero, "clear didn't survive reload")
     }
 
+    /// A Clear that races an in-flight read must still count activity that
+    /// arrived AFTER the clear and got swept into the otherwise-dropped batch —
+    /// only the pre-clear history is wiped. Regression for post-clear appends
+    /// silently lost when a read straddles the clear boundary.
+    func test_clearDuringInFlightRead_keepsPostClearActivity() async {
+        let claude = GatedReader()
+        claude.events = [
+            UsageEvent(uuid: "old", sessionId: "s",
+                       timestamp: date("2026-06-13T03:00:00.000Z"),   // pre-clear history
+                       tokens: TokenBreakdown(input: 100), model: "opus"),
+            UsageEvent(uuid: "new", sessionId: "s",
+                       timestamp: date("2026-06-13T10:00:05.000Z"),   // appended AFTER clear
+                       tokens: TokenBreakdown(input: 7), model: "opus"),
+        ]
+        let store = StatsStore(readers: [.claude: claude],
+                               ledgerURL: URL(fileURLWithPath: "/dev/null"),
+                               clock: { self.date("2026-06-13T10:00:00.000Z") },
+                               persistDebounce: 0)
+
+        let entered = expectation(description: "read in-flight")
+        claude.onEntered = { entered.fulfill() }
+        let first = Task { await store.readChanged(nil, provider: .claude) }
+        await fulfillment(of: [entered], timeout: 2)
+
+        store.clear(provider: .claude)   // wipe; clearTime = 10:00:00
+        claude.proceed.signal()
+        await first.value
+
+        // Pre-clear history dropped, post-clear append kept.
+        XCTAssertEqual(store.total(provider: .claude, sinceDay: nil), TokenBreakdown(input: 7))
+    }
+
     /// A clear that lands while a provider's backfill is still PENDING (queued
     /// behind another provider's in-flight read) must not be undone when that
     /// pending read finally drains. Regression for the generation guard only
