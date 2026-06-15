@@ -258,6 +258,53 @@ final class StatsStore {
         ledger.dayKey(for: clock(), calendar: calendar)
     }
 
+    /// "yyyy-MM-dd" → (year, month, day). Local to the store so it doesn't
+    /// depend on the view layer's parser.
+    private static func parseDay(_ key: String) -> (Int, Int, Int)? {
+        let p = key.split(separator: "-").compactMap { Int($0) }
+        guard p.count == 3 else { return nil }
+        return (p[0], p[1], p[2])
+    }
+
+    /// Per-day series for the chart, padded so every UTC day in the range's
+    /// window is present (empty `byModel` for days with no usage). Window:
+    ///   daysAgo != nil → [today-daysAgo … today]   (week=7 days, month=30)
+    ///   daysAgo == nil → [earliest ledger day … today]  (all time; empty → today only)
+    /// Ascending by day key. Drives the chart's bars, x-axis span, and the
+    /// per-day average (denominator = window day count). Days are generated with
+    /// the UTC keys calendar so they match stored ledger keys exactly.
+    func paddedDailySeries(provider: ProviderID, daysAgo: Int?)
+        -> [(day: String, byModel: [String: TokenBreakdown])] {
+        let cal = StatsLedger.utcCalendarForKeys
+        let now = clock()
+        let data = Dictionary(uniqueKeysWithValues:
+            ledger.dailySeries(provider: provider, sinceDay: nil).map { ($0.day, $0.byModel) })
+
+        let startDate: Date
+        if let daysAgo {
+            startDate = cal.date(byAdding: .day, value: -daysAgo, to: now) ?? now
+        } else if let earliest = data.keys.min(),
+                  let (y, m, d) = Self.parseDay(earliest),
+                  let date = cal.date(from: DateComponents(year: y, month: m, day: d)) {
+            startDate = date
+        } else {
+            startDate = now   // empty ledger → today only
+        }
+
+        var out: [(day: String, byModel: [String: TokenBreakdown])] = []
+        var cursor = cal.startOfDay(for: startDate)
+        let end = cal.startOfDay(for: now)
+        var guardCount = 0
+        while cursor <= end, guardCount < 4000 {   // bound: pathological earliest-key can't spin forever
+            let key = ledger.dayKey(for: cursor)
+            out.append((day: key, byModel: data[key] ?? [:]))
+            guard let next = cal.date(byAdding: .day, value: 1, to: cursor) else { break }
+            cursor = next
+            guardCount += 1
+        }
+        return out
+    }
+
     /// "yyyy-MM-dd" key for `daysAgo` days before now, UTC. nil for "All".
     func sinceDayKey(daysAgo: Int?) -> String? {
         guard let daysAgo else { return nil }

@@ -377,6 +377,79 @@ final class StatsStoreTests: XCTestCase {
         XCTAssertEqual(store.total(provider: .claude, sinceDay: nil), TokenBreakdown(input: 7))
     }
 
+    // MARK: paddedDailySeries
+
+    private func paddedStore() -> StatsStore {
+        StatsStore(reader: FakeJSONLogReader(),
+                   ledgerURL: URL(fileURLWithPath: "/dev/null"),
+                   clock: { self.date("2026-06-13T10:00:00.000Z") },
+                   calendar: StatsLedger.utcCalendarForKeys,
+                   persistDebounce: 0)
+    }
+
+    func test_paddedDailySeries_weekPadsToSevenDaysEndingToday() {
+        let store = paddedStore()
+        store.ingest([
+            UsageEvent(uuid: "a", sessionId: "s", timestamp: date("2026-06-12T05:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 100), model: "claude-opus-4-8"),
+            UsageEvent(uuid: "b", sessionId: "s", timestamp: date("2026-06-13T05:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 50), model: "claude-opus-4-8"),
+        ], provider: .claude)
+
+        let series = store.paddedDailySeries(provider: .claude, daysAgo: 6)
+        XCTAssertEqual(series.map(\.day),
+                       ["2026-06-07","2026-06-08","2026-06-09","2026-06-10","2026-06-11","2026-06-12","2026-06-13"])
+        XCTAssertTrue(series.first { $0.day == "2026-06-09" }!.byModel.isEmpty, "gap day is empty")
+        XCTAssertFalse(series.first { $0.day == "2026-06-12" }!.byModel.isEmpty, "data day carries usage")
+        XCTAssertFalse(series.first { $0.day == "2026-06-13" }!.byModel.isEmpty)
+    }
+
+    func test_paddedDailySeries_countIsWindowSize_forAvgDenominator() {
+        let store = paddedStore()
+        store.ingest([
+            UsageEvent(uuid: "a", sessionId: "s", timestamp: date("2026-06-13T05:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 70, output: 0), model: "claude-opus-4-8"),
+        ], provider: .claude)
+
+        let series = store.paddedDailySeries(provider: .claude, daysAgo: 6)
+        let totalBillable = series.reduce(0) { acc, e in
+            acc + e.byModel.values.reduce(0) { $0 + $1.billable }
+        }
+        XCTAssertEqual(series.count, 7, "avg denominator = window days")
+        XCTAssertEqual(totalBillable, 70)
+        XCTAssertEqual(Double(totalBillable) / Double(series.count), 10, accuracy: 0.0001)
+    }
+
+    func test_paddedDailySeries_allTimeSpansEarliestDayToToday() {
+        let store = paddedStore()
+        store.ingest([
+            UsageEvent(uuid: "a", sessionId: "s", timestamp: date("2026-06-10T05:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 10), model: "claude-opus-4-8"),
+            UsageEvent(uuid: "b", sessionId: "s", timestamp: date("2026-06-13T05:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 20), model: "claude-opus-4-8"),
+        ], provider: .claude)
+
+        let series = store.paddedDailySeries(provider: .claude, daysAgo: nil)
+        XCTAssertEqual(series.map(\.day), ["2026-06-10","2026-06-11","2026-06-12","2026-06-13"])
+        XCTAssertTrue(series.first { $0.day == "2026-06-11" }!.byModel.isEmpty)
+        XCTAssertEqual(series.last?.day, "2026-06-13")
+    }
+
+    func test_paddedDailySeries_emptyLedgerAllTimeIsTodayOnly() {
+        let store = paddedStore()
+        let series = store.paddedDailySeries(provider: .claude, daysAgo: nil)
+        XCTAssertEqual(series.map(\.day), ["2026-06-13"])
+        XCTAssertTrue(series[0].byModel.isEmpty)
+    }
+
+    func test_paddedDailySeries_monthPadsToThirtyDays() {
+        let store = paddedStore()
+        let series = store.paddedDailySeries(provider: .claude, daysAgo: 29)
+        XCTAssertEqual(series.count, 30)
+        XCTAssertEqual(series.first?.day, "2026-05-15")
+        XCTAssertEqual(series.last?.day, "2026-06-13")
+    }
+
     /// A clear that lands while a provider's backfill is still PENDING (queued
     /// behind another provider's in-flight read) must not be undone when that
     /// pending read finally drains. Regression for the generation guard only
