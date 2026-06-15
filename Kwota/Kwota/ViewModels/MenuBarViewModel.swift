@@ -558,6 +558,7 @@ final class MenuBarViewModel {
     let usage: UsageMonitor
     let statsStore: StatsStore
     private let codexStatsWatcher: CodexStatsWatcher?
+    private let codexTraceWatcher: CodexTraceWatcher?
     private let antigravityStatsWatcher: AntigravityStatsWatcher?
     let caffeine: CaffeinateManager
     let probe: ClaudeProbe
@@ -577,6 +578,7 @@ final class MenuBarViewModel {
         usage: UsageMonitor? = nil,
         statsStore: StatsStore? = nil,
         codexStatsWatcher: CodexStatsWatcher? = nil,
+        codexTraceWatcher: CodexTraceWatcher? = nil,
         antigravityStatsWatcher: AntigravityStatsWatcher? = nil,
         caffeine: CaffeinateManager? = nil,
         probe: ClaudeProbe? = nil,
@@ -622,7 +624,7 @@ final class MenuBarViewModel {
         // Each keeps its own offsets so backfill/incremental is correct per provider.
         self.statsStore = statsStore ?? StatsStore(readers: [
             .claude: FilesystemJSONLogReader(),
-            .codex: CodexStatsReader(),
+            .codex: CodexCompositeReader(rollout: CodexStatsReader(), trace: CodexTraceReader()),
             .antigravity: AntigravityStatsReader(),
         ])
         // Codex stats need their own live watcher (the Codex activity source is
@@ -631,6 +633,9 @@ final class MenuBarViewModel {
         let resolvedCodexStatsWatcher = codexStatsWatcher
             ?? (startupMode == .live ? CodexStatsWatcher() : nil)
         self.codexStatsWatcher = resolvedCodexStatsWatcher
+        let resolvedCodexTraceWatcher = codexTraceWatcher
+            ?? (startupMode == .live ? CodexTraceWatcher() : nil)
+        self.codexTraceWatcher = resolvedCodexTraceWatcher
         let resolvedAntigravityStatsWatcher = antigravityStatsWatcher
             ?? (startupMode == .live ? AntigravityStatsWatcher() : nil)
         self.antigravityStatsWatcher = resolvedAntigravityStatsWatcher
@@ -889,6 +894,11 @@ final class MenuBarViewModel {
                 await self?.statsStore.readChanged(paths, provider: .codex)
             }
         }
+        resolvedCodexTraceWatcher?.onChangedPaths = { [weak self] paths in
+            Task { @MainActor in
+                await self?.statsStore.readChanged(paths, provider: .codex)
+            }
+        }
         resolvedAntigravityStatsWatcher?.onChangedPaths = { [weak self] paths in
             Task { @MainActor in
                 await self?.statsStore.readChanged(paths, provider: .antigravity)
@@ -932,6 +942,7 @@ final class MenuBarViewModel {
                 }
             }
             resolvedCodexStatsWatcher?.start()
+            resolvedCodexTraceWatcher?.start()
             resolvedAntigravityStatsWatcher?.start()
             // Migrator runs FIRST so an in-place promotion (legacy active
             // profile gets kind=.auto + a real ownershipBoundary) is reflected
