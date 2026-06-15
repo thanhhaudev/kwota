@@ -470,17 +470,16 @@ struct StatsTimeChart: View {
         }
     }
 
-    /// X-axis tick label per granularity. day/week → "MM-dd" (week = its start
-    /// day); month → "MMM ''yy" (e.g. "Jun '26"); year → "yyyy".
+    /// X-axis tick label per granularity, using LOCALE-ordered fields (the
+    /// viewer's own day/month order, e.g. "11-05" vs "05-11") rather than a
+    /// hard-coded pattern. day/week → month+day (week = its start day);
+    /// month → abbreviated month + 2-digit year; year → full year.
     static func xLabel(for date: Date, granularity: StatsGranularity) -> String {
-        let f = DateFormatter()
-        f.locale = .current
         switch granularity {
-        case .day, .week: f.dateFormat = "MM-dd"
-        case .month:      f.dateFormat = "MMM ''yy"
-        case .year:       f.dateFormat = "yyyy"
+        case .day, .week: return date.formatted(.dateTime.month(.twoDigits).day(.twoDigits))
+        case .month:      return date.formatted(.dateTime.month(.abbreviated).year(.twoDigits))
+        case .year:       return date.formatted(.dateTime.year())
         }
-        return f.string(from: date)
     }
 
     private var chart: some View {
