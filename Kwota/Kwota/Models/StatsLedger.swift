@@ -60,24 +60,20 @@ struct StatsLedger: Codable, Equatable {
         return out
     }
 
+    // Keys are built from raw calendar components rather than a `DateFormatter`:
+    // `ingest` calls these per event, and constructing a `DateFormatter` each
+    // time costs ~40µs (vs <1µs here), which on a first-launch backfill of tens
+    // of thousands of events was over a second of @MainActor stall.
     func dayKey(for date: Date, calendar: Calendar = StatsLedger.utcCalendarForKeys) -> String {
-        let f = DateFormatter()
-        f.calendar = calendar
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = calendar.timeZone
-        f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: date)
+        let c = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
     }
 
     /// Hour bucket key "yyyy-MM-dd HH" (UTC). Same lexical = chronological
     /// ordering as `dayKey`, and `hasPrefix(dayKey + " ")` selects one day.
     func hourKey(for date: Date, calendar: Calendar = StatsLedger.utcCalendarForKeys) -> String {
-        let f = DateFormatter()
-        f.calendar = calendar
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = calendar.timeZone
-        f.dateFormat = "yyyy-MM-dd HH"
-        return f.string(from: date)
+        let c = calendar.dateComponents([.year, .month, .day, .hour], from: date)
+        return String(format: "%04d-%02d-%02d %02d", c.year ?? 0, c.month ?? 0, c.day ?? 0, c.hour ?? 0)
     }
 
     /// Days >= `sinceDay` (nil = all), ascending by day key. Each entry maps

@@ -7,6 +7,31 @@ final class StatsLedgerTests: XCTestCase {
         return f.date(from: iso)!
     }
 
+    // MARK: - Key formatting (UTC daily / injected-calendar hourly)
+
+    /// `dayKey`/`hourKey` must produce zero-padded "yyyy-MM-dd"[" HH"] in the
+    /// given calendar's timezone. Characterizes the exact output so the
+    /// formatter implementation can change without altering bucket keys.
+    func test_dayKey_hourKey_format_acrossTimezones() {
+        let l = StatsLedger()
+        let d = date("2026-06-15T23:30:00.000Z")
+        XCTAssertEqual(l.dayKey(for: d), "2026-06-15")        // UTC default
+        XCTAssertEqual(l.hourKey(for: d), "2026-06-15 23")
+
+        var la = Calendar(identifier: .iso8601)
+        la.timeZone = TimeZone(identifier: "America/Los_Angeles")!   // UTC-7 in June
+        XCTAssertEqual(l.dayKey(for: d, calendar: la), "2026-06-15") // 16:30 PDT, same day
+        XCTAssertEqual(l.hourKey(for: d, calendar: la), "2026-06-15 16")
+
+        let crossMidnight = date("2026-06-16T02:00:00.000Z")        // 19:00 PDT prev day
+        XCTAssertEqual(l.dayKey(for: crossMidnight, calendar: la), "2026-06-15")
+        XCTAssertEqual(l.hourKey(for: crossMidnight, calendar: la), "2026-06-15 19")
+
+        let padded = date("2026-01-05T04:08:00.000Z")              // single-digit month/day/hour
+        XCTAssertEqual(l.dayKey(for: padded), "2026-01-05")
+        XCTAssertEqual(l.hourKey(for: padded), "2026-01-05 04")
+    }
+
     // MARK: - Round 1: merge + dayKey + total/totalsByModel
 
     func test_merge_accumulatesPerProviderDayModel() {
