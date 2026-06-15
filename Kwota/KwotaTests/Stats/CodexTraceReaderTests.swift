@@ -10,6 +10,7 @@ import XCTest
 /// `FileManager.default` so existing fixture IO is unaffected.
 private final class SpyFileManager: CodexFileManager, @unchecked Sendable {
     var failEnumerator = false
+    var simulateTraversalError = false
     var enumeratorCalls = 0
     private let real = FileManager.default
 
@@ -25,6 +26,9 @@ private final class SpyFileManager: CodexFileManager, @unchecked Sendable {
                     errorHandler handler: ((URL, Error) -> Bool)?) -> FileManager.DirectoryEnumerator? {
         enumeratorCalls += 1
         if failEnumerator { return nil }
+        if simulateTraversalError {
+            _ = handler?(url, NSError(domain: "test", code: 1))   // simulate a descendant error
+        }
         return real.enumerator(at: url, includingPropertiesForKeys: keys, options: mask, errorHandler: handler)
     }
 
@@ -170,5 +174,47 @@ final class CodexTraceReaderTests: XCTestCase {
         let afterFirst = spy.enumeratorCalls
         XCTAssertTrue(reader.read().isEmpty)                // no new rows
         XCTAssertEqual(spy.enumeratorCalls, afterFirst, "idle read must NOT walk the sessions tree again")
+    }
+
+    func test_failClosed_onPartialTraversalError_skipsIngest() {
+        // A rollout exists for an UNRELATED thread; the usage row is a different
+        // (ephemeral) thread that would normally be ingested. A traversal error
+        // makes the exclusion set partial/untrusted → skip the whole read.
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: 1_781_481_600, threadId: "tEphemeral",
+                  body: CodexTraceFixture.usageBody(model: "gpt-5.5", input: 10, cached: 0, output: 1)),
+        ])
+        CodexTraceFixture.addRollout(home: home, threadId: "tOther")
+        let spy = SpyFileManager(); spy.simulateTraversalError = true
+        let reader = CodexTraceReader(codexHome: home, fileManager: spy)
+        XCTAssertTrue(reader.read().isEmpty, "traversal error → untrusted exclusion → skip ingest")
+        XCTAssertTrue(reader.state().entries.isEmpty, "cursor must NOT advance when skipped")
+    }
+
+    func test_unrelatedTraceRows_advanceCursorWithoutWalkingSessions() {
+        // A DB with ONLY non-usage rows must NOT trigger a sessions walk, but the
+        // cursor should still advance so the rows aren't re-scanned forever.
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: 1_781_481_600, threadId: "tA",
+                  body: "unrelated trace line", target: "codex_core::session::turn"),
+            .init(id: 2, ts: 1_781_481_600, threadId: "tA",
+                  body: "another unrelated line", target: "codex_core::session::turn"),
+        ])
+        let spy = SpyFileManager()
+        let reader = CodexTraceReader(codexHome: home, fileManager: spy)
+        XCTAssertTrue(reader.read().isEmpty, "no usage rows → nothing emitted")
+        XCTAssertEqual(spy.enumeratorCalls, 0, "no usage rows → no sessions walk")
+        XCTAssertFalse(reader.state().entries.isEmpty, "cursor advanced past unrelated rows")
+        // A later USAGE row IS picked up (cursor advanced, not stuck).
+        CodexTraceFixture.writeDB(at: home.appendingPathComponent("logs_2.sqlite"), rows: [
+            .init(id: 1, ts: 1_781_481_600, threadId: "tA",
+                  body: "unrelated trace line", target: "codex_core::session::turn"),
+            .init(id: 2, ts: 1_781_481_600, threadId: "tA",
+                  body: "another unrelated line", target: "codex_core::session::turn"),
+            .init(id: 3, ts: 1_781_481_600, threadId: "tB",
+                  body: CodexTraceFixture.usageBody(model: "gpt-5.5", input: 7, cached: 0, output: 1)),
+        ])
+        XCTAssertEqual(reader.read().map(\.sessionId), ["tB"])
+        XCTAssertGreaterThan(spy.enumeratorCalls, 0, "usage row present → sessions walk happens")
     }
 }

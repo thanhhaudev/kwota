@@ -82,14 +82,22 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
         return ingest(dbs)
     }
 
-    /// Shared read path. Only DBs with new rows are processed, and the
-    /// rollout-exclusion set (a recursive sessions walk) is built ONLY when
-    /// there's actually new usage — so an idle poll never walks the tree. If the
-    /// exclusion set is untrusted (sessions present but unreadable), skip without
-    /// advancing any cursor and retry next poll.
+    /// Shared read path. For each DB, probe whether it has a NEW USAGE row above
+    /// the cursor. DBs whose only new rows are unrelated trace noise get their
+    /// cursor advanced WITHOUT walking the sessions tree. The rollout-exclusion
+    /// set (a recursive sessions walk) is built only when at least one DB has new
+    /// usage; if it's untrusted, skip without advancing.
     private func ingest(_ dbs: [URL]) -> [UsageEvent] {
         guard !dbs.isEmpty else { return [] }
-        let fresh = dbs.filter { hasNewRows($0) }
+        var fresh: [URL] = []
+        for db in dbs {
+            switch probe(db) {
+            case .none: continue                          // empty/unreadable or no new rows
+            case .some((let hasUsage, let maxId)):
+                if hasUsage { fresh.append(db) }
+                else { offsets[db] = maxId }              // advance past noise, no sessions walk
+            }
+        }
         guard !fresh.isEmpty else { return [] }
         guard let rollout = rolloutThreadIDs() else { return [] }   // untrusted → skip
         var emitted: [UsageEvent] = []
@@ -97,13 +105,31 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
         return emitted
     }
 
-    /// Cheap check (one `SELECT max(id)`, PK-indexed) of whether a DB has rows
-    /// beyond the stored cursor (or shrank → rotation). No sessions walk.
-    private func hasNewRows(_ db: URL) -> Bool {
-        guard let handle = openReadOnly(db) else { return false }
+    /// Cheap per-DB probe: `(hasNewUsage, maxRowId)`, or nil when the DB is
+    /// empty/unreadable or has no rows beyond the cursor. A shrink (rotation) is
+    /// reported as hasUsage so `readOne` re-reads from scratch.
+    private func probe(_ db: URL) -> (hasUsage: Bool, maxId: UInt64)? {
+        guard let handle = openReadOnly(db) else { return nil }
         defer { sqlite3_close(handle) }
-        guard let currentMax = maxRowID(handle) else { return false }
-        return currentMax != (offsets[db] ?? 0)
+        guard let currentMax = maxRowID(handle) else { return nil }   // empty table
+        let lower = offsets[db] ?? 0
+        if currentMax == lower { return nil }            // no new rows
+        if currentMax < lower { return (true, currentMax) }   // rotation → force re-read
+        return (existsUsageRow(handle, above: lower), currentMax)
+    }
+
+    /// True if any `target = usageTarget` usage-shaped row exists with id > lower.
+    private func existsUsageRow(_ handle: OpaquePointer, above lower: UInt64) -> Bool {
+        let sql = """
+            SELECT 1 FROM logs
+            WHERE id > \(lower) AND target = '\(Self.usageTarget)'
+              AND feedback_log_body LIKE '%"usage":{"input_tokens"%'
+            LIMIT 1;
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else { return false }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW
     }
 
     private static func canonicalize(_ url: URL) -> URL {
@@ -119,14 +145,28 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
         return items.filter { $0.lastPathComponent.hasPrefix("logs_") && $0.pathExtension == "sqlite" }
     }
 
-    /// Returns nil when the set can't be trusted (sessions dir exists but can't
-    /// be enumerated) so the caller skips rather than fail-OPEN double-counting
-    /// rollout-backed threads. A missing sessions dir is a trusted empty set
-    /// (no rollouts exist).
+    /// Returns nil when the set can't be trusted — either the sessions dir
+    /// exists but can't be enumerated, OR a traversal error occurs mid-walk
+    /// (which would otherwise yield a partial set and fail OPEN, double-counting
+    /// rollout-backed threads). A missing sessions dir is a trusted empty set.
     private func rolloutThreadIDs() -> Set<String>? {
-        guard fm.fileExists(atPath: sessionsRoot.path) else { return [] }
-        guard let en = fm.enumerator(at: sessionsRoot, includingPropertiesForKeys: nil,
-                                     options: [.skipsHiddenFiles], errorHandler: nil) else { return nil }
+        var traversalFailed = false
+        let en = fm.enumerator(at: sessionsRoot, includingPropertiesForKeys: nil,
+                               options: [.skipsHiddenFiles],
+                               errorHandler: { _, err in
+                                   let nsErr = err as NSError
+                                   // "No such file" on the root itself → sessions dir absent → trusted empty.
+                                   // Any other mid-walk error (permissions, I/O) → untrusted.
+                                   if !(nsErr.domain == NSCocoaErrorDomain && nsErr.code == NSFileReadNoSuchFileError) {
+                                       traversalFailed = true
+                                   }
+                                   return true
+                               })
+        guard let en else {
+            // Enumerator itself couldn't start — could not even open the directory.
+            // Trusted empty when the dir doesn't exist; untrusted when it does.
+            return fm.fileExists(atPath: sessionsRoot.path) ? nil : []
+        }
         var out = Set<String>()
         for case let url as URL in en
         where url.pathExtension == "jsonl" && url.lastPathComponent.hasPrefix("rollout-") {
@@ -134,7 +174,7 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
                 out.insert(uuid)
             }
         }
-        return out
+        return traversalFailed ? nil : out   // any non-ENOENT error → discard (untrusted)
     }
 
     /// Thread ID embedded in a rollout filename stem shaped
