@@ -49,12 +49,28 @@ struct ReaderState: Codable, Equatable, Sendable {
         /// attribution survives a read that begins after the turn_context line
         /// was already consumed. Always nil for the Claude reader.
         var model: String?
+        /// Codex only: last-seen cumulative `total_token_usage` for this file.
+        /// Codex emits refresh `token_count` events that repeat a per-turn
+        /// `last_token_usage` already counted while the cumulative total stays
+        /// flat, so summing `last` over-counts. The reader emits the delta of
+        /// this cumulative instead; persisting it keeps the baseline correct
+        /// across a read boundary and a relaunch. nil for Claude/Antigravity.
+        var codexTotal: CodexTotals?
 
-        init(offset: UInt64, mtime: Date, model: String? = nil) {
+        init(offset: UInt64, mtime: Date, model: String? = nil, codexTotal: CodexTotals? = nil) {
             self.offset = offset
             self.mtime = mtime
             self.model = model
+            self.codexTotal = codexTotal
         }
+    }
+
+    /// Cumulative `total_token_usage` snapshot (Codex). Fields mirror the wire
+    /// shape: `input` INCLUDES `cached`, `output` INCLUDES reasoning.
+    struct CodexTotals: Codable, Equatable, Sendable {
+        var input: Int
+        var cached: Int
+        var output: Int
     }
 
     init(entries: [String: Entry] = [:]) {

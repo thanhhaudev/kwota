@@ -22,6 +22,7 @@ final class CodexStatsReader: JSONLogReader, @unchecked Sendable {
     private var offsets: [URL: UInt64] = [:]
     private var mtimes: [URL: Date] = [:]
     private var models: [URL: String] = [:]
+    private var totals: [URL: ReaderState.CodexTotals] = [:]   // last-seen cumulative total per file
     private let lastLineLock = OSAllocatedUnfairLock<String?>(initialState: nil)
 
     private static let isoParser: ISO8601DateFormatter = {
@@ -51,6 +52,7 @@ final class CodexStatsReader: JSONLogReader, @unchecked Sendable {
         offsets = offsets.filter { live.contains($0.key) }
         mtimes = mtimes.filter { live.contains($0.key) }
         models = models.filter { live.contains($0.key) }
+        totals = totals.filter { live.contains($0.key) }
         for fileURL in files { readOne(fileURL, into: &emitted) }
         return emitted
     }
@@ -93,6 +95,7 @@ final class CodexStatsReader: JSONLogReader, @unchecked Sendable {
         if size < startOffset {
             startOffset = 0
             models[fileURL] = nil
+            totals[fileURL] = nil   // rotation: cumulative total restarts too
         }
         if let m = mtime { mtimes[fileURL] = m }
         if size == startOffset { return }
@@ -106,14 +109,17 @@ final class CodexStatsReader: JSONLogReader, @unchecked Sendable {
             let consumable = data.prefix(through: lastNewline)
             let advanced = startOffset + UInt64(consumable.count)
             var currentModel = models[fileURL]
+            var runningTotal = totals[fileURL]
             if let text = String(data: consumable, encoding: .utf8) {
                 for raw in text.split(separator: "\n", omittingEmptySubsequences: true) {
                     let line = String(raw)
                     lastLineLock.withLock { $0 = line }
-                    parse(line: line, file: fileURL, model: &currentModel, into: &emitted)
+                    parse(line: line, file: fileURL, model: &currentModel,
+                          total: &runningTotal, into: &emitted)
                 }
             }
             models[fileURL] = currentModel
+            totals[fileURL] = runningTotal
             offsets[fileURL] = advanced
         } catch {
             AppLog.shared.log("CodexStatsReader read failed for \(fileURL.lastPathComponent): \(error)", level: .warn)
@@ -121,6 +127,7 @@ final class CodexStatsReader: JSONLogReader, @unchecked Sendable {
     }
 
     private func parse(line: String, file: URL, model currentModel: inout String?,
+                       total runningTotal: inout ReaderState.CodexTotals?,
                        into emitted: inout [UsageEvent]) {
         guard let data = line.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -131,15 +138,34 @@ final class CodexStatsReader: JSONLogReader, @unchecked Sendable {
             if let m = payload["model"] as? String, !m.isEmpty { currentModel = m }
             return
         }
+        // Use the cumulative `total_token_usage`, NOT `last_token_usage`: Codex
+        // emits refresh events (e.g. rate-limit updates) that repeat a non-zero
+        // `last` already counted while the cumulative total stays flat, so summing
+        // `last` double-counts (measured ~24% of real session files over-count).
+        // The cumulative is authoritative; we emit its per-turn DELTA. An event
+        // with no `total_token_usage` (rate-limit-only refresh) carries no usable
+        // cumulative and is skipped entirely.
         guard type == "event_msg", (payload["type"] as? String) == "token_count",
               let info = payload["info"] as? [String: Any],
-              let last = info["last_token_usage"] as? [String: Any] else { return }
+              let total = info["total_token_usage"] as? [String: Any] else { return }
 
-        let inputRaw = (last["input_tokens"] as? Int) ?? 0
-        let cached   = (last["cached_input_tokens"] as? Int) ?? 0
-        let output   = (last["output_tokens"] as? Int) ?? 0
-        let tokens = TokenBreakdown(input: max(0, inputRaw - cached), output: output,
-                                    cacheCreation: 0, cacheRead: cached)
+        let cur = ReaderState.CodexTotals(input: (total["input_tokens"] as? Int) ?? 0,
+                                          cached: (total["cached_input_tokens"] as? Int) ?? 0,
+                                          output: (total["output_tokens"] as? Int) ?? 0)
+        // Baseline for the delta. Cumulative totals are monotonic within a
+        // rollout; if any field went backwards (unexpected reset), rebase to 0
+        // so we never emit a negative delta.
+        var prev = runningTotal ?? ReaderState.CodexTotals(input: 0, cached: 0, output: 0)
+        if cur.input < prev.input || cur.cached < prev.cached || cur.output < prev.output {
+            prev = ReaderState.CodexTotals(input: 0, cached: 0, output: 0)
+        }
+        runningTotal = cur
+
+        let dInputRaw = cur.input - prev.input   // includes cached
+        let dCached   = cur.cached - prev.cached
+        let dOutput   = cur.output - prev.output
+        let tokens = TokenBreakdown(input: max(0, dInputRaw - dCached), output: dOutput,
+                                    cacheCreation: 0, cacheRead: dCached)
         guard tokens != .zero else { return }
 
         guard let tsString = obj["timestamp"] as? String,
@@ -166,7 +192,8 @@ final class CodexStatsReader: JSONLogReader, @unchecked Sendable {
         // cursors are pruned on the next full `read()` walk, not stat'd here.
         var snapshot: [String: ReaderState.Entry] = [:]
         for (url, offset) in offsets {
-            snapshot[url.path] = .init(offset: offset, mtime: mtimes[url] ?? .distantPast, model: models[url])
+            snapshot[url.path] = .init(offset: offset, mtime: mtimes[url] ?? .distantPast,
+                                       model: models[url], codexTotal: totals[url])
         }
         return ReaderState(entries: snapshot)
     }
@@ -175,11 +202,13 @@ final class CodexStatsReader: JSONLogReader, @unchecked Sendable {
         offsets.removeAll(keepingCapacity: false)
         mtimes.removeAll(keepingCapacity: false)
         models.removeAll(keepingCapacity: false)
+        totals.removeAll(keepingCapacity: false)
         for (path, entry) in state.entries {
             let url = URL(fileURLWithPath: path)
             offsets[url] = entry.offset
             mtimes[url] = entry.mtime
             if let m = entry.model { models[url] = m }
+            if let t = entry.codexTotal { totals[url] = t }
         }
     }
 }

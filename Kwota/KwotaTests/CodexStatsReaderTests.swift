@@ -23,9 +23,31 @@ final class CodexStatsReaderTests: XCTestCase {
     }
 
     private let turnCtx = #"{"timestamp":"2026-05-20T03:47:15.888Z","type":"turn_context","payload":{"turn_id":"t1","model":"gpt-5.5"}}"#
+
+    /// One `token_count` line with EXPLICIT cumulative totals (what the reader
+    /// reads) plus a plausible `last_token_usage` (ignored by the reader, kept
+    /// for realism — real logs carry both).
+    private func tcLine(ts: String, totInput: Int, totCached: Int, totOutput: Int,
+                        lastInput: Int, lastCached: Int, lastOutput: Int, reasoning: Int = 0) -> String {
+        #"{"timestamp":"\#(ts)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":\#(totInput),"cached_input_tokens":\#(totCached),"output_tokens":\#(totOutput),"reasoning_output_tokens":\#(reasoning),"total_tokens":\#(totInput+totOutput)},"last_token_usage":{"input_tokens":\#(lastInput),"cached_input_tokens":\#(lastCached),"output_tokens":\#(lastOutput),"reasoning_output_tokens":\#(reasoning),"total_tokens":\#(lastInput+lastOutput)},"model_context_window":258400}}}"#
+    }
+
+    /// A single turn whose CUMULATIVE total equals the given usage (total == last).
+    /// For a first-in-file event this is also the per-turn delta the reader emits.
     private func tokenCount(ts: String, input: Int, cached: Int, output: Int, reasoning: Int) -> String {
-        let total = input + output
-        return #"{"timestamp":"\#(ts)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":999999,"cached_input_tokens":0,"output_tokens":999999,"reasoning_output_tokens":0,"total_tokens":1999998},"last_token_usage":{"input_tokens":\#(input),"cached_input_tokens":\#(cached),"output_tokens":\#(output),"reasoning_output_tokens":\#(reasoning),"total_tokens":\#(total)},"model_context_window":258400}}}"#
+        tcLine(ts: ts, totInput: input, totCached: cached, totOutput: output,
+               lastInput: input, lastCached: cached, lastOutput: output, reasoning: reasoning)
+    }
+
+    /// Per-turn deltas → cumulative-total lines (mirrors how real Codex appends:
+    /// `total_token_usage` is the running sum, `last_token_usage` the per-turn).
+    private func turns(_ list: [(ts: String, input: Int, cached: Int, output: Int)]) -> [String] {
+        var ti = 0, tc = 0, to = 0
+        return list.map { t in
+            ti += t.input; tc += t.cached; to += t.output
+            return tcLine(ts: t.ts, totInput: ti, totCached: tc, totOutput: to,
+                          lastInput: t.input, lastCached: t.cached, lastOutput: t.output)
+        }
     }
 
     func test_parsesLastTokenUsage_correctedMapping() {
@@ -41,14 +63,84 @@ final class CodexStatsReaderTests: XCTestCase {
     }
 
     func test_usesPerTurnDelta_notCumulative_acrossEvents() {
-        let (reader, _, _) = makeReader([
-            turnCtx,
-            tokenCount(ts: "2026-05-20T03:47:21.048Z", input: 1000, cached: 0, output: 100, reasoning: 0),
-            tokenCount(ts: "2026-05-20T03:47:28.456Z", input: 2000, cached: 0, output: 200, reasoning: 0),
-        ])
+        let (reader, _, _) = makeReader([turnCtx] + turns([
+            (ts: "2026-05-20T03:47:21.048Z", input: 1000, cached: 0, output: 100),
+            (ts: "2026-05-20T03:47:28.456Z", input: 2000, cached: 0, output: 200),
+        ]))
         let events = reader.read()
         XCTAssertEqual(events.map(\.tokens.input), [1000, 2000])
         XCTAssertEqual(events.map(\.tokens.output), [100, 200])
+    }
+
+    /// Codex emits refresh `token_count` events (rate-limit updates) that repeat
+    /// a non-zero `last_token_usage` already counted while the cumulative total
+    /// stays flat. Summing `last` double-counts; the cumulative delta ignores it.
+    func test_ignoresRefreshEventsThatRepeatCumulativeTotal() {
+        let (reader, _, _) = makeReader([
+            turnCtx,
+            tcLine(ts: "2026-05-20T03:47:21.000Z", totInput: 1000, totCached: 0, totOutput: 100,
+                   lastInput: 1000, lastCached: 0, lastOutput: 100),
+            // Refresh: cumulative total UNCHANGED, `last` repeats the same usage.
+            tcLine(ts: "2026-05-20T03:47:25.000Z", totInput: 1000, totCached: 0, totOutput: 100,
+                   lastInput: 1000, lastCached: 0, lastOutput: 100),
+            tcLine(ts: "2026-05-20T03:47:30.000Z", totInput: 2500, totCached: 0, totOutput: 250,
+                   lastInput: 1500, lastCached: 0, lastOutput: 150),
+        ])
+        let events = reader.read()
+        XCTAssertEqual(events.map(\.tokens.input), [1000, 1500])   // refresh dropped
+        XCTAssertEqual(events.map(\.tokens.output), [100, 150])
+    }
+
+    /// The cumulative baseline must survive a read boundary: a second read of a
+    /// newly-appended event emits the DELTA, not the full cumulative.
+    func test_emitsDeltaNotCumulative_acrossReadBoundary() {
+        let dir = TempDirectory(); tempDirs.append(dir)
+        let sessionsRoot = dir.url.appendingPathComponent("sessions")
+        let fileDir = sessionsRoot.appendingPathComponent("2026/05/20")
+        try! FileManager.default.createDirectory(at: fileDir, withIntermediateDirectories: true)
+        let file = fileDir.appendingPathComponent("rollout-delta.jsonl")
+        try! (([turnCtx,
+                tcLine(ts: "2026-05-20T03:47:21.000Z", totInput: 1000, totCached: 0, totOutput: 100,
+                       lastInput: 1000, lastCached: 0, lastOutput: 100)].joined(separator: "\n")) + "\n")
+            .write(to: file, atomically: true, encoding: .utf8)
+        let reader = CodexStatsReader(root: sessionsRoot)
+        XCTAssertEqual(reader.read().map(\.tokens.input), [1000])
+
+        let handle = try! FileHandle(forWritingTo: file)
+        handle.seekToEndOfFile()
+        handle.write((tcLine(ts: "2026-05-20T03:47:30.000Z", totInput: 3000, totCached: 0, totOutput: 300,
+                             lastInput: 2000, lastCached: 0, lastOutput: 200) + "\n").data(using: .utf8)!)
+        try! handle.close()
+        XCTAssertEqual(reader.read().map(\.tokens.input), [2000])   // 3000-1000, not 3000
+    }
+
+    /// The cumulative baseline must survive state()/restore() (persist + relaunch),
+    /// or a fresh reader would re-emit the full cumulative as one giant delta.
+    func test_cumulativeTotalSurvivesStateRestore() {
+        let dir = TempDirectory(); tempDirs.append(dir)
+        let sessionsRoot = dir.url.appendingPathComponent("sessions")
+        let fileDir = sessionsRoot.appendingPathComponent("2026/05/20")
+        try! FileManager.default.createDirectory(at: fileDir, withIntermediateDirectories: true)
+        let file = fileDir.appendingPathComponent("rollout-rt2.jsonl")
+        try! (([turnCtx,
+                tcLine(ts: "2026-05-20T03:47:21.000Z", totInput: 1000, totCached: 0, totOutput: 100,
+                       lastInput: 1000, lastCached: 0, lastOutput: 100)].joined(separator: "\n")) + "\n")
+            .write(to: file, atomically: true, encoding: .utf8)
+        let reader1 = CodexStatsReader(root: sessionsRoot)
+        XCTAssertEqual(reader1.read().map(\.tokens.input), [1000])
+        let saved = reader1.state()
+        XCTAssertEqual(saved.entries.values.first?.codexTotal,
+                       ReaderState.CodexTotals(input: 1000, cached: 0, output: 100))
+
+        let handle = try! FileHandle(forWritingTo: file)
+        handle.seekToEndOfFile()
+        handle.write((tcLine(ts: "2026-05-20T03:47:30.000Z", totInput: 3000, totCached: 0, totOutput: 300,
+                             lastInput: 2000, lastCached: 0, lastOutput: 200) + "\n").data(using: .utf8)!)
+        try! handle.close()
+
+        let reader2 = CodexStatsReader(root: sessionsRoot)
+        reader2.restore(saved)
+        XCTAssertEqual(reader2.read().map(\.tokens.input), [2000])   // delta, baseline restored
     }
 
     func test_skipsZeroTokenEvents() {
@@ -93,10 +185,14 @@ final class CodexStatsReaderTests: XCTestCase {
         let fileDir = sessionsRoot.appendingPathComponent("2026/05/20")
         try! FileManager.default.createDirectory(at: fileDir, withIntermediateDirectories: true)
         let file = fileDir.appendingPathComponent("rollout-r.jsonl")
-        let tc = { (i: Int) in self.tokenCount(ts: "2026-05-20T03:47:2\(i).000Z", input: 1000, cached: 0, output: 100, reasoning: 0) }
+        let gen1 = turns([
+            (ts: "2026-05-20T03:47:21.000Z", input: 1000, cached: 0, output: 100),
+            (ts: "2026-05-20T03:47:22.000Z", input: 1000, cached: 0, output: 100),
+            (ts: "2026-05-20T03:47:23.000Z", input: 1000, cached: 0, output: 100),
+        ])
 
         // First generation: gpt-5.5, padded so the rewrite is strictly smaller.
-        try! (([turnCtx, tc(1), tc(2), tc(3)].joined(separator: "\n")) + "\n")
+        try! (([turnCtx] + gen1).joined(separator: "\n") + "\n")
             .write(to: file, atomically: true, encoding: .utf8)
         let reader = CodexStatsReader(root: sessionsRoot)
         let first = reader.read()
