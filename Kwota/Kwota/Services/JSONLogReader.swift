@@ -56,12 +56,19 @@ struct ReaderState: Codable, Equatable, Sendable {
         /// this cumulative instead; persisting it keeps the baseline correct
         /// across a read boundary and a relaunch. nil for Claude/Antigravity.
         var codexTotal: CodexTotals?
+        /// Antigravity only: row indices the cursor advanced past but that failed
+        /// to decode (partial proto drift / a corrupt blob). The reader re-queries
+        /// these each read so they recover after a decoder fix, without blocking
+        /// the valid rows after them. nil/empty for Claude/Codex.
+        var failedIdx: [UInt64]?
 
-        init(offset: UInt64, mtime: Date, model: String? = nil, codexTotal: CodexTotals? = nil) {
+        init(offset: UInt64, mtime: Date, model: String? = nil,
+             codexTotal: CodexTotals? = nil, failedIdx: [UInt64]? = nil) {
             self.offset = offset
             self.mtime = mtime
             self.model = model
             self.codexTotal = codexTotal
+            self.failedIdx = failedIdx
         }
     }
 

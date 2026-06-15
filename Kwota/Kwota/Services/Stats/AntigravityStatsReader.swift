@@ -24,6 +24,7 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
     private var offsets: [URL: UInt64] = [:]   // high-water idx consumed per DB
     private var mtimes: [URL: Date] = [:]
     private var gateSig: [URL: String] = [:]   // change-detection signature (main + -wal)
+    private var failed: [URL: Set<UInt64>] = [:]   // idx the cursor passed but couldn't decode
     private let lastLineLock = OSAllocatedUnfairLock<String?>(initialState: nil)
 
     init(roots: [URL] = AppPaths.antigravityConversationDirs,
@@ -45,6 +46,7 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
         offsets = offsets.filter { live.contains($0.key) }
         mtimes = mtimes.filter { live.contains($0.key) }
         gateSig = gateSig.filter { live.contains($0.key) }
+        failed = failed.filter { live.contains($0.key) }
         for db in dbs { readOne(db, into: &emitted) }
         return emitted
     }
@@ -68,7 +70,11 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
         // spans the main file AND its -wal sidecar (size is the reliable per-commit
         // signal), or live updates are skipped until a checkpoint.
         let sig = changeSignature(db, attrs: attrs)
-        if let known = gateSig[db], known == sig, offsets[db] != nil { return }
+        // Skip an unchanged DB — UNLESS rows are pending retry, in which case we
+        // must re-open to re-attempt them (a decoder fix doesn't change the file,
+        // so the signature alone would never re-trigger a read).
+        if let known = gateSig[db], known == sig, offsets[db] != nil,
+           (failed[db]?.isEmpty ?? true) { return }
         if let mtime { mtimes[db] = mtime }
 
         guard let handle = openReadOnly(db) else { return }   // soft-degrade: keep cursor, skip
@@ -81,7 +87,10 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
         // `idx` is a monotonic PRIMARY KEY, so a genuine shrink is the only
         // rotation we can detect; a reset that reuses idx without net-shrinking
         // is (acceptably) not caught — same append-only assumption as the JSONL readers.
-        if let stored, let maxIdx = maxIdx(handle), maxIdx < stored { highWater = nil }
+        if let stored, let maxIdx = maxIdx(handle), maxIdx < stored {
+            highWater = nil
+            failed[db] = nil   // rotation: old failed idx belong to the dropped table
+        }
 
         let sql: String
         if let highWater {
@@ -99,6 +108,7 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
         var rowsExamined = 0
         var rowsDecoded = 0
         var rowsDecodeFailed = 0
+        var newFailures: [UInt64] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let idx = UInt64(bitPattern: sqlite3_column_int64(stmt, 0))
             maxSeen = max(maxSeen ?? 0, idx)
@@ -108,22 +118,20 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
             let blob = Data(bytes: raw, count: n)
             lastLineLock.withLock { $0 = "\(sessionId)#\(idx)" }
             rowsExamined += 1
-            guard let usage = decodeAntigravityGenMetadata(blob) else { rowsDecodeFailed += 1; continue }
-            guard usage.tokens != .zero else { continue }   // valid row, no billable tokens
-            rowsDecoded += 1
-            // Timestamp fallback chain: row ts → previous valid row ts → DB mtime → now.
-            let ts = usage.timestamp ?? lastTS ?? mtime ?? clock()
-            if usage.timestamp != nil { lastTS = usage.timestamp }
-            emitted.append(UsageEvent(uuid: "\(sessionId)#\(idx)", sessionId: sessionId,
-                                      timestamp: ts, tokens: usage.tokens, model: usage.model))
+            switch handleRow(idx: idx, blob: blob, sessionId: sessionId, mtime: mtime,
+                             lastTS: &lastTS, into: &emitted) {
+            case .emitted:   rowsDecoded += 1
+            case .zeroToken: break
+            case .failed:    rowsDecodeFailed += 1; newFailures.append(idx)
+            }
         }
         // Whole-batch decode FAILURE is the drift signal: a single torn row is a
-        // normal soft-degrade (skipped per-row), but if every decodable row in this
-        // DB failed to parse, the reverse-engineered proto field-map likely moved.
-        // Do NOT advance the cursor or arm the change-gate then, so the rows can be
-        // re-read once the decoder is fixed — advancing would discard that usage
-        // permanently. Rows that decode cleanly but carry no billable tokens are
-        // NOT drift; they advance normally.
+        // normal soft-degrade (deferred for retry below), but if every decodable
+        // row in this DB failed to parse, the reverse-engineered proto field-map
+        // likely moved. Do NOT advance the cursor or arm the change-gate then, so
+        // the rows are re-read in full once the decoder is fixed — advancing would
+        // discard that usage permanently. Rows that decode cleanly but carry no
+        // billable tokens are NOT drift; they advance normally.
         if rowsDecodeFailed > 0, rowsDecoded == 0 {
             AppLog.shared.log(
                 "AntigravityStatsReader: \(rowsDecodeFailed) row(s) in \(db.lastPathComponent) failed to decode — gen_metadata proto field-map may have drifted; not advancing cursor",
@@ -131,10 +139,63 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
             return
         }
         if let maxSeen { offsets[db] = maxSeen }
+        // Deferred retry: re-attempt rows the cursor already advanced past in an
+        // earlier read that failed to decode (partial drift / a corrupt blob), so
+        // they recover after a decoder fix WITHOUT blocking the valid rows after
+        // them. Cheap (a targeted IN-query) and only runs while failures pend.
+        var stillFailing = retryFailed(Array(failed[db] ?? []).sorted(), handle: handle,
+                                       sessionId: sessionId, mtime: mtime, into: &emitted)
+        stillFailing.formUnion(newFailures)
+        failed[db] = stillFailing.isEmpty ? nil : stillFailing
         // Arm the change-gate only after a successful scan. A transient open/prepare
         // failure returns early above without arming it, so the next poll retries
         // instead of being suppressed until the signature changes again.
         gateSig[db] = sig
+    }
+
+    private enum RowOutcome { case emitted, zeroToken, failed }
+
+    /// Decode one row blob and append a `UsageEvent` if it carries billable
+    /// tokens. Shared by the forward scan and the deferred-retry pass.
+    private func handleRow(idx: UInt64, blob: Data, sessionId: String, mtime: Date?,
+                           lastTS: inout Date?, into emitted: inout [UsageEvent]) -> RowOutcome {
+        guard let usage = decodeAntigravityGenMetadata(blob) else { return .failed }
+        guard usage.tokens != .zero else { return .zeroToken }
+        // Timestamp fallback chain: row ts → previous valid row ts → DB mtime → now.
+        let ts = usage.timestamp ?? lastTS ?? mtime ?? clock()
+        if usage.timestamp != nil { lastTS = usage.timestamp }
+        emitted.append(UsageEvent(uuid: "\(sessionId)#\(idx)", sessionId: sessionId,
+                                  timestamp: ts, tokens: usage.tokens, model: usage.model))
+        return .emitted
+    }
+
+    /// Re-query the given (previously-failed) indices and re-attempt decode.
+    /// Returns the set that STILL fails. Any idx that now decodes — even to a
+    /// zero-token row — is treated as resolved and dropped from the set.
+    private func retryFailed(_ idxs: [UInt64], handle: OpaquePointer, sessionId: String,
+                             mtime: Date?, into emitted: inout [UsageEvent]) -> Set<UInt64> {
+        guard !idxs.isEmpty else { return [] }
+        let list = idxs.map(String.init).joined(separator: ",")
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "SELECT idx, data FROM gen_metadata WHERE idx IN (\(list)) ORDER BY idx ASC;",
+                                 -1, &stmt, nil) == SQLITE_OK, let stmt else {
+            return Set(idxs)   // couldn't query → keep all for next time
+        }
+        defer { sqlite3_finalize(stmt) }
+        var resolved = Set<UInt64>()
+        var lastTS: Date?
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let idx = UInt64(bitPattern: sqlite3_column_int64(stmt, 0))
+            guard let raw = sqlite3_column_blob(stmt, 1) else { continue }
+            let n = Int(sqlite3_column_bytes(stmt, 1))
+            guard n > 0 else { continue }
+            let blob = Data(bytes: raw, count: n)
+            if handleRow(idx: idx, blob: blob, sessionId: sessionId, mtime: mtime,
+                         lastTS: &lastTS, into: &emitted) != .failed {
+                resolved.insert(idx)
+            }
+        }
+        return Set(idxs).subtracting(resolved)
     }
 
     private func changeSignature(_ db: URL, attrs: [FileAttributeKey: Any]) -> String {
@@ -174,7 +235,9 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
         // Syscall-free in-memory snapshot; dead cursors pruned on the next read().
         var snapshot: [String: ReaderState.Entry] = [:]
         for (url, idx) in offsets {
-            snapshot[url.path] = .init(offset: idx, mtime: mtimes[url] ?? .distantPast)
+            let pending = failed[url].map { Array($0).sorted() }
+            snapshot[url.path] = .init(offset: idx, mtime: mtimes[url] ?? .distantPast,
+                                       failedIdx: (pending?.isEmpty ?? true) ? nil : pending)
         }
         return ReaderState(entries: snapshot)
     }
@@ -182,10 +245,12 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
     func restore(_ state: ReaderState) {
         offsets.removeAll(keepingCapacity: false)
         mtimes.removeAll(keepingCapacity: false)
+        failed.removeAll(keepingCapacity: false)
         for (path, entry) in state.entries {
             let url = URL(fileURLWithPath: path)
             offsets[url] = entry.offset
             mtimes[url] = entry.mtime
+            if let f = entry.failedIdx, !f.isEmpty { failed[url] = Set(f) }
         }
     }
 }

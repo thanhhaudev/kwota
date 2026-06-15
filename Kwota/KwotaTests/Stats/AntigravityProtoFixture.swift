@@ -84,6 +84,28 @@ enum AntigravityProtoFixture {
         }
     }
 
+    /// Overwrite the blob of an existing row (same idx). Simulates a row that
+    /// becomes decodable after a decoder fix — the bytes our parser can read change.
+    static func updateBlob(db: URL, idx: Int, blob: Data) throws {
+        var dbPtr: OpaquePointer?
+        guard sqlite3_open_v2(db.path, &dbPtr, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
+              let handle = dbPtr else { throw NSError(domain: "agy-stats-test", code: 20) }
+        defer { sqlite3_close(handle) }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "UPDATE gen_metadata SET data = ?, size = ? WHERE idx = ?;",
+                                 -1, &stmt, nil) == SQLITE_OK else {
+            throw NSError(domain: "agy-stats-test", code: 21)
+        }
+        defer { sqlite3_finalize(stmt) }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        _ = blob.withUnsafeBytes { buf in
+            sqlite3_bind_blob(stmt, 1, buf.baseAddress, Int32(buf.count), transient)
+        }
+        sqlite3_bind_int64(stmt, 2, Int64(blob.count))
+        sqlite3_bind_int64(stmt, 3, Int64(idx))
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw NSError(domain: "agy-stats-test", code: 22) }
+    }
+
     /// Open a WAL-mode writer connection on `db` and return the open handle.
     /// The caller MUST keep it open (and `sqlite3_close` it at end of test) so
     /// inserted rows stay in the `-wal` sidecar (no checkpoint migrates them to

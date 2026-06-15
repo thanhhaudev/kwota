@@ -78,7 +78,8 @@ final class AntigravityStatsReaderTests: XCTestCase {
         XCTAssertEqual(events[1].timestamp, Date(timeIntervalSince1970: 1_781_344_340))
     }
 
-    /// A malformed row is skipped; surrounding valid rows still emit.
+    /// A malformed row is skipped; surrounding valid rows still emit (and the
+    /// cursor advances past them — the failed row is deferred for retry).
     func test_read_softDegradesOnMalformedRow() throws {
         let good = F.genBlob(input: 100, output: 10, cache: 0, thinking: 0, ts: 1_781_344_340)
         let junk = Data([0x0a, 0xff, 0xff])   // truncated — not a usage row
@@ -86,6 +87,52 @@ final class AntigravityStatsReaderTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
 
         XCTAssertEqual(AntigravityStatsReader(roots: [root]).read().count, 2)
+    }
+
+    /// A decode failure in a MIXED batch must not let the cursor silently skip
+    /// the bad row forever: it advances past it (valid rows after it still emit)
+    /// but the failed idx is remembered and recovered once it becomes decodable.
+    func test_read_deferredRetry_recoversFailedRowAfterItBecomesDecodable() throws {
+        let good0 = F.genBlob(input: 100, output: 10, cache: 0, thinking: 0, ts: 1_781_344_340)
+        let junk  = Data([0x0a, 0xff, 0xff])
+        let good2 = F.genBlob(input: 200, output: 20, cache: 0, thinking: 0, ts: 1_781_344_360)
+        let (root, db) = try F.makeConversationDB(blobs: [good0, junk, good2])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let reader = AntigravityStatsReader(roots: [root])
+        XCTAssertEqual(reader.read().count, 2, "valid rows emit; the junk row doesn't block them")
+        XCTAssertEqual(reader.state().entries.values.first?.failedIdx, [1], "failed idx remembered")
+        XCTAssertEqual(reader.state().entries.values.first?.offset, 2, "cursor advanced past the junk row")
+
+        // The row becomes decodable (decoder fix simulated by fixing the bytes).
+        let fixed = F.genBlob(input: 50, output: 5, cache: 0, thinking: 0, ts: 1_781_344_350)
+        try F.updateBlob(db: db, idx: 1, blob: fixed)
+        try FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: db.path)
+
+        let again = reader.read()
+        XCTAssertEqual(again.count, 1, "the previously-failed row is recovered via deferred retry")
+        XCTAssertEqual(again[0].tokens.input, 50)
+        XCTAssertNil(reader.state().entries.values.first?.failedIdx, "recovered idx cleared")
+    }
+
+    /// The deferred-retry set survives state()/restore(): a still-failing idx is
+    /// re-attempted after a relaunch (and the cursor isn't rewound to re-emit
+    /// the rows that already succeeded).
+    func test_read_failedIdxSurvivesStateRestore() throws {
+        let good = F.genBlob(input: 100, output: 10, cache: 0, thinking: 0, ts: 1_781_344_340)
+        let junk = Data([0x0a, 0xff, 0xff])
+        let (root, _) = try F.makeConversationDB(blobs: [good, junk])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let r1 = AntigravityStatsReader(roots: [root])
+        XCTAssertEqual(r1.read().count, 1)
+        let saved = r1.state()
+        XCTAssertEqual(saved.entries.values.first?.failedIdx, [1])
+
+        let r2 = AntigravityStatsReader(roots: [root])
+        r2.restore(saved)
+        XCTAssertTrue(r2.read().isEmpty, "good row not re-emitted; junk retried but still fails")
+        XCTAssertEqual(r2.state().entries.values.first?.failedIdx, [1], "still-failing idx stays remembered")
     }
 
     /// A vanished DB's cursor is pruned from state() on the next full read.
