@@ -36,6 +36,10 @@ final class CodexTraceWatcherTests: XCTestCase {
         let watcher = CodexTraceWatcher(codexHome: home, pollInterval: 0.05)
         let exp = expectation(description: "two fires")
         exp.expectedFulfillmentCount = 2
+        // The 0.05s poll keeps firing; we only assert it fired at least twice
+        // (initial backfill + at least one poll). Without this, a 3rd fire that
+        // lands before stop() over-fulfills and fails the test.
+        exp.assertForOverFulfill = false
         watcher.onChangedPaths = { _ in exp.fulfill() }
         watcher.start()
         wait(for: [exp], timeout: 2)
