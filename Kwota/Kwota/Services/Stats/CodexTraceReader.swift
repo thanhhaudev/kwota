@@ -63,7 +63,7 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
     func lastSeenLine() -> String? { lastLineLock.withLock { $0 } }
 
     func read() -> [UsageEvent] {
-        let dbs = discoverDBs()
+        guard let dbs = discoverDBs() else { return [] }   // discovery error → keep offsets, skip
         let live = Set(dbs)
         offsets = offsets.filter { live.contains($0.key) }
         mtimes = mtimes.filter { live.contains($0.key) }
@@ -115,19 +115,23 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
         let lower = offsets[db] ?? 0
         if currentMax == lower { return nil }            // no new rows
         if currentMax < lower { return (true, currentMax) }   // rotation → force re-read
-        return (existsUsageRow(handle, above: lower), currentMax)
+        return (existsUsageRow(handle, above: lower) ?? true, currentMax)
     }
 
-    /// True if any `target = usageTarget` usage-shaped row exists with id > lower.
-    private func existsUsageRow(_ handle: OpaquePointer, above lower: UInt64) -> Bool {
+    /// Whether any new row (id > lower) under the usage target carries token
+    /// usage. Returns nil on a query error so the caller fails CLOSED (never
+    /// advances past possibly-usage rows). Uses a format-independent
+    /// `input_tokens` substring; `parseUsage` (in readOne) is the authority on
+    /// the exact shape, so whitespace/key-order variations aren't dropped here.
+    private func existsUsageRow(_ handle: OpaquePointer, above lower: UInt64) -> Bool? {
         let sql = """
             SELECT 1 FROM logs
             WHERE id > \(lower) AND target = '\(Self.usageTarget)'
-              AND feedback_log_body LIKE '%"usage":{"input_tokens"%'
+              AND feedback_log_body LIKE '%input_tokens%'
             LIMIT 1;
             """
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else { return false }
+        guard sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else { return nil }
         defer { sqlite3_finalize(stmt) }
         return sqlite3_step(stmt) == SQLITE_ROW
     }
@@ -138,10 +142,14 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
         return url
     }
 
-    private func discoverDBs() -> [URL] {
+    /// Returns nil when the codex home can't be listed (transient error) so the
+    /// caller keeps its cursors and retries — returning [] there would prune all
+    /// offsets and re-ingest every DB on the next successful poll (double-count).
+    /// An empty array means the dir was listed and genuinely has no logs DBs.
+    private func discoverDBs() -> [URL]? {
         guard let items = try? fm.contentsOfDirectory(
             at: codexHome, includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]) else { return [] }
+            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]) else { return nil }
         return items.filter { $0.lastPathComponent.hasPrefix("logs_") && $0.pathExtension == "sqlite" }
     }
 
@@ -197,7 +205,7 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
             SELECT id, ts, thread_id, feedback_log_body FROM logs
             WHERE id > \(lower) AND id <= \(currentMax)
               AND target = '\(Self.usageTarget)'
-              AND feedback_log_body LIKE '%"usage":{"input_tokens"%'
+              AND feedback_log_body LIKE '%input_tokens%'
             ORDER BY id ASC;
             """
         var stmt: OpaquePointer?

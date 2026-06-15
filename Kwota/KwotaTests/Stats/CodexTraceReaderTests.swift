@@ -12,12 +12,14 @@ private final class SpyFileManager: CodexFileManager, @unchecked Sendable {
     var failEnumerator = false
     var simulateTraversalError = false
     var enumeratorCalls = 0
+    var failContentsOfDirectory = false
     private let real = FileManager.default
 
     func contentsOfDirectory(at url: URL,
                              includingPropertiesForKeys keys: [URLResourceKey]?,
                              options mask: FileManager.DirectoryEnumerationOptions) throws -> [URL] {
-        try real.contentsOfDirectory(at: url, includingPropertiesForKeys: keys, options: mask)
+        if failContentsOfDirectory { throw NSError(domain: "test", code: 2) }
+        return try real.contentsOfDirectory(at: url, includingPropertiesForKeys: keys, options: mask)
     }
 
     func enumerator(at url: URL,
@@ -217,5 +219,33 @@ final class CodexTraceReaderTests: XCTestCase {
         ])
         XCTAssertEqual(reader.read().map(\.sessionId), ["tB"])
         XCTAssertGreaterThan(spy.enumeratorCalls, 0, "usage row present → sessions walk happens")
+    }
+
+    func test_discoveryError_preservesCursor_andDoesNotReingest() {
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: 1_781_481_600, threadId: "tA",
+                  body: CodexTraceFixture.usageBody(model: "gpt-5.5", input: 10, cached: 0, output: 1)),
+        ])
+        let spy = SpyFileManager()
+        let reader = CodexTraceReader(codexHome: home, fileManager: spy)
+        XCTAssertEqual(reader.read().count, 1)                  // ingest id1, cursor advances
+        XCTAssertFalse(reader.state().entries.isEmpty)
+        spy.failContentsOfDirectory = true
+        XCTAssertTrue(reader.read().isEmpty, "discovery error → skip")
+        XCTAssertFalse(reader.state().entries.isEmpty, "cursor must NOT be wiped on discovery error")
+        spy.failContentsOfDirectory = false
+        XCTAssertTrue(reader.read().isEmpty, "recovered read must NOT re-ingest already-counted history")
+    }
+
+    func test_usageRowWithWhitespace_isNotSkipped() {
+        // Valid usage JSON with a space after the colon — parseUsage tolerates it,
+        // so the SQL gate must too (format-independent), or the row is lost.
+        let spaced = #"turn{model=gpt-5.5}:run: "usage": {"input_tokens": 10, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 1, "total_tokens": 11}"#
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: 1_781_481_600, threadId: "tA", body: spaced),
+        ])
+        let events = CodexTraceReader(codexHome: home).read()
+        XCTAssertEqual(events.count, 1, "whitespace usage row must not be filtered out")
+        XCTAssertEqual(events.first?.tokens.input, 10)
     }
 }
