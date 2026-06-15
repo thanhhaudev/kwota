@@ -224,7 +224,11 @@ final class StatsStore {
         // Invalidate any in-flight read for this provider so it can't re-ingest
         // the history we just wiped after it resumes from off-main.
         generation[provider, default: 0] += 1
-        clearTime[provider] = now
+        // Floor to whole seconds: Codex-trace / Antigravity timestamps are
+        // second-resolution, so a sub-second watermark would drop a post-clear
+        // event landing in the same second. Flooring keeps the clear-second
+        // onward — never loses new activity (worst case keeps ≤1s of pre-clear).
+        clearTime[provider] = Date(timeIntervalSince1970: floor(now.timeIntervalSince1970))
         revision &+= 1
         schedulePersist()
     }

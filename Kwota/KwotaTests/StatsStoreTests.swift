@@ -545,6 +545,22 @@ final class StatsStoreTests: XCTestCase {
         XCTAssertEqual(result.granularity, .year)
         XCTAssertEqual(billableSum(result.points), 10)
     }
+
+    func test_clear_keepsSameSecondEventViaFlooredWatermark() {
+        // Clear at .500; a second-resolution event at .000 in the SAME second
+        // (e.g. Codex trace / Antigravity) must be kept, not wiped.
+        let store = StatsStore(reader: FakeJSONLogReader(),
+                               ledgerURL: URL(fileURLWithPath: "/dev/null"),
+                               clock: { self.date("2026-06-13T10:00:00.500Z") },
+                               persistDebounce: 0)
+        store.clear(provider: .codex)
+        store.ingest([
+            UsageEvent(uuid: "x", sessionId: "s", timestamp: self.date("2026-06-13T10:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 99), model: "gpt-5.5"),
+        ], provider: .codex)
+        XCTAssertEqual(store.total(provider: .codex, sinceDay: nil), TokenBreakdown(input: 99),
+                       "same-second post-clear event must survive")
+    }
 }
 
 /// Test reader whose `read()` signals `onEntered` and then blocks on `proceed`,
