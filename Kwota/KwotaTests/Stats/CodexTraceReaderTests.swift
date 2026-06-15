@@ -4,6 +4,37 @@
 import XCTest
 @testable import Kwota
 
+/// Test double that conforms to `CodexFileManager`: makes the sessions
+/// enumerator fail on demand and counts how many times it's called so we can
+/// prove fail-closed + walk-gating. Delegates everything else to the real
+/// `FileManager.default` so existing fixture IO is unaffected.
+private final class SpyFileManager: CodexFileManager, @unchecked Sendable {
+    var failEnumerator = false
+    var enumeratorCalls = 0
+    private let real = FileManager.default
+
+    func contentsOfDirectory(at url: URL,
+                             includingPropertiesForKeys keys: [URLResourceKey]?,
+                             options mask: FileManager.DirectoryEnumerationOptions) throws -> [URL] {
+        try real.contentsOfDirectory(at: url, includingPropertiesForKeys: keys, options: mask)
+    }
+
+    func enumerator(at url: URL,
+                    includingPropertiesForKeys keys: [URLResourceKey]?,
+                    options mask: FileManager.DirectoryEnumerationOptions,
+                    errorHandler handler: ((URL, Error) -> Bool)?) -> FileManager.DirectoryEnumerator? {
+        enumeratorCalls += 1
+        if failEnumerator { return nil }
+        return real.enumerator(at: url, includingPropertiesForKeys: keys, options: mask, errorHandler: handler)
+    }
+
+    func fileExists(atPath path: String) -> Bool { real.fileExists(atPath: path) }
+
+    func attributesOfItem(atPath path: String) throws -> [FileAttributeKey: Any] {
+        try real.attributesOfItem(atPath: path)
+    }
+}
+
 final class CodexTraceReaderTests: XCTestCase {
     private var home: URL!
     override func tearDown() { if let home { CodexTraceFixture.cleanup(home) }; home = nil }
@@ -112,5 +143,32 @@ final class CodexTraceReaderTests: XCTestCase {
                   body: CodexTraceFixture.usageBody(model: "gpt-5.5", input: 7, cached: 0, output: 1)),
         ])
         XCTAssertEqual(reader.read().map(\.sessionId), ["tNew"])
+    }
+
+    func test_failClosed_whenSessionsExistsButUnreadable_skipsIngest() {
+        // sessions/ EXISTS (a rollout present) but enumerator fails → the
+        // exclusion set is untrusted, so we must NOT ingest (and not advance).
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: 1_781_481_600, threadId: "tA",
+                  body: CodexTraceFixture.usageBody(model: "gpt-5.5", input: 10, cached: 0, output: 1)),
+        ])
+        CodexTraceFixture.addRollout(home: home, threadId: "whatever")   // makes sessions/ exist
+        let spy = SpyFileManager(); spy.failEnumerator = true
+        let reader = CodexTraceReader(codexHome: home, fileManager: spy)
+        XCTAssertTrue(reader.read().isEmpty, "untrusted exclusion set → skip ingest")
+        XCTAssertTrue(reader.state().entries.isEmpty, "cursor must NOT advance when skipped")
+    }
+
+    func test_idleRead_doesNotWalkSessions() {
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: 1_781_481_600, threadId: "tA",
+                  body: CodexTraceFixture.usageBody(model: "gpt-5.5", input: 10, cached: 0, output: 1)),
+        ])
+        let spy = SpyFileManager()
+        let reader = CodexTraceReader(codexHome: home, fileManager: spy)
+        XCTAssertEqual(reader.read().count, 1)              // first read ingests + walks sessions
+        let afterFirst = spy.enumeratorCalls
+        XCTAssertTrue(reader.read().isEmpty)                // no new rows
+        XCTAssertEqual(spy.enumeratorCalls, afterFirst, "idle read must NOT walk the sessions tree again")
     }
 }

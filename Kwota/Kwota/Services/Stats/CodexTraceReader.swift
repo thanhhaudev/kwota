@@ -23,10 +23,26 @@ import Foundation
 import SQLite3
 import os
 
+/// Minimal seam so tests can inject a spy without subclassing `FileManager`
+/// (the URL-based `enumerator` overload is `@nonobjc` and can't be overridden).
+protocol CodexFileManager: AnyObject {
+    func contentsOfDirectory(at url: URL,
+                             includingPropertiesForKeys keys: [URLResourceKey]?,
+                             options mask: FileManager.DirectoryEnumerationOptions) throws -> [URL]
+    func enumerator(at url: URL,
+                    includingPropertiesForKeys keys: [URLResourceKey]?,
+                    options mask: FileManager.DirectoryEnumerationOptions,
+                    errorHandler handler: ((URL, Error) -> Bool)?) -> FileManager.DirectoryEnumerator?
+    func fileExists(atPath path: String) -> Bool
+    func attributesOfItem(atPath path: String) throws -> [FileAttributeKey: Any]
+}
+
+extension FileManager: CodexFileManager {}
+
 final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
     private let codexHome: URL
     private let sessionsRoot: URL
-    private let fm: FileManager
+    private let fm: any CodexFileManager
     private var offsets: [URL: UInt64] = [:]   // high-water rowid consumed per logs DB
     private var mtimes: [URL: Date] = [:]
     private let lastLineLock = OSAllocatedUnfairLock<String?>(initialState: nil)
@@ -34,7 +50,7 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
     /// Trace target that carries the responses-API `usage` dump.
     private static let usageTarget = "codex_api::endpoint::responses_websocket"
 
-    init(codexHome: URL = CodexTraceReader.defaultHome(), fileManager: FileManager = .default) {
+    init(codexHome: URL = CodexTraceReader.defaultHome(), fileManager: any CodexFileManager = FileManager.default) {
         self.codexHome = codexHome
         self.sessionsRoot = codexHome.appendingPathComponent("sessions")
         self.fm = fileManager
@@ -51,11 +67,7 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
         let live = Set(dbs)
         offsets = offsets.filter { live.contains($0.key) }
         mtimes = mtimes.filter { live.contains($0.key) }
-        guard !dbs.isEmpty else { return [] }
-        let rollout = rolloutThreadIDs()
-        var emitted: [UsageEvent] = []
-        for db in dbs { readOne(db, excluding: rollout, into: &emitted) }
-        return emitted
+        return ingest(dbs)
     }
 
     func read(only paths: Set<URL>) -> [UsageEvent] {
@@ -67,11 +79,31 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
             guard name.hasPrefix("logs_"), name.hasSuffix(".sqlite") else { return nil }
             return n
         }
+        return ingest(dbs)
+    }
+
+    /// Shared read path. Only DBs with new rows are processed, and the
+    /// rollout-exclusion set (a recursive sessions walk) is built ONLY when
+    /// there's actually new usage — so an idle poll never walks the tree. If the
+    /// exclusion set is untrusted (sessions present but unreadable), skip without
+    /// advancing any cursor and retry next poll.
+    private func ingest(_ dbs: [URL]) -> [UsageEvent] {
         guard !dbs.isEmpty else { return [] }
-        let rollout = rolloutThreadIDs()
+        let fresh = dbs.filter { hasNewRows($0) }
+        guard !fresh.isEmpty else { return [] }
+        guard let rollout = rolloutThreadIDs() else { return [] }   // untrusted → skip
         var emitted: [UsageEvent] = []
-        for db in dbs { readOne(db, excluding: rollout, into: &emitted) }
+        for db in fresh { readOne(db, excluding: rollout, into: &emitted) }
         return emitted
+    }
+
+    /// Cheap check (one `SELECT max(id)`, PK-indexed) of whether a DB has rows
+    /// beyond the stored cursor (or shrank → rotation). No sessions walk.
+    private func hasNewRows(_ db: URL) -> Bool {
+        guard let handle = openReadOnly(db) else { return false }
+        defer { sqlite3_close(handle) }
+        guard let currentMax = maxRowID(handle) else { return false }
+        return currentMax != (offsets[db] ?? 0)
     }
 
     private static func canonicalize(_ url: URL) -> URL {
@@ -87,11 +119,14 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
         return items.filter { $0.lastPathComponent.hasPrefix("logs_") && $0.pathExtension == "sqlite" }
     }
 
-    /// UUIDs of threads that produced a rollout (already counted by
-    /// `CodexStatsReader`). Filenames only — no content read.
-    private func rolloutThreadIDs() -> Set<String> {
+    /// Returns nil when the set can't be trusted (sessions dir exists but can't
+    /// be enumerated) so the caller skips rather than fail-OPEN double-counting
+    /// rollout-backed threads. A missing sessions dir is a trusted empty set
+    /// (no rollouts exist).
+    private func rolloutThreadIDs() -> Set<String>? {
+        guard fm.fileExists(atPath: sessionsRoot.path) else { return [] }
         guard let en = fm.enumerator(at: sessionsRoot, includingPropertiesForKeys: nil,
-                                     options: [.skipsHiddenFiles]) else { return [] }
+                                     options: [.skipsHiddenFiles], errorHandler: nil) else { return nil }
         var out = Set<String>()
         for case let url as URL in en
         where url.pathExtension == "jsonl" && url.lastPathComponent.hasPrefix("rollout-") {
