@@ -305,6 +305,33 @@ final class StatsStore {
         return out
     }
 
+    /// The chart series at an adaptive granularity. Starts from the padded daily
+    /// series (full window, gap days filled), picks a granularity from the
+    /// window's day-span, and — for week/month/year — sums each model's tokens
+    /// into buckets keyed by the bucket's START day ("yyyy-MM-dd", UTC), keeping
+    /// empty buckets. `.day` returns the padded daily series unchanged. Ascending.
+    func chartSeries(provider: ProviderID, daysAgo: Int?)
+        -> (granularity: StatsGranularity, points: [(day: String, byModel: [String: TokenBreakdown])]) {
+        let daily = paddedDailySeries(provider: provider, daysAgo: daysAgo)
+        let gran = StatsGranularity.forSpan(days: daily.count)
+        guard gran != .day else { return (.day, daily) }
+
+        let cal = StatsLedger.utcCalendarForKeys
+        var order: [String] = []
+        var buckets: [String: [String: TokenBreakdown]] = [:]
+        for entry in daily {
+            guard let (y, m, d) = Self.parseDay(entry.day),
+                  let date = cal.date(from: DateComponents(year: y, month: m, day: d)) else { continue }
+            let start = cal.dateInterval(of: gran.component, for: date)?.start ?? date
+            let key = ledger.dayKey(for: start)
+            if buckets[key] == nil { buckets[key] = [:]; order.append(key) }   // keep empty buckets
+            for (model, tok) in entry.byModel {
+                buckets[key]![model] = (buckets[key]![model] ?? .zero) + tok
+            }
+        }
+        return (gran, order.map { (day: $0, byModel: buckets[$0] ?? [:]) })
+    }
+
     /// "yyyy-MM-dd" key for `daysAgo` days before now, UTC. nil for "All".
     func sinceDayKey(daysAgo: Int?) -> String? {
         guard let daysAgo else { return nil }

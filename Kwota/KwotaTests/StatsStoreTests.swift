@@ -486,6 +486,65 @@ final class StatsStoreTests: XCTestCase {
         XCTAssertEqual(store.total(provider: .claude, sinceDay: nil).input, 100,
                        "claude (not cleared) should still ingest normally")
     }
+
+    // MARK: chartSeries (adaptive granularity)
+
+    private func billableSum(_ pts: [(day: String, byModel: [String: TokenBreakdown])]) -> Int {
+        pts.reduce(0) { acc, e in acc + e.byModel.values.reduce(0) { $0 + $1.billable } }
+    }
+
+    func test_chartSeries_dayGranularityPassesThroughPaddedSeries() {
+        let store = paddedStore()
+        store.ingest([
+            UsageEvent(uuid: "a", sessionId: "s", timestamp: date("2026-06-12T05:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 100), model: "claude-opus-4-8"),
+        ], provider: .claude)
+        let result = store.chartSeries(provider: .claude, daysAgo: 6)
+        XCTAssertEqual(result.granularity, .day)
+        XCTAssertEqual(result.points.map(\.day),
+                       store.paddedDailySeries(provider: .claude, daysAgo: 6).map(\.day))
+    }
+
+    func test_chartSeries_weeklyWhenSpanOver90Days_conservesTotal() {
+        let store = paddedStore()
+        store.ingest([
+            UsageEvent(uuid: "old", sessionId: "s", timestamp: date("2026-03-01T05:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 1_000), model: "claude-opus-4-8"),
+            UsageEvent(uuid: "new", sessionId: "s", timestamp: date("2026-06-13T05:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 500), model: "claude-opus-4-8"),
+        ], provider: .claude)
+        let result = store.chartSeries(provider: .claude, daysAgo: nil)
+        XCTAssertEqual(result.granularity, .week)
+        XCTAssertEqual(billableSum(result.points), 1_500)
+        XCTAssertLessThan(result.points.count, 105)
+        XCTAssertEqual(result.points.map(\.day), result.points.map(\.day).sorted())
+    }
+
+    func test_chartSeries_monthlyWhenSpanOverTwoYears() {
+        let store = paddedStore()
+        store.ingest([
+            UsageEvent(uuid: "old", sessionId: "s", timestamp: date("2024-01-01T05:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 10), model: "claude-opus-4-8"),
+            UsageEvent(uuid: "new", sessionId: "s", timestamp: date("2026-06-13T05:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 20), model: "claude-opus-4-8"),
+        ], provider: .claude)
+        let result = store.chartSeries(provider: .claude, daysAgo: nil)
+        XCTAssertEqual(result.granularity, .month)
+        XCTAssertEqual(billableSum(result.points), 30)
+    }
+
+    func test_chartSeries_yearlyWhenSpanOverTenYears() {
+        let store = paddedStore()
+        store.ingest([
+            UsageEvent(uuid: "old", sessionId: "s", timestamp: date("2016-05-01T05:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 7), model: "claude-opus-4-8"),
+            UsageEvent(uuid: "new", sessionId: "s", timestamp: date("2026-06-13T05:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 3), model: "claude-opus-4-8"),
+        ], provider: .claude)
+        let result = store.chartSeries(provider: .claude, daysAgo: nil)
+        XCTAssertEqual(result.granularity, .year)
+        XCTAssertEqual(billableSum(result.points), 10)
+    }
 }
 
 /// Test reader whose `read()` signals `onEntered` and then blocks on `proceed`,
