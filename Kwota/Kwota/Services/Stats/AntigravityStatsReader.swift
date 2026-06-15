@@ -69,7 +69,6 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
         // signal), or live updates are skipped until a checkpoint.
         let sig = changeSignature(db, attrs: attrs)
         if let known = gateSig[db], known == sig, offsets[db] != nil { return }
-        gateSig[db] = sig
         if let mtime { mtimes[db] = mtime }
 
         guard let handle = openReadOnly(db) else { return }   // soft-degrade: keep cursor, skip
@@ -99,6 +98,7 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
         var maxSeen = highWater
         var rowsExamined = 0
         var rowsDecoded = 0
+        var rowsDecodeFailed = 0
         while sqlite3_step(stmt) == SQLITE_ROW {
             let idx = UInt64(bitPattern: sqlite3_column_int64(stmt, 0))
             maxSeen = max(maxSeen ?? 0, idx)
@@ -108,7 +108,8 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
             let blob = Data(bytes: raw, count: n)
             lastLineLock.withLock { $0 = "\(sessionId)#\(idx)" }
             rowsExamined += 1
-            guard let usage = decodeAntigravityGenMetadata(blob), usage.tokens != .zero else { continue }
+            guard let usage = decodeAntigravityGenMetadata(blob) else { rowsDecodeFailed += 1; continue }
+            guard usage.tokens != .zero else { continue }   // valid row, no billable tokens
             rowsDecoded += 1
             // Timestamp fallback chain: row ts → previous valid row ts → DB mtime → now.
             let ts = usage.timestamp ?? lastTS ?? mtime ?? clock()
@@ -116,15 +117,24 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
             emitted.append(UsageEvent(uuid: "\(sessionId)#\(idx)", sessionId: sessionId,
                                       timestamp: ts, tokens: usage.tokens, model: usage.model))
         }
-        // Whole-batch decode failure is the drift signal: a single torn row is a
-        // normal soft-degrade (skipped per-row), but if every new row in this DB
-        // decoded to nothing, the reverse-engineered proto field-map likely moved.
-        if rowsExamined > 0, rowsDecoded == 0 {
+        // Whole-batch decode FAILURE is the drift signal: a single torn row is a
+        // normal soft-degrade (skipped per-row), but if every decodable row in this
+        // DB failed to parse, the reverse-engineered proto field-map likely moved.
+        // Do NOT advance the cursor or arm the change-gate then, so the rows can be
+        // re-read once the decoder is fixed — advancing would discard that usage
+        // permanently. Rows that decode cleanly but carry no billable tokens are
+        // NOT drift; they advance normally.
+        if rowsDecodeFailed > 0, rowsDecoded == 0 {
             AppLog.shared.log(
-                "AntigravityStatsReader: \(rowsExamined) row(s) in \(db.lastPathComponent) decoded to nothing — gen_metadata proto field-map may have drifted",
+                "AntigravityStatsReader: \(rowsDecodeFailed) row(s) in \(db.lastPathComponent) failed to decode — gen_metadata proto field-map may have drifted; not advancing cursor",
                 level: .warn)
+            return
         }
         if let maxSeen { offsets[db] = maxSeen }
+        // Arm the change-gate only after a successful scan. A transient open/prepare
+        // failure returns early above without arming it, so the next poll retries
+        // instead of being suppressed until the signature changes again.
+        gateSig[db] = sig
     }
 
     private func changeSignature(_ db: URL, attrs: [FileAttributeKey: Any]) -> String {

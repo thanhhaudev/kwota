@@ -160,6 +160,41 @@ final class AntigravityStatsReaderTests: XCTestCase {
         XCTAssertEqual(events[0].tokens.input, 200)
     }
 
+    /// Whole-batch decode failure (proto drift) must NOT advance the high-water,
+    /// or the un-decodable rows are skipped forever once the decoder is fixed.
+    func test_read_doesNotAdvanceCursor_whenWholeBatchFailsToDecode() throws {
+        let junk = Data([0x0a, 0xff, 0xff])   // truncated — fails to decode
+        let (root, db) = try F.makeConversationDB(blobs: [junk, junk])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let reader = AntigravityStatsReader(roots: [root])
+        XCTAssertEqual(reader.read().count, 0)
+        XCTAssertEqual(reader.state().entries.count, 0,
+                       "cursor must not advance when every row fails to decode")
+
+        // A later valid append still emits, and because the cursor never moved the
+        // earlier rows remain re-readable (here: re-scanned and skipped per-row).
+        let good = F.genBlob(input: 100, output: 10, cache: 0, thinking: 0, ts: 1_781_344_340)
+        try F.writeGenMetadata(db: db, blobs: [good], startIdx: 2)
+        try FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: db.path)
+
+        let events = reader.read()
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0].tokens.input, 100)
+    }
+
+    /// Rows that decode cleanly but carry zero billable tokens are accounted for
+    /// (just empty), so the cursor MUST advance — they are not proto drift.
+    func test_read_advancesCursor_whenRowsAreValidButZeroToken() throws {
+        let zero = F.genBlob(input: 0, output: 0, cache: 0, thinking: 0, ts: 1_781_344_340)
+        let (root, _) = try F.makeConversationDB(blobs: [zero, zero])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let reader = AntigravityStatsReader(roots: [root])
+        XCTAssertEqual(reader.read().count, 0)            // zero-token rows emit nothing…
+        XCTAssertEqual(reader.state().entries.count, 1)   // …but advance the cursor
+    }
+
     /// A DB with an empty gen_metadata table emits nothing and records no cursor.
     func test_read_handlesEmptyTable() throws {
         let (root, _) = try F.makeConversationDB(blobs: [])
