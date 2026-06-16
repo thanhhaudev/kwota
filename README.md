@@ -53,6 +53,8 @@ If `Install` errors after a previous attempt: `sudo sfltool resetbtm`.
 
 **Usage** — per-provider quota view (see the Providers table above). Each provider gets a session chart with an `avg` reference line (typical % at the same point in past cycles) and a pace hint ("on track", "above typical", etc.). A Free-plan overlay shows for Claude accounts with no paid subscription.
 
+**Stats** — token-usage history for the active provider, in the Screen Time idiom. Pick a range (Today / last 7 days / last 30 days / all time); the chart stacks bars by model on a real time axis — per hour for Today, per day/week/month/year as the window grows — with a dashed daily-average line on the multi-day views. Below it, a per-model grid splits each model's total into `↓ in / ↑ out / ⚡ cache`. Tap a bar to read off that bucket. Providers without token data show an empty state.
+
 **Awake** — toggle `caffeinate` (manual / auto / battery-aware). Below it: a multi-provider activity chart of recent agent replies. The chart shades each awake interval by mode — auto (green) or manual (blue). Battery (orange) shows up as the status dot in the card, menu-bar icon, and Settings row when auto is blocked by a low-battery threshold.
 
 **Cache** — tracks caches across your machine: developer tooling (Xcode DerivedData, npm / bun / yarn / pnpm, pip, Homebrew, JetBrains, VS Code, Cursor), iOS Simulator / DeviceSupport, the macOS Icon services cache, generic `~/.cache`, and more. Each row shows a size breakdown and an AI evaluation. System-wide caches that need root also appear here once the privileged helper is installed.
@@ -72,6 +74,18 @@ Manual refresh (chart button or "Refresh" shortcut) respects the same back-off a
 Kwota never invokes `claude`, `codex`, or `agy` to read usage — that would burn quota.
 
 The Cache tab's "AI evaluation" is the one feature that does spawn `claude -p` (Anthropic blocks 3rd-party API access). It uses your normal subscription quota; Kwota tells you when it happens.
+
+## How stats are collected
+
+Stats read the same on-disk logs the providers already write — no extra `claude` / `codex` / `agy` calls:
+
+| Provider    | Source                                                         |
+| ----------- | ------------------------------------------------------------- |
+| Claude Code | `~/.claude/projects/**/*.jsonl`                               |
+| Codex       | rollout `sessions/**/rollout-*.jsonl` + trace `logs_*.sqlite` |
+| Antigravity | conversation SQLite (`gen_metadata` table)                   |
+
+Kwota tails each log from a persisted cursor, so each turn is counted exactly once. First launch reads existing history as a one-time backfill — for Codex and Antigravity, per-turn token counts live only in these logs. Hourly buckets (the Today view) start from your next activity; already-read events can't be re-bucketed. The rollup is UTC-anchored so changing timezone doesn't reshuffle past days, and is kept until you clear it in Settings → Data & Storage.
 
 ## How the avg line is computed
 
