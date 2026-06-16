@@ -151,6 +151,24 @@ final class AntigravityStatsReaderTests: XCTestCase {
         XCTAssertNil(entry?.failedIdx, "non-usage rows are not retryable failures")
     }
 
+    /// `read(only:)` reads just the named DBs — no discovery walk — and ignores
+    /// paths that aren't `.db` files in a known conversation root.
+    func test_readOnly_readsOnlyNamedDBs_andRejectsStrayPaths() throws {
+        let b0 = F.genBlob(input: 100, output: 10, cache: 0, thinking: 0, ts: 1_781_344_340)
+        let (root, db) = try F.makeConversationDB(blobs: [b0])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let reader = AntigravityStatsReader(roots: [root])
+        // A stray path outside the root and a non-.db path are both ignored.
+        let stray = root.deletingLastPathComponent().appendingPathComponent("elsewhere.db")
+        let notDB = root.appendingPathComponent("transcript.jsonl")
+        XCTAssertTrue(reader.read(only: [stray, notDB]).isEmpty, "stray/non-db paths are ignored")
+
+        let events = reader.read(only: [db])
+        XCTAssertEqual(events.map(\.tokens.input), [100], "the named DB is read")
+        XCTAssertTrue(reader.read(only: [db]).isEmpty, "cursor advanced — second targeted read sees nothing")
+    }
+
     /// A non-usage row mixed with a billable one: the billable row emits and the
     /// non-usage row neither blocks it nor poisons `failed`.
     func test_read_nonUsageRowMixedWithBillable_emitsBillableKeepsFailedEmpty() throws {

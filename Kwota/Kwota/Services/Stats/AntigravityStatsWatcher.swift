@@ -4,19 +4,21 @@
 //  Live trigger for Antigravity stats reads. Consumes the Antigravity transcript
 //  FSEvents stream (reused from `AntigravityActivitySource`), keeps only
 //  `transcript.jsonl` appends — which correlate 1:1 with new `gen_metadata`
-//  rows — debounces them, and fires `onChangedPaths(nil)` (a full DB walk; cheap
-//  because the reader only pulls rows past each DB's high-water). A 5-minute poll
-//  backstops any coalesced/dropped events, and `start()` fires one initial nil
-//  backfill so existing history is ingested. Mirrors `CodexStatsWatcher`; the
-//  transcript file is only a change SIGNAL — the data lives in the conversation
-//  `.db` files the reader walks.
+//  rows — debounces them, and fires a TARGETED read of just the conversation DB
+//  that changed. The transcript path `…/brain/<convId>/…/transcript.jsonl` shares
+//  its `<convId>` with the data file `…/conversations/<convId>.db`, so one active
+//  conversation no longer drags every historical DB through a stat sweep on each
+//  append. A 5-minute poll and the initial `start()` backfill keep firing `nil`
+//  (full walk) so newly-appeared / pruned DBs are still reconciled. Mirrors
+//  `CodexStatsWatcher`; the transcript file is only a change SIGNAL — the data
+//  lives in the conversation `.db` files the reader reads.
 
 import Foundation
 
 @MainActor
 final class AntigravityStatsWatcher {
-    /// Always called with `nil` (full DB walk). The signal file (`transcript.jsonl`)
-    /// is not itself a data file, so there are no per-path incremental reads here.
+    /// `nil` ⇒ full DB walk (startup + backstop poll). A non-nil set ⇒ read only
+    /// those conversation DBs (a live transcript append, mapped to its `.db`).
     var onChangedPaths: ((Set<URL>?) -> Void)?
 
     private let makeFileEvents: () -> AsyncStream<String>
@@ -61,13 +63,33 @@ final class AntigravityStatsWatcher {
     private func handle(path: String) {
         let url = URL(fileURLWithPath: path)
         guard url.lastPathComponent == "transcript.jsonl" else { return }
+        // Map the append to its conversation DB so the read touches only that DB.
+        // An unmappable path falls back to `nil` (full walk) — safe, just slower.
+        let changed = Self.conversationDB(forTranscript: path).map { Set([$0]) }
         flushTask?.cancel()
         flushTask = Task { [weak self] in
             guard let self else { return }
             try? await Task.sleep(for: .seconds(self.debounce))
             if Task.isCancelled { return }
-            self.onChangedPaths?(nil)
+            self.onChangedPaths?(changed)
         }
+    }
+
+    /// Map a transcript path `<root>/brain/<convId>/…/transcript.jsonl` to its
+    /// conversation DB `<root>/conversations/<convId>.db`. The shared `<convId>`
+    /// is the IDE and CLI layout (verified against real `~/.gemini` trees).
+    /// Returns nil when the path isn't a brain transcript, so the caller can
+    /// fall back to a full walk.
+    static func conversationDB(forTranscript path: String) -> URL? {
+        guard let brain = path.range(of: "/brain/") else { return nil }
+        let afterBrain = path[brain.upperBound...]
+        guard let slash = afterBrain.firstIndex(of: "/") else { return nil }
+        let convId = String(afterBrain[afterBrain.startIndex..<slash])
+        guard !convId.isEmpty else { return nil }
+        let root = String(path[path.startIndex..<brain.lowerBound])
+        return URL(fileURLWithPath: root)
+            .appendingPathComponent("conversations")
+            .appendingPathComponent("\(convId).db")
     }
 
     deinit { consumeTask?.cancel(); pollTask?.cancel(); flushTask?.cancel() }

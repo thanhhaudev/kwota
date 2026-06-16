@@ -51,6 +51,22 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
         return emitted
     }
 
+    /// Targeted live read of only the conversation DBs whose transcript just
+    /// changed (mapped by `AntigravityStatsWatcher`). No discovery walk and no
+    /// cursor pruning — the `nil` full `read()` backstop reconciles vanished DBs.
+    /// Filters to `.db` files sitting directly in a known conversation root so a
+    /// stray path can't make us open an arbitrary database.
+    func read(only paths: Set<URL>) -> [UsageEvent] {
+        let rootPaths = Set(roots.map { $0.resolvingSymlinksInPath().path })
+        var emitted: [UsageEvent] = []
+        for db in paths
+        where db.pathExtension == "db"
+            && rootPaths.contains(db.deletingLastPathComponent().resolvingSymlinksInPath().path) {
+            readOne(db, into: &emitted)
+        }
+        return emitted
+    }
+
     private func discoverDBs() -> [URL] {
         var out: [URL] = []
         for root in roots {
