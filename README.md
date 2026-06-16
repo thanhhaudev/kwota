@@ -77,7 +77,7 @@ with `bash scripts/refresh-signing.sh`.
 
 ## Tabs
 
-**Usage** — per-provider quota view (see the Providers table above). Each provider gets a session chart with an `avg` reference line (typical % at the same point in past cycles) and a pace hint ("on track", "above typical", etc.). A Free-plan overlay shows for Claude accounts with no paid subscription.
+**Usage** — per-provider quota view (see the Providers table above). Each provider gets a session chart with an `avg` reference line (typical % at the same point in past cycles) and a pace hint ("on pace", "above typical", "below typical"). A Free-plan overlay shows for Claude accounts with no paid subscription.
 
 **Stats** — token-usage history for the active provider, in the Screen Time idiom. Pick a range (Today / last 7 days / last 30 days / all time); the chart stacks bars by model on a real time axis — per hour for Today, per day/week/month/year as the window grows — with a dashed daily-average line on the multi-day views. Below it, a per-model grid splits each model's total into `↓ in / ↑ out / ⚡ cache`. Tap a bar to read off that bucket. Providers without token data show an empty state.
 
@@ -99,7 +99,7 @@ Manual refresh (chart button or "Refresh" shortcut) respects the same back-off a
 
 Kwota never invokes `claude`, `codex`, or `agy` to read usage — that would burn quota.
 
-The Cache tab's "AI evaluation" is the one feature that does spawn `claude -p` (Anthropic blocks 3rd-party API access). It uses your normal subscription quota; Kwota tells you when it happens.
+The Cache tab's "AI evaluation" is the one feature that does spawn a CLI — `claude -p`, `codex exec`, or `agy -p` for whichever provider is active (the providers gate 3rd-party API access, so their own CLI is the only reliable path). It uses your normal subscription quota; Kwota tells you when it happens.
 
 ## How stats are collected
 
@@ -119,7 +119,7 @@ Kwota stores raw `(timestamp, % used)` samples and segments them into completed 
 
 A cycle ends when the next sample's value drops by ≥5 percentage points (smaller drops are server-side rounding noise; a real reset is ~95+). The trailing in-progress cycle is excluded so the line compares against finished history, not a partial sample.
 
-For any elapsed time `t` in the current cycle, `avg(t)` is the mean of `value(t)` across past cycles — "what % were you typically at, this far in". The chart draws it as a reference line alongside the current cycle's series; the pace hint reads "on track" / "above typical" / etc. by comparing the current point against `avg(t)`.
+For any elapsed time `t` in the current cycle, `avg(t)` is the mean of `value(t)` across past cycles — "what % were you typically at, this far in". The chart draws it as a reference line alongside the current cycle's series; the pace hint reads "on pace" / "above typical" / "below typical" by comparing the current point against `avg(t)`.
 
 ## How the session/week chart renders
 
