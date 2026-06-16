@@ -20,6 +20,7 @@ Hobby project, built for fun. macOS 14.0+ to run, Xcode 26.4+ to build.
 make build                       # debug
 make run                         # build + launch
 make release-app                 # release build → build/Release/Kwota.app
+make install                     # release build → /Applications, then launch
 make test                        # unit tests (~90s, parallel)
 make test-only SUITE=<Name>      # one suite, no rebuild
 make test-all                    # include UI tests (serial)
@@ -47,7 +48,7 @@ The app runs without signing setup. To enable **system-cache cleaning** (needs a
    with `grep -m1 DEVELOPMENT_TEAM Kwota/Kwota.xcodeproj/project.pbxproj`, set
    `DEVELOPMENT_TEAM = <that ID>` in `Local.xcconfig`, then revert the project
    file with `git checkout -- Kwota/Kwota.xcodeproj`.
-2. `make release-app`, drag `build/Release/Kwota.app` to `/Applications`.
+2. `make install` — builds the signed Release app, drops it into `/Applications`, and launches it. (Or `make release-app` and drag `build/Release/Kwota.app` to `/Applications` by hand.)
 3. Settings → Cache → Privileged helper → **Install helper**, then approve it in System Settings → General → Login Items.
 
 If **Install helper** errors after a previous attempt: `sudo sfltool resetbtm`.

@@ -4,6 +4,9 @@ CONFIG      ?= Debug
 BUILD_DIR   := build
 APP_NAME    := Kwota.app
 APP_PATH    := $(BUILD_DIR)/$(CONFIG)/$(APP_NAME)
+RELEASE_APP := $(BUILD_DIR)/Release/$(APP_NAME)
+INSTALL_DIR ?= /Applications
+INSTALLED_APP := $(INSTALL_DIR)/$(APP_NAME)
 
 # Shared DerivedData so every worktree + subagent invocation reuses
 # incremental compile cache. Override with: `make … DERIVED=/path`.
@@ -14,7 +17,7 @@ DERIVED     ?= $(HOME)/Library/Developer/Xcode/DerivedData/Kwota-shared
 DESTINATION := platform=macOS
 XCODEBUILD  := xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIG) -destination '$(DESTINATION)' -derivedDataPath $(DERIVED)
 
-.PHONY: help build app run test test-all build-for-testing test-only clean clean-deep open release release-app ensure-local-xcconfig
+.PHONY: help build app run test test-all build-for-testing test-only clean clean-deep open release release-app install ensure-local-xcconfig
 
 # Local.xcconfig is gitignored — owners commit their DEVELOPMENT_TEAM there,
 # public clones get an auto-created empty placeholder so xcodebuild can
@@ -36,6 +39,7 @@ help:
 	@echo "  make test-only SUITE=X  Run KwotaTests/X without rebuilding"
 	@echo "  make release      Build Release configuration"
 	@echo "  make release-app  Build Release and copy .app to build/Release/$(APP_NAME)"
+	@echo "  make install      Build Release and install into $(INSTALL_DIR) (then launch)"
 	@echo "  make clean        Clean build artifacts (keeps shared DerivedData)"
 	@echo "  make clean-deep   Clean build artifacts AND wipe shared DerivedData"
 	@echo "  make open         Open project in Xcode"
@@ -100,3 +104,14 @@ release:
 # do not notarize it separately.
 release-app:
 	$(MAKE) app CONFIG=Release
+
+# install drops the signed Release build into /Applications, replacing any
+# previous copy, then launches it. This is the long-lived bundle that the
+# signing auto-refresh LaunchAgent guards (scripts/install-signing-refresh.sh).
+# Override the destination with: `make install INSTALL_DIR=/path`.
+install: release-app
+	@osascript -e 'tell application "Kwota" to quit' 2>/dev/null || true
+	@rm -rf "$(INSTALLED_APP)"
+	@cp -R "$(RELEASE_APP)" "$(INSTALLED_APP)"
+	@echo "Installed $(INSTALLED_APP)"
+	@open "$(INSTALLED_APP)"
