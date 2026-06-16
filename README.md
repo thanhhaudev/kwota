@@ -32,18 +32,20 @@ DerivedData is shared at `~/Library/Developer/Xcode/DerivedData/Kwota-shared`. T
 
 The app runs without signing setup. To enable **system-cache cleaning** (needs a root helper):
 
-1. Get your Apple Team ID and put it in `Local.xcconfig` (`make build` creates it
-   from `.example` if missing). No paid Apple Developer Program needed:
-   1. Xcode → Settings → Accounts → `+` → sign in with your Apple ID. A free
-      account works — Xcode creates a "Personal Team" for it.
-   2. Open `Kwota/Kwota.xcodeproj`, select the **Kwota** target →
-      **Signing & Capabilities** → pick your team in the **Team** dropdown.
-   3. Xcode writes the team ID into the project file. Read it back:
-      `grep -m1 DEVELOPMENT_TEAM Kwota/Kwota.xcodeproj/project.pbxproj`
-      — the 10-character value is your Team ID.
-   4. Set `DEVELOPMENT_TEAM = <that ID>` in `Local.xcconfig`, then revert the
-      project file: `git checkout -- Kwota/Kwota.xcodeproj` (the team belongs
-      in `Local.xcconfig`, which is gitignored).
+1. Put your Apple Team ID in `Local.xcconfig`. No paid Apple Developer Program
+   needed — first sign into your Apple ID in Xcode → Settings → Accounts → `+`
+   (a free account works; Xcode creates a "Personal Team"). Then:
+
+   ```bash
+   bash scripts/setup-signing.sh        # detects your Team ID, writes Local.xcconfig
+   ```
+
+   It reads the Team ID straight from your signing certificate and asks which to
+   use if you have several. To do it by hand instead: open `Kwota/Kwota.xcodeproj`
+   → **Kwota** target → **Signing & Capabilities** → pick your team, then
+   `grep -m1 DEVELOPMENT_TEAM Kwota/Kwota.xcodeproj/project.pbxproj` for the
+   10-character ID, set `DEVELOPMENT_TEAM = <that ID>` in `Local.xcconfig`, and
+   revert the project file with `git checkout -- Kwota/Kwota.xcodeproj`.
 2. `make release-app`, drag `build/Release/Kwota.app` to `/Applications`.
 3. Settings → Cache → Privileged helper → Install. Approve in System Settings → General → Login Items & Extensions.
 
@@ -67,7 +69,8 @@ It installs a per-user LaunchAgent that runs weekly (and at each login). Each
 run checks `/Applications/Kwota.app`: if its signature no longer verifies, or
 its certificate is within 30 days of expiring, it rebuilds Release (Xcode
 renews the certificate automatically), swaps the bundle in place, and relaunches
-the app. It stays dormant until the app is actually in `/Applications`, so dev
+it if it was running. It stays dormant until the app is actually in
+`/Applications`, so dev
 builds from `make run` are never touched. Logs land in
 `~/Library/Logs/kwota-signing-refresh.log`. You can also run a check on demand
 with `bash scripts/refresh-signing.sh`.

@@ -26,6 +26,7 @@ ledger.json
 /docs/
 tests/*.md
 Local.xcconfig
+Local.xcconfig.bak
 CLAUDE.md
 GEMINI.md
 AGENTS.md
