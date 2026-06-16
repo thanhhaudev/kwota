@@ -4,8 +4,11 @@
 //  Pure decoder for one Antigravity `gen_metadata.data` protobuf blob. Field
 //  paths were reverse-engineered + validated against real conversation DBs:
 //    1.4.2 input · 1.4.3 output · 1.4.5 cache-read · 1.4.9 thinking
-//    1.4.1∈{1016,1020}, 1.4.6==24 structural constants
+//    1.4.6==24 structural constant
 //    1.9.4.1 per-turn unix-seconds timestamp
+//  `1.4.1` is a model/tier id (1016 Pro·High, 1020 Flash·Medium, 1187 Flash·Low,
+//  1132 Flash·High, …), NOT a structural invariant — it must never gate validity,
+//  or headless `agy -p` one-shots on newer/cheaper tiers vanish from Stats.
 //    1.19 api model id · 1.21 display model name
 //  No IO — unit-testable in isolation. Returns nil for anything that isn't a
 //  trustworthy usage row, so a format drift degrades to "no data" not bad data.
@@ -32,7 +35,7 @@ enum AntigravityRowDecode: Equatable {
 /// Classify one `gen_metadata` blob into usage / not-a-usage-row / malformed.
 func classifyAntigravityGenMetadata(_ blob: Data) -> AntigravityRowDecode {
     let r = ProtobufScanner.scan(blob, wanted: [
-        "1.4.1", "1.4.2", "1.4.3", "1.4.5", "1.4.6", "1.4.9", "1.9.4.1", "1.19", "1.21",
+        "1.4.2", "1.4.3", "1.4.5", "1.4.6", "1.4.9", "1.9.4.1", "1.19", "1.21",
     ])
 
     guard let input = r.varints["1.4.2"]?.first else {
@@ -46,7 +49,8 @@ func classifyAntigravityGenMetadata(_ blob: Data) -> AntigravityRowDecode {
     let cache = r.varints["1.4.5"]?.first ?? 0
 
     // Structural-constant guard (lenient: absent is fine; present-but-wrong = drift).
-    if let c1 = r.varints["1.4.1"]?.first, c1 != 1016, c1 != 1020 { return .malformed }
+    // Only `1.4.6` is a true invariant; `1.4.1` is a model/tier id (see header) and
+    // must NOT gate validity, else newer tiers are dropped as phantom drift.
     if let c6 = r.varints["1.4.6"]?.first, c6 != 24 { return .malformed }
 
     // Magnitude sanity — a real turn never approaches 1e8 tokens.

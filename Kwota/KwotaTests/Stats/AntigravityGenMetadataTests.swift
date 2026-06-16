@@ -35,13 +35,6 @@ final class AntigravityGenMetadataTests: XCTestCase {
         XCTAssertNil(decodeAntigravityGenMetadata(blob))
     }
 
-    func test_decode_returnsNil_onStructuralConstantDrift() {
-        // 1.4.1 present but wrong (999 ∉ {1016,1020}) ⇒ field-map drift ⇒ skip.
-        let inner4 = F.vfield(1, 999) + F.vfield(2, 10) + F.vfield(3, 20) + F.vfield(6, 24) + F.vfield(9, 0)
-        let blob = F.mfield(1, F.mfield(4, inner4))
-        XCTAssertNil(decodeAntigravityGenMetadata(blob))
-    }
-
     func test_decode_returnsNil_onInsaneMagnitude() {
         let blob = F.genBlob(input: 10, output: 999_000_000, cache: 0, thinking: 0, ts: 1_781_344_349)
         XCTAssertNil(decodeAntigravityGenMetadata(blob))   // output > 1e8 cap
@@ -73,10 +66,11 @@ final class AntigravityGenMetadataTests: XCTestCase {
         XCTAssertEqual(classifyAntigravityGenMetadata(blob), .notUsage)
     }
 
-    // Field-map drift (structural constant present-but-wrong) is `.malformed`, so
-    // the reader defers it for retry rather than silently consuming it.
+    // Field-map drift (the `1.4.6` structural invariant present-but-wrong) is
+    // `.malformed`, so the reader defers it for retry rather than silently consuming
+    // it. `1.4.1` is deliberately NOT a drift signal — it varies by model/tier.
     func test_classify_malformed_onStructuralConstantDrift() {
-        let inner4 = F.vfield(1, 999) + F.vfield(2, 10) + F.vfield(3, 20) + F.vfield(6, 24) + F.vfield(9, 0)
+        let inner4 = F.vfield(1, 999) + F.vfield(2, 10) + F.vfield(3, 20) + F.vfield(6, 99) + F.vfield(9, 0)
         let blob = F.mfield(1, F.mfield(4, inner4))
         XCTAssertEqual(classifyAntigravityGenMetadata(blob), .malformed)
     }
@@ -85,6 +79,31 @@ final class AntigravityGenMetadataTests: XCTestCase {
         let blob = F.genBlob(input: 10, output: 5, cache: 0, thinking: 0, ts: 1_781_344_349)
         guard case .usage = classifyAntigravityGenMetadata(blob) else {
             return XCTFail("expected .usage")
+        }
+    }
+
+    // `1.4.1` is a model/tier id, not a structural constant: real DBs carry
+    // 1016 (Pro High), 1020 (Flash Medium), 1187 (Flash Low — what headless
+    // `agy -p` one-shots use), 1132 (Flash High), 1026, 1036, … A usage row must
+    // decode whatever tier produced it; gating on a fixed set silently drops
+    // every newer/cheaper model from Stats while it still shows on the Awake chart.
+    func test_decode_acceptsUsageRow_acrossModelTiers() {
+        for tier: UInt64 in [1187, 1132, 1026, 1036] {
+            let inner4 = F.vfield(1, tier) + F.vfield(2, 100) + F.vfield(3, 20)
+                + F.vfield(6, 24) + F.vfield(9, 7)
+            let blob = F.mfield(1, F.mfield(4, inner4))
+            let usage = decodeAntigravityGenMetadata(blob)
+            XCTAssertEqual(usage?.tokens.input, 100, "1.4.1=\(tier) should decode as usage")
+            XCTAssertEqual(usage?.tokens.output, 27, "1.4.1=\(tier): output+thinking")
+        }
+    }
+
+    func test_classify_usage_forUnknownModelTier() {
+        let inner4 = F.vfield(1, 1187) + F.vfield(2, 10) + F.vfield(3, 20)
+            + F.vfield(6, 24) + F.vfield(9, 0)
+        let blob = F.mfield(1, F.mfield(4, inner4))
+        guard case .usage = classifyAntigravityGenMetadata(blob) else {
+            return XCTFail("expected .usage for model-tier 1187")
         }
     }
 }
