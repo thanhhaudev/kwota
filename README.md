@@ -49,6 +49,29 @@ The app runs without signing setup. To enable **system-cache cleaning** (needs a
 
 If `Install` errors after a previous attempt: `sudo sfltool resetbtm`.
 
+## Keeping the signature fresh
+
+A development signature has no secure timestamp, so once its certificate
+expires (typically ~1 year out) macOS stops launching the installed app and
+launchd stops loading the privileged helper. Rebuilding re-signs with a freshly
+renewed certificate.
+
+To automate this for the app you keep in `/Applications`:
+
+```bash
+bash scripts/install-signing-refresh.sh             # install the LaunchAgent
+bash scripts/install-signing-refresh.sh uninstall   # remove it
+```
+
+It installs a per-user LaunchAgent that runs weekly (and at each login). Each
+run checks `/Applications/Kwota.app`: if its signature no longer verifies, or
+its certificate is within 30 days of expiring, it rebuilds Release (Xcode
+renews the certificate automatically), swaps the bundle in place, and relaunches
+the app. It stays dormant until the app is actually in `/Applications`, so dev
+builds from `make run` are never touched. Logs land in
+`~/Library/Logs/kwota-signing-refresh.log`. You can also run a check on demand
+with `bash scripts/refresh-signing.sh`.
+
 ## Tabs
 
 **Usage** — per-provider quota view (see the Providers table above). Each provider gets a session chart with an `avg` reference line (typical % at the same point in past cycles) and a pace hint ("on track", "above typical", etc.). A Free-plan overlay shows for Claude accounts with no paid subscription.
