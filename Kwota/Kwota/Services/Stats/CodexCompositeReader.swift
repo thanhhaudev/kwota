@@ -8,6 +8,12 @@
 //  `ReaderState` carries both cursors; `restore` routes each entry to its owner.
 //  Each sub-reader self-filters paths in `read(only:)`, so a rollout FSEvents
 //  signal never opens SQLite and the trace poll never walks the rollout tree.
+//
+//  A `nil` full-walk for `.codex` only ever originates from `CodexStatsWatcher`'s
+//  rollout backstop (startup + 5-min poll); `CodexTraceWatcher` always supplies
+//  explicit `logs_*.sqlite` paths. So `read()` reads ROLLOUT ONLY — the trace DB
+//  is driven exclusively by the trace watcher's `read(only:)` path. This keeps the
+//  rollout backstop from redundantly opening/probing the trace SQLite every poll.
 
 import Foundation
 
@@ -20,7 +26,9 @@ final class CodexCompositeReader: JSONLogReader, @unchecked Sendable {
         self.trace = trace
     }
 
-    func read() -> [UsageEvent] { rollout.read() + trace.read() }
+    // Rollout only: see the type comment. The trace reader is driven by
+    // CodexTraceWatcher via `read(only:)`, so a nil full-walk must not open it.
+    func read() -> [UsageEvent] { rollout.read() }
 
     func read(only paths: Set<URL>) -> [UsageEvent] {
         rollout.read(only: paths) + trace.read(only: paths)

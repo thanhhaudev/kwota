@@ -8,10 +8,12 @@ import XCTest
 private final class StubReader: JSONLogReader, @unchecked Sendable {
     let events: [UsageEvent]
     var restored: ReaderState?
+    private(set) var readCount = 0
+    private(set) var readOnlyCount = 0
     private let stateToReturn: ReaderState
     init(events: [UsageEvent], state: ReaderState) { self.events = events; self.stateToReturn = state }
-    func read() -> [UsageEvent] { events }
-    func read(only paths: Set<URL>) -> [UsageEvent] { events }
+    func read() -> [UsageEvent] { readCount += 1; return events }
+    func read(only paths: Set<URL>) -> [UsageEvent] { readOnlyCount += 1; return events }
     func lastSeenLine() -> String? { nil }
     func state() -> ReaderState { stateToReturn }
     func restore(_ state: ReaderState) { restored = state }
@@ -23,11 +25,28 @@ final class CodexCompositeReaderTests: XCTestCase {
                    tokens: TokenBreakdown(input: 1), model: "gpt-5.5")
     }
 
-    func test_readMergesBothSources() {
+    // A `nil` (full-walk) read for `.codex` only ever originates from the rollout
+    // backstop watcher; the trace reader is driven exclusively by CodexTraceWatcher's
+    // path-based reads. So `read()` must touch rollout only — never open the trace DB.
+    func test_readReadsRolloutOnlyNeverTouchesTrace() {
         let rollout = StubReader(events: [ev("roll")], state: ReaderState())
         let trace = StubReader(events: [ev("trace")], state: ReaderState())
         let c = CodexCompositeReader(rollout: rollout, trace: trace)
-        XCTAssertEqual(Set(c.read().map(\.uuid)), ["roll", "trace"])
+        XCTAssertEqual(Set(c.read().map(\.uuid)), ["roll"])
+        XCTAssertEqual(rollout.readCount, 1)
+        XCTAssertEqual(trace.readCount, 0, "nil full-walk must not open the trace DB")
+    }
+
+    // The incremental path still routes to both sub-readers so trace usage is
+    // ingested when CodexTraceWatcher supplies its `logs_*.sqlite` paths.
+    func test_readOnlyRoutesToBothSources() {
+        let rollout = StubReader(events: [ev("roll")], state: ReaderState())
+        let trace = StubReader(events: [ev("trace")], state: ReaderState())
+        let c = CodexCompositeReader(rollout: rollout, trace: trace)
+        let merged = c.read(only: [URL(fileURLWithPath: "/home/.codex/logs_1.sqlite")])
+        XCTAssertEqual(Set(merged.map(\.uuid)), ["roll", "trace"])
+        XCTAssertEqual(rollout.readOnlyCount, 1)
+        XCTAssertEqual(trace.readOnlyCount, 1)
     }
 
     func test_stateUnionThenRestoreSplitsByPath() {
