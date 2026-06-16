@@ -48,9 +48,9 @@ The app runs without signing setup. To enable **system-cache cleaning** (needs a
    `DEVELOPMENT_TEAM = <that ID>` in `Local.xcconfig`, then revert the project
    file with `git checkout -- Kwota/Kwota.xcodeproj`.
 2. `make release-app`, drag `build/Release/Kwota.app` to `/Applications`.
-3. Settings → Cache → Privileged helper → Install. Approve in System Settings → General → Login Items & Extensions.
+3. Settings → Cache → Privileged helper → **Install helper**, then approve it in System Settings → General → Login Items.
 
-If `Install` errors after a previous attempt: `sudo sfltool resetbtm`.
+If **Install helper** errors after a previous attempt: `sudo sfltool resetbtm`.
 
 ## Keeping the signature fresh
 
@@ -71,8 +71,7 @@ run checks `/Applications/Kwota.app`: if its signature no longer verifies, or
 its certificate is within 30 days of expiring, it rebuilds Release (Xcode
 renews the certificate automatically), swaps the bundle in place, and relaunches
 it if it was running. It stays dormant until the app is actually in
-`/Applications`, so dev
-builds from `make run` are never touched. Logs land in
+`/Applications`, so dev builds from `make run` are never touched. Logs land in
 `~/Library/Logs/kwota-signing-refresh.log`. You can also run a check on demand
 with `bash scripts/refresh-signing.sh`.
 
@@ -133,6 +132,6 @@ Each bar's color comes from its own value — green → yellow → red as it app
 
 ## Notes
 
-- Sandbox-disabled. Launches `/usr/bin/caffeinate`, probes `claude --version` / `codex --version` / `agy --version`, holds IOKit power assertions, and reads `~/.claude/`, `~/.codex/`, and `~/.gemini/antigravity*/` directly. Distribute as a Developer-ID-signed `.app`, not via the Mac App Store.
+- Sandbox-disabled. Holds IOKit power assertions to keep the Mac awake (no `caffeinate` child process), probes `claude --version` / `codex --version` / `agy --version`, and reads `~/.claude/`, `~/.codex/`, and `~/.gemini/antigravity*/` directly. Distribute as a Developer-ID-signed `.app`, not via the Mac App Store.
 - `claude` / `codex` / `agy` are resolved against an augmented PATH that includes `/opt/homebrew/bin` and `/usr/local/bin`.
 - No remote backend — only reads provider files and APIs.
