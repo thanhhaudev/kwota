@@ -18,26 +18,40 @@ struct AntigravityTurnUsage: Equatable {
     var model: String?
 }
 
-/// Decode one `gen_metadata` blob. Returns nil when the row is not a usage row
-/// (no `1.4.2`), when a present structural constant disagrees (field-map drift),
-/// or when any token magnitude is implausibly large (torn read / drift).
-func decodeAntigravityGenMetadata(_ blob: Data) -> AntigravityTurnUsage? {
+/// Outcome of decoding one `gen_metadata` blob. The reader treats these very
+/// differently: `notUsage` is a cleanly-read row that simply isn't a usage record
+/// (advance the cursor, never retry), while `malformed` signals field-map drift /
+/// a torn read (defer for retry, and a whole batch of them holds the cursor).
+/// Collapsing the two would re-query legitimate non-usage rows on every poll.
+enum AntigravityRowDecode: Equatable {
+    case usage(AntigravityTurnUsage)
+    case notUsage     // valid protobuf, but no `1.4.2` — legitimately not a usage row
+    case malformed    // structural-constant disagreement or implausible magnitude — drift/torn
+}
+
+/// Classify one `gen_metadata` blob into usage / not-a-usage-row / malformed.
+func classifyAntigravityGenMetadata(_ blob: Data) -> AntigravityRowDecode {
     let r = ProtobufScanner.scan(blob, wanted: [
         "1.4.1", "1.4.2", "1.4.3", "1.4.5", "1.4.6", "1.4.9", "1.9.4.1", "1.19", "1.21",
     ])
 
-    guard let input = r.varints["1.4.2"]?.first else { return nil }   // not a usage row
+    guard let input = r.varints["1.4.2"]?.first else {
+        // No usage field. A cleanly-parsed blob is simply a non-usage row (consume
+        // it, never retry); a torn/truncated blob is a malformed read — likely a
+        // WAL mid-write of a real usage row — so defer it for retry.
+        return r.truncated ? .malformed : .notUsage
+    }
     let output = r.varints["1.4.3"]?.first ?? 0
     let thinking = r.varints["1.4.9"]?.first ?? 0
     let cache = r.varints["1.4.5"]?.first ?? 0
 
     // Structural-constant guard (lenient: absent is fine; present-but-wrong = drift).
-    if let c1 = r.varints["1.4.1"]?.first, c1 != 1016, c1 != 1020 { return nil }
-    if let c6 = r.varints["1.4.6"]?.first, c6 != 24 { return nil }
+    if let c1 = r.varints["1.4.1"]?.first, c1 != 1016, c1 != 1020 { return .malformed }
+    if let c6 = r.varints["1.4.6"]?.first, c6 != 24 { return .malformed }
 
     // Magnitude sanity — a real turn never approaches 1e8 tokens.
     let cap: UInt64 = 100_000_000
-    guard input <= cap, output <= cap, thinking <= cap, cache <= cap else { return nil }
+    guard input <= cap, output <= cap, thinking <= cap, cache <= cap else { return .malformed }
 
     var timestamp: Date?
     if let raw = r.varints["1.9.4.1"]?.first, (1_600_000_000...1_900_000_000).contains(raw) {
@@ -49,5 +63,12 @@ func decodeAntigravityGenMetadata(_ blob: Data) -> AntigravityTurnUsage? {
                                 output: Int(output) + Int(thinking),   // thinking is billable output
                                 cacheCreation: 0,                       // Gemini: cache-read only
                                 cacheRead: Int(cache))
-    return AntigravityTurnUsage(tokens: tokens, timestamp: timestamp, model: model)
+    return .usage(AntigravityTurnUsage(tokens: tokens, timestamp: timestamp, model: model))
+}
+
+/// Usage-only convenience: nil for both non-usage and malformed rows. Callers that
+/// must distinguish the two use `classifyAntigravityGenMetadata` directly.
+func decodeAntigravityGenMetadata(_ blob: Data) -> AntigravityTurnUsage? {
+    if case .usage(let u) = classifyAntigravityGenMetadata(blob) { return u }
+    return nil
 }

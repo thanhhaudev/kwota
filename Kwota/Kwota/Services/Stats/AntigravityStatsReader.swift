@@ -107,7 +107,7 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
         var maxSeen = highWater
         var rowsExamined = 0
         var rowsDecoded = 0
-        var rowsZeroToken = 0
+        var rowsConsumedNonBillable = 0   // decoded zero-token OR cleanly-read non-usage rows
         var rowsDecodeFailed = 0
         var newFailures: [UInt64] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
@@ -122,7 +122,8 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
             switch handleRow(idx: idx, blob: blob, sessionId: sessionId, mtime: mtime,
                              lastTS: &lastTS, into: &emitted) {
             case .emitted:   rowsDecoded += 1
-            case .zeroToken: rowsZeroToken += 1
+            case .zeroToken: rowsConsumedNonBillable += 1
+            case .notUsage:  rowsConsumedNonBillable += 1
             case .failed:    rowsDecodeFailed += 1; newFailures.append(idx)
             }
         }
@@ -132,10 +133,10 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
         // likely moved. Do NOT advance the cursor or arm the change-gate then, so
         // the rows are re-read in full once the decoder is fixed — advancing would
         // discard that usage permanently. Rows that decode cleanly but carry no
-        // billable tokens are NOT drift (they count as a successful decode below),
-        // so a batch of zero-token rows plus one torn row advances normally instead
-        // of being rescanned every poll.
-        if rowsDecodeFailed > 0, rowsDecoded == 0, rowsZeroToken == 0 {
+        // billable tokens (zero-token) AND rows that aren't usage records at all
+        // (non-usage) are NOT drift, so a batch of those plus one torn row advances
+        // normally instead of being rescanned every poll.
+        if rowsDecodeFailed > 0, rowsDecoded == 0, rowsConsumedNonBillable == 0 {
             AppLog.shared.log(
                 "AntigravityStatsReader: \(rowsDecodeFailed) row(s) in \(db.lastPathComponent) failed to decode — gen_metadata proto field-map may have drifted; not advancing cursor",
                 level: .warn)
@@ -156,13 +157,20 @@ final class AntigravityStatsReader: JSONLogReader, @unchecked Sendable {
         gateSig[db] = sig
     }
 
-    private enum RowOutcome { case emitted, zeroToken, failed }
+    private enum RowOutcome { case emitted, zeroToken, notUsage, failed }
 
     /// Decode one row blob and append a `UsageEvent` if it carries billable
-    /// tokens. Shared by the forward scan and the deferred-retry pass.
+    /// tokens. Shared by the forward scan and the deferred-retry pass. `notUsage`
+    /// rows decode cleanly but aren't usage records — they're consumed like
+    /// zero-token rows (advance the cursor, no retry), never treated as drift.
     private func handleRow(idx: UInt64, blob: Data, sessionId: String, mtime: Date?,
                            lastTS: inout Date?, into emitted: inout [UsageEvent]) -> RowOutcome {
-        guard let usage = decodeAntigravityGenMetadata(blob) else { return .failed }
+        let usage: AntigravityTurnUsage
+        switch classifyAntigravityGenMetadata(blob) {
+        case .notUsage:  return .notUsage
+        case .malformed: return .failed
+        case .usage(let u): usage = u
+        }
         guard usage.tokens != .zero else { return .zeroToken }
         // Timestamp fallback chain: row ts → previous valid row ts → DB mtime → now.
         let ts = usage.timestamp ?? lastTS ?? mtime ?? clock()

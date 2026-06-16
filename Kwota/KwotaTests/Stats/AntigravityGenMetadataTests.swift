@@ -65,4 +65,26 @@ final class AntigravityGenMetadataTests: XCTestCase {
         XCTAssertNil(decodeAntigravityGenMetadata(blob)?.timestamp)
         XCTAssertNotNil(decodeAntigravityGenMetadata(blob)?.tokens)
     }
+
+    // A cleanly-read row that simply isn't a usage record (no 1.4.2) must classify
+    // as `.notUsage`, NOT `.malformed` — the reader consumes it without retrying.
+    func test_classify_notUsage_whenInputFieldAbsent() {
+        let blob = F.mfield(1, F.sfield(19, "gemini-pro-default"))
+        XCTAssertEqual(classifyAntigravityGenMetadata(blob), .notUsage)
+    }
+
+    // Field-map drift (structural constant present-but-wrong) is `.malformed`, so
+    // the reader defers it for retry rather than silently consuming it.
+    func test_classify_malformed_onStructuralConstantDrift() {
+        let inner4 = F.vfield(1, 999) + F.vfield(2, 10) + F.vfield(3, 20) + F.vfield(6, 24) + F.vfield(9, 0)
+        let blob = F.mfield(1, F.mfield(4, inner4))
+        XCTAssertEqual(classifyAntigravityGenMetadata(blob), .malformed)
+    }
+
+    func test_classify_usage_onValidRow() {
+        let blob = F.genBlob(input: 10, output: 5, cache: 0, thinking: 0, ts: 1_781_344_349)
+        guard case .usage = classifyAntigravityGenMetadata(blob) else {
+            return XCTFail("expected .usage")
+        }
+    }
 }

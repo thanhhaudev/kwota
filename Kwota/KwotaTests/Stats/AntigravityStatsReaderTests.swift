@@ -134,6 +134,38 @@ final class AntigravityStatsReaderTests: XCTestCase {
         XCTAssertEqual(entry?.failedIdx, [2], "the lone malformed row defers for retry")
     }
 
+    /// Non-usage gen_metadata rows (no `1.4.2`) decode cleanly as "not a usage
+    /// row". They must advance the cursor and NOT land in `failed` — otherwise the
+    /// unchanged-file fast path is disabled and the DB is reopened/re-queried on
+    /// every 5-minute poll forever.
+    func test_read_nonUsageRowsAdvanceCursor_andDoNotPoisonFailed() throws {
+        let nonUsage0 = F.mfield(1, F.sfield(19, "gemini-pro-default"))
+        let nonUsage1 = F.mfield(1, F.sfield(19, "gemini-pro-default"))
+        let (root, _) = try F.makeConversationDB(blobs: [nonUsage0, nonUsage1])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let reader = AntigravityStatsReader(roots: [root])
+        XCTAssertTrue(reader.read().isEmpty, "non-usage rows emit nothing")
+        let entry = reader.state().entries.values.first
+        XCTAssertEqual(entry?.offset, 1, "cursor advanced past the non-usage rows")
+        XCTAssertNil(entry?.failedIdx, "non-usage rows are not retryable failures")
+    }
+
+    /// A non-usage row mixed with a billable one: the billable row emits and the
+    /// non-usage row neither blocks it nor poisons `failed`.
+    func test_read_nonUsageRowMixedWithBillable_emitsBillableKeepsFailedEmpty() throws {
+        let nonUsage = F.mfield(1, F.sfield(19, "gemini-pro-default"))
+        let billable = F.genBlob(input: 100, output: 10, cache: 0, thinking: 0, ts: 1_781_344_340)
+        let (root, _) = try F.makeConversationDB(blobs: [nonUsage, billable])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let reader = AntigravityStatsReader(roots: [root])
+        XCTAssertEqual(reader.read().map(\.tokens.input), [100], "billable row emits; non-usage ignored")
+        let entry = reader.state().entries.values.first
+        XCTAssertNil(entry?.failedIdx, "non-usage row is not a failure")
+        XCTAssertEqual(entry?.offset, 1, "cursor advanced past both rows")
+    }
+
     /// The deferred-retry set survives state()/restore(): a still-failing idx is
     /// re-attempted after a relaunch (and the cursor isn't rewound to re-emit
     /// the rows that already succeeded).

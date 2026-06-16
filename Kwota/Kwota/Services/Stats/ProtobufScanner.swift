@@ -13,6 +13,10 @@ enum ProtobufScanner {
     struct Result {
         var varints: [String: [UInt64]] = [:]
         var strings: [String: [String]] = [:]
+        /// True if the walk hit a truncated varint or an out-of-bounds length —
+        /// i.e. the blob is torn/short, not a cleanly-parsed message. Lets callers
+        /// tell a well-formed row that simply lacks a field from a corrupt read.
+        var truncated = false
     }
 
     /// Walk `data`, collecting varint and string leaves whose dotted path is in
@@ -24,17 +28,17 @@ enum ProtobufScanner {
         func walk(_ data: Data, _ prefix: String, _ depth: Int) {
             var cursor = data.startIndex
             while cursor < data.endIndex {
-                guard let tag = readVarint(data, &cursor) else { return }
+                guard let tag = readVarint(data, &cursor) else { result.truncated = true; return }
                 let field = tag >> 3
                 let wire = tag & 0x7
                 let path = prefix.isEmpty ? "\(field)" : "\(prefix).\(field)"
                 switch wire {
                 case 0:
-                    guard let v = readVarint(data, &cursor) else { return }
+                    guard let v = readVarint(data, &cursor) else { result.truncated = true; return }
                     if wanted.contains(path) { result.varints[path, default: []].append(v) }
                 case 2:
                     guard let len = readVarint(data, &cursor),
-                          let n = safeLength(len, cursor: cursor, in: data) else { return }
+                          let n = safeLength(len, cursor: cursor, in: data) else { result.truncated = true; return }
                     let end = data.index(cursor, offsetBy: n)
                     let sub = Data(data[cursor..<end])   // re-base slice indices to 0
                     cursor = end
@@ -44,13 +48,13 @@ enum ProtobufScanner {
                         result.strings[path, default: []].append(s)
                     }
                 case 1:
-                    guard let n = safeLength(8, cursor: cursor, in: data) else { return }
+                    guard let n = safeLength(8, cursor: cursor, in: data) else { result.truncated = true; return }
                     cursor = data.index(cursor, offsetBy: n)
                 case 5:
-                    guard let n = safeLength(4, cursor: cursor, in: data) else { return }
+                    guard let n = safeLength(4, cursor: cursor, in: data) else { result.truncated = true; return }
                     cursor = data.index(cursor, offsetBy: n)
                 default:
-                    if !skipField(data, &cursor, tag: tag) { return }
+                    if !skipField(data, &cursor, tag: tag) { result.truncated = true; return }
                 }
             }
         }
