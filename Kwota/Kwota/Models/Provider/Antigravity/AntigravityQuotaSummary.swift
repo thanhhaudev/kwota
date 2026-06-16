@@ -47,6 +47,11 @@ struct AntigravityQuotaSummary: Decodable, Equatable, Sendable {
             remainingFraction.map { max(0, min(100, (1 - $0) * 100)) }
         }
 
+        /// No headroom left — the window is fully consumed. A known
+        /// `remainingFraction` of 0 (or less) means exhausted; an unknown
+        /// fraction is treated as not-exhausted so we never over-claim.
+        var isExhausted: Bool { (remainingFraction ?? 1) <= 0 }
+
         enum CodingKeys: String, CodingKey {
             case bucketId, displayName, window, remainingFraction, resetTime
         }

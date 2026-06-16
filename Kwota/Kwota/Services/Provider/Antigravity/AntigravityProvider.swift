@@ -312,8 +312,17 @@ final class AntigravityProvider: AccountProvider {
     func switcherRenewalEstimate(profile: Profile,
                                  summary: ProviderUsageSummary?,
                                  now: Date) -> RenewalEstimate? {
-        if let reset = (summary?.payload as? AntigravityUsagePayload)?.quota?.worstFiveHour?.bucket.resetTime {
-            return RenewalEstimate(date: reset, prefix: "5-hour resets", absolute: false)
+        if let worst = (summary?.payload as? AntigravityUsagePayload)?.quota?.worstFiveHour {
+            // Once this group's weekly allowance is spent, its 5-hour window
+            // can't be used until the weekly resets — so the 5-hour countdown
+            // is moot. Surface the binding weekly reset instead.
+            if let weekly = worst.group.weekly, weekly.isExhausted,
+               let weeklyReset = weekly.resetTime {
+                return RenewalEstimate(date: weeklyReset, prefix: "Weekly resets", absolute: false)
+            }
+            if let reset = worst.bucket.resetTime {
+                return RenewalEstimate(date: reset, prefix: "5-hour resets", absolute: false)
+            }
         }
         return observedCreditCycleEstimate(profile: profile, now: now)
     }

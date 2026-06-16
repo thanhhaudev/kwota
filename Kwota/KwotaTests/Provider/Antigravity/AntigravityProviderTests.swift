@@ -394,7 +394,8 @@ final class AntigravityProviderTests: XCTestCase {
     /// Builds a quota-payload summary with a single group carrying the given
     /// 5h / weekly reset times (remaining fixed at 0.5 so utilization is
     /// non-nil). Used by the renewal-estimate tests.
-    private func quotaSummary(fiveHourReset: Date?, weeklyReset: Date?) -> ProviderUsageSummary {
+    private func quotaSummary(fiveHourReset: Date?, weeklyReset: Date?,
+                              weeklyRemaining: Double = 0.5) -> ProviderUsageSummary {
         var buckets: [AntigravityQuotaSummary.Bucket] = []
         if let fiveHourReset {
             buckets.append(.init(bucketId: "g-5h", displayName: nil, window: .fiveHour,
@@ -402,7 +403,7 @@ final class AntigravityProviderTests: XCTestCase {
         }
         if let weeklyReset {
             buckets.append(.init(bucketId: "g-weekly", displayName: nil, window: .weekly,
-                                 remainingFraction: 0.5, resetTime: weeklyReset))
+                                 remainingFraction: weeklyRemaining, resetTime: weeklyReset))
         }
         let quota = AntigravityQuotaSummary(
             fetchedAt: .distantPast,
@@ -602,6 +603,37 @@ final class AntigravityProviderTests: XCTestCase {
         let summary = quotaSummary(fiveHourReset: nil, weeklyReset: now.addingTimeInterval(4 * 3_600))
         let est = provider.switcherRenewalEstimate(profile: makeProfile(), summary: summary, now: now)
         XCTAssertNil(est, "must not borrow the weekly bucket's reset for the 5h row")
+    }
+
+    func test_switcherRenewalEstimate_weeklyExhausted_showsWeeklyResetNotFiveHour() {
+        // When the group's weekly allowance is spent, the 5-hour window can't
+        // be used until the weekly resets, so the countdown follows the weekly.
+        let provider = makeProvider(transport: { _ in
+            (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
+                                     statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }, watcher: StubAntigravityProcessWatcher())
+        let now = ISO8601DateFormatter().date(from: "2026-05-29T00:00:00Z")!
+        let fiveHour = now.addingTimeInterval(4 * 3_600)
+        let weekly = now.addingTimeInterval(2 * 86_400)
+        let summary = quotaSummary(fiveHourReset: fiveHour, weeklyReset: weekly, weeklyRemaining: 0)
+        let est = provider.switcherRenewalEstimate(profile: makeProfile(), summary: summary, now: now)
+        XCTAssertEqual(est?.date, weekly, "weekly is the binding window once exhausted")
+        XCTAssertEqual(est?.prefix, "Weekly resets")
+    }
+
+    func test_switcherRenewalEstimate_weeklyHasHeadroom_staysOnFiveHour() {
+        // Weekly not exhausted → 5-hour remains the relevant countdown.
+        let provider = makeProvider(transport: { _ in
+            (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
+                                     statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }, watcher: StubAntigravityProcessWatcher())
+        let now = ISO8601DateFormatter().date(from: "2026-05-29T00:00:00Z")!
+        let fiveHour = now.addingTimeInterval(4 * 3_600)
+        let weekly = now.addingTimeInterval(2 * 86_400)
+        let summary = quotaSummary(fiveHourReset: fiveHour, weeklyReset: weekly, weeklyRemaining: 0.3)
+        let est = provider.switcherRenewalEstimate(profile: makeProfile(), summary: summary, now: now)
+        XCTAssertEqual(est?.date, fiveHour)
+        XCTAssertEqual(est?.prefix, "5-hour resets")
     }
 
     // Build a snapshot whose tier ceiling is Pro (1000) with a real-API
