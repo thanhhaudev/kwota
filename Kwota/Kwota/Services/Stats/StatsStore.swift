@@ -321,31 +321,73 @@ final class StatsStore {
         return out
     }
 
-    /// The chart series at an adaptive granularity. Starts from the padded daily
-    /// series (full window, gap days filled), picks a granularity from the
-    /// window's day-span, and — for week/month/year — sums each model's tokens
-    /// into buckets keyed by the bucket's START day ("yyyy-MM-dd", UTC), keeping
-    /// empty buckets. `.day` returns the padded daily series unchanged. Ascending.
+    /// The chart series at an adaptive granularity. Picks a granularity from the
+    /// window's day-span, then sums each model's tokens into buckets keyed by the
+    /// bucket's START day ("yyyy-MM-dd", UTC), keeping empty buckets. `.day`
+    /// reuses the padded daily series (≤90 days). Week/month/year build the bucket
+    /// order by stepping the granularity unit across the FULL [start, today] span
+    /// — bounded by bucket count, not day count — so a wide All-time range (e.g.
+    /// from a stray very-old timestamp) is never truncated the way a day-by-day
+    /// series would be, which would otherwise drop recent usage the totals still
+    /// count. Ascending.
     func chartSeries(provider: ProviderID, daysAgo: Int?)
         -> (granularity: StatsGranularity, points: [(day: String, byModel: [String: TokenBreakdown])]) {
-        let daily = paddedDailySeries(provider: provider, daysAgo: daysAgo)
-        let gran = StatsGranularity.forSpan(days: daily.count)
-        guard gran != .day else { return (.day, daily) }
-
         let cal = StatsLedger.utcCalendarForKeys
+        let now = clock()
+        let data = Dictionary(uniqueKeysWithValues:
+            ledger.dailySeries(provider: provider, sinceDay: nil).map { ($0.day, $0.byModel) })
+
+        let startDay = cal.startOfDay(for: chartStartDate(daysAgo: daysAgo, now: now, days: data.keys))
+        let endDay = cal.startOfDay(for: now)
+        let spanDays = (cal.dateComponents([.day], from: startDay, to: endDay).day ?? 0) + 1
+        let gran = StatsGranularity.forSpan(days: spanDays)
+        guard gran != .day else {
+            return (.day, paddedDailySeries(provider: provider, daysAgo: daysAgo))
+        }
+
+        // Bucket order: step the granularity unit from start to end. The bucket
+        // count is small at any granularity the ladder selects (≤ ~120), so no
+        // day-by-day cap is needed and the span is never silently truncated.
         var order: [String] = []
         var buckets: [String: [String: TokenBreakdown]] = [:]
-        for entry in daily {
-            guard let (y, m, d) = Self.parseDay(entry.day),
-                  let date = cal.date(from: DateComponents(year: y, month: m, day: d)) else { continue }
+        var cursor = cal.dateInterval(of: gran.component, for: startDay)?.start ?? startDay
+        let lastStart = cal.dateInterval(of: gran.component, for: endDay)?.start ?? endDay
+        var guardCount = 0
+        while cursor <= lastStart, guardCount < 6000 {
+            let key = ledger.dayKey(for: cursor)
+            if buckets[key] == nil { buckets[key] = [:]; order.append(key) }   // keep empty buckets
+            guard let next = cal.date(byAdding: gran.component, value: 1, to: cursor) else { break }
+            cursor = next
+            guardCount += 1
+        }
+
+        // Fold every actual usage day in range into its bucket (O(usage days)).
+        for (day, byModel) in data {
+            guard let (y, m, d) = Self.parseDay(day),
+                  let date = cal.date(from: DateComponents(year: y, month: m, day: d)),
+                  date >= startDay, date <= endDay else { continue }
             let start = cal.dateInterval(of: gran.component, for: date)?.start ?? date
             let key = ledger.dayKey(for: start)
-            if buckets[key] == nil { buckets[key] = [:]; order.append(key) }   // keep empty buckets
-            for (model, tok) in entry.byModel {
+            if buckets[key] == nil { buckets[key] = [:]; order.append(key) }   // safety
+            for (model, tok) in byModel {
                 buckets[key]![model] = (buckets[key]![model] ?? .zero) + tok
             }
         }
         return (gran, order.map { (day: $0, byModel: buckets[$0] ?? [:]) })
+    }
+
+    /// Window start for a chart range: today-`daysAgo`, or the earliest usage day
+    /// for All time, or today when there's no usage. Shared by `chartSeries` and
+    /// `paddedDailySeries` so both agree on the span.
+    private func chartStartDate(daysAgo: Int?, now: Date, days: Dictionary<String, [String: TokenBreakdown]>.Keys) -> Date {
+        let cal = StatsLedger.utcCalendarForKeys
+        if let daysAgo { return cal.date(byAdding: .day, value: -daysAgo, to: now) ?? now }
+        if let earliest = days.min(),
+           let (y, m, d) = Self.parseDay(earliest),
+           let date = cal.date(from: DateComponents(year: y, month: m, day: d)) {
+            return date
+        }
+        return now
     }
 
     /// "yyyy-MM-dd" key for `daysAgo` days before now, UTC. nil for "All".

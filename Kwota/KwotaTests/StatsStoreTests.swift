@@ -576,6 +576,26 @@ final class StatsStoreTests: XCTestCase {
         XCTAssertEqual(billableSum(result.points), 10)
     }
 
+    /// All time with usage older than the former 4000-day generation cap (~11y)
+    /// must still include recent usage: the chart sum equals the ledger total, and
+    /// the latest bucket reflects the recent event. Guards the bug where a stray
+    /// very-old timestamp truncated the day-by-day series and dropped recent data.
+    func test_chartSeries_allTimeWiderThan4000Days_conservesRecentUsage() {
+        let store = paddedStore()   // clock = 2026-06-13
+        store.ingest([
+            // 2010-01-01 is ~6007 days before 2026-06-13 (> the old 4000-day cap).
+            UsageEvent(uuid: "ancient", sessionId: "s", timestamp: date("2010-01-01T05:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 5), model: "claude-opus-4-8"),
+            UsageEvent(uuid: "recent", sessionId: "s", timestamp: date("2026-06-10T05:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 11), model: "claude-opus-4-8"),
+        ], provider: .claude)
+        let result = store.chartSeries(provider: .claude, daysAgo: nil)
+        XCTAssertEqual(result.granularity, .year)
+        XCTAssertEqual(billableSum(result.points), 16, "chart sum equals ledger total, recent usage kept")
+        XCTAssertEqual(result.points.last?.byModel["claude-opus-4-8"]?.billable, 11,
+                       "the latest (2026) bucket carries the recent event")
+    }
+
     func test_clear_keepsSameSecondEventViaFlooredWatermark() {
         // Clear at .500; a second-resolution event at .000 in the SAME second
         // (e.g. Codex trace / Antigravity) must be kept, not wiped.
