@@ -2,7 +2,7 @@
 
 Token usage tracker for AI coding assistants. Lives in the menu bar; auto-keeps your Mac awake while agents are working, and tracks caches on your machine.
 
-Hobby project, built for fun. macOS 14.0+ to run, Xcode 16+ to build.
+Hobby project, built for fun. macOS 14.0+ to run, Xcode 26.4+ to build.
 
 ![Kwota preview](assets/preview.gif)
 
