@@ -55,23 +55,9 @@ final class AutoDetectFlowIntegrationTests: XCTestCase {
         watcher.start()
 
         // Wait for baseline emit to create profile A.
-        let baselineExp = expectation(description: "profile A created")
-        var baselineObserved = false
-        let checkInterval: TimeInterval = 0.05
-        let checkTask = Task { @MainActor in
-            for _ in 0..<20 {
-                try? await Task.sleep(nanoseconds: UInt64(checkInterval * 1_000_000_000))
-                if store.profiles.contains(where: { $0.email == "a@x.com" }) {
-                    if !baselineObserved {
-                        baselineObserved = true
-                        baselineExp.fulfill()
-                    }
-                    return
-                }
-            }
+        await waitUntil(timeout: 5) {
+            store.profiles.contains(where: { $0.email == "a@x.com" })
         }
-        await fulfillment(of: [baselineExp], timeout: 3)
-        checkTask.cancel()
 
         guard let profileA = store.profiles.first(where: { $0.email == "a@x.com" }) else {
             XCTFail("expected profile A to be auto-created from baseline emit")
@@ -112,23 +98,10 @@ final class AutoDetectFlowIntegrationTests: XCTestCase {
         continuation.yield(())
 
         // Wait for profile B to appear and become active.
-        let switchExp = expectation(description: "profile B created and active")
-        var switchObserved = false
-        let switchTask = Task { @MainActor in
-            for _ in 0..<20 {
-                try? await Task.sleep(nanoseconds: UInt64(checkInterval * 1_000_000_000))
-                if let b = store.profiles.first(where: { $0.email == "b@x.com" }),
-                   store.activeProfileId == b.id {
-                    if !switchObserved {
-                        switchObserved = true
-                        switchExp.fulfill()
-                    }
-                    return
-                }
-            }
+        await waitUntil(timeout: 5) {
+            guard let b = store.profiles.first(where: { $0.email == "b@x.com" }) else { return false }
+            return store.activeProfileId == b.id
         }
-        await fulfillment(of: [switchExp], timeout: 3)
-        switchTask.cancel()
 
         guard let profileB = store.profiles.first(where: { $0.email == "b@x.com" }) else {
             XCTFail("expected profile B to be auto-created on identity switch")
@@ -242,5 +215,24 @@ final class AutoDetectFlowIntegrationTests: XCTestCase {
         monitor.tick()
         XCTAssertEqual(monitor.sessionTokens, 70,
                        "B sees the new post-boundary event and only that event")
+    }
+
+    /// Poll `predicate` against a real deadline instead of a fixed iteration
+    /// count. The previous fixed 20×50ms poll loop capped the effective wait
+    /// at ~1s regardless of the 3s expectation timeout, so under parallel-test
+    /// CPU contention the watcher's async profile creation could surface after
+    /// the loop had already exited → the expectation never fulfilled → flake.
+    private func waitUntil(
+        timeout: TimeInterval,
+        _ predicate: () -> Bool,
+        file: StaticString = #file,
+        line: UInt = #line
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if predicate() { return }
+            try? await Task.sleep(nanoseconds: 20_000_000) // 20ms
+        }
+        XCTFail("waitUntil timed out after \(timeout)s", file: file, line: line)
     }
 }

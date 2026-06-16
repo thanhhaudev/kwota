@@ -21,6 +21,25 @@ final class CodexActivitySourceTests: XCTestCase {
         for _ in 0..<5 { await Task.yield() }
     }
 
+    /// Condition-based wait for a positive assertion. `drain()`'s fixed yield
+    /// count is fine for negative assertions (nothing should emit) but races
+    /// under parallel-test CPU load when waiting for an AsyncStream-delivered
+    /// event to surface — the @MainActor consume task may not have run within
+    /// 5 yields. Poll the actual condition against a real deadline instead.
+    private func waitFor(
+        timeout: TimeInterval = 2,
+        _ predicate: () -> Bool,
+        file: StaticString = #file,
+        line: UInt = #line
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if predicate() { return }
+            try? await Task.sleep(nanoseconds: 10_000_000) // 10ms
+        }
+        XCTFail("waitFor condition not met within \(timeout)s", file: file, line: line)
+    }
+
     private let sessionPath =
         "/Users/x/.codex/sessions/2026/05/20/rollout-2026-05-20T10-47-14-abc.jsonl"
 
@@ -91,7 +110,8 @@ final class CodexActivitySourceTests: XCTestCase {
         cont.yield(sessionPath); await drain()
         XCTAssertEqual(received.count, 0)
         live = true
-        cont.yield(sessionPath); await drain()
+        cont.yield(sessionPath)
+        await waitFor { received.count == 1 }
         XCTAssertEqual(received.count, 1)
         XCTAssertEqual(received.first?.provider, .codex)
         cont.finish(); source.stop()
