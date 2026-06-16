@@ -81,7 +81,7 @@ with `bash scripts/refresh-signing.sh`.
 
 **Stats** — token-usage history for the active provider, in the Screen Time idiom. Pick a range (Today / last 7 days / last 30 days / all time); the chart stacks bars by model on a real time axis — per hour for Today, per day/week/month/year as the window grows — with a dashed daily-average line on the multi-day views. Below it, a per-model grid splits each model's total into `↓ in / ↑ out / ⚡ cache`. Tap a bar to read off that bucket. Providers without token data show an empty state.
 
-**Awake** — toggle `caffeinate` (manual / auto / battery-aware). Below it: a multi-provider activity chart of recent agent replies. The chart shades each awake interval by mode — auto (green) or manual (blue). Battery (orange) shows up as the status dot in the card, menu-bar icon, and Settings row when auto is blocked by a low-battery threshold.
+**Awake** — toggle keep-awake (manual / auto / battery-aware). Below it: a multi-provider activity chart of recent agent replies. The chart shades each awake interval by mode — auto (green) or manual (blue). Battery (orange) shows up as the status dot in the card, menu-bar icon, and Settings row when auto is blocked by a low-battery threshold.
 
 **Cache** — tracks caches across your machine: developer tooling (Xcode DerivedData, npm / bun / yarn / pnpm, pip, Homebrew, JetBrains, VS Code, Cursor), iOS Simulator / DeviceSupport, the macOS Icon services cache, generic `~/.cache`, and more. Each row shows a size breakdown and an AI evaluation. System-wide caches that need root also appear here once the privileged helper is installed.
 
