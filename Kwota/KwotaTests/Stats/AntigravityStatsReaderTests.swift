@@ -115,6 +115,25 @@ final class AntigravityStatsReaderTests: XCTestCase {
         XCTAssertNil(reader.state().entries.values.first?.failedIdx, "recovered idx cleared")
     }
 
+    /// Valid ZERO-TOKEN rows mixed with one malformed row must NOT be mistaken for
+    /// whole-batch decode drift: the zero-token rows decoded cleanly, so the cursor
+    /// advances (the malformed idx deferring for retry) instead of the DB being
+    /// reopened/rescanned on every 5-minute poll. Regression for the drift guard
+    /// ignoring `.zeroToken` decodes.
+    func test_read_zeroTokenRowsWithOneFailure_advanceCursorNotDrift() throws {
+        let zero0 = F.genBlob(input: 0, output: 0, cache: 0, thinking: 0, ts: 1_781_344_340)
+        let zero1 = F.genBlob(input: 0, output: 0, cache: 0, thinking: 0, ts: 1_781_344_350)
+        let junk  = Data([0x0a, 0xff, 0xff])
+        let (root, _) = try F.makeConversationDB(blobs: [zero0, zero1, junk])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let reader = AntigravityStatsReader(roots: [root])
+        XCTAssertTrue(reader.read().isEmpty, "zero-token rows aren't billable, so nothing emits")
+        let entry = reader.state().entries.values.first
+        XCTAssertEqual(entry?.offset, 2, "cursor advances past zero-token + junk (not held as drift)")
+        XCTAssertEqual(entry?.failedIdx, [2], "the lone malformed row defers for retry")
+    }
+
     /// The deferred-retry set survives state()/restore(): a still-failing idx is
     /// re-attempted after a relaunch (and the cursor isn't rewound to re-emit
     /// the rows that already succeeded).
