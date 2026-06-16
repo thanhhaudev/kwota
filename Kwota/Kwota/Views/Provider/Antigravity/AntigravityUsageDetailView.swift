@@ -49,7 +49,9 @@ struct AntigravityUsageDetailView: View {
 
     @AppStorage(AppStorageKeys.displayChartShowAvg)      private var showAvg: Bool = true
     @AppStorage(AppStorageKeys.displayChartShowPaceHint) private var showPaceHint: Bool = true
-    @State private var selectedKey: String?
+    // Persisted so the popover reopens on the group the user last viewed instead
+    // of snapping back to the default every time the detail view is recreated.
+    @AppStorage(AppStorageKeys.antigravityGroupSelection) private var selectedKey: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {

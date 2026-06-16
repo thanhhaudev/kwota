@@ -31,4 +31,11 @@ enum AppStorageKeys {
 
     // MARK: Awake
     static let awakeConfig = "awake.config"
+
+    // MARK: Provider
+    /// Last-selected Antigravity quota group (Gemini / Claude+GPT) in the Usage
+    /// tab, so the popover reopens on the group the user last viewed. Global (not
+    /// per-profile) — the group shape is the same across Antigravity accounts, and
+    /// a stale key falls back to the default via `resolvedKey`.
+    static let antigravityGroupSelection = "antigravity.groupSelection"
 }
