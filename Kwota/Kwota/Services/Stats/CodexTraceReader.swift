@@ -212,6 +212,8 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
         guard sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else { return }
         defer { sqlite3_finalize(stmt) }
 
+        var parsedOK = 0     // rows whose usage object decoded (billable OR zero) — schema intact
+        var parseFailed = 0  // rows that matched the filter but whose usage object would not decode
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = UInt64(bitPattern: sqlite3_column_int64(stmt, 0))
             let ts = sqlite3_column_int64(stmt, 1)
@@ -221,11 +223,27 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
             guard let bodyC = sqlite3_column_text(stmt, 3) else { continue }
             let body = String(cString: bodyC)
             lastLineLock.withLock { $0 = "\(threadId)@\(id)" }
-            guard let tokens = Self.parseUsage(body), tokens != .zero else { continue }
+            guard let tokens = Self.parseUsage(body) else { parseFailed += 1; continue }
+            parsedOK += 1
+            guard tokens != .zero else { continue }   // decoded but non-billable
             emitted.append(UsageEvent(
                 uuid: "\(threadId)@\(id)", sessionId: threadId,
                 timestamp: Date(timeIntervalSince1970: TimeInterval(ts)),
                 tokens: tokens, model: Self.parseModel(body)))
+        }
+        // Whole-batch parse FAILURE is the drift signal: if every filter-matched
+        // usage row in this batch failed to parse, the responses-API usage shape
+        // likely moved — hold the cursor so the rows are re-read after a decoder fix
+        // rather than silently lost. A lone failure among parseable rows advances
+        // normally: the `%input_tokens%` LIKE filter can substring-match non-usage
+        // rows, so per-row fail-closed would be a permanent re-scan poison pill.
+        // (Unlike the Antigravity reader — whose proto rows can't false-positive —
+        // this reader intentionally does NOT defer-retry individual rows.)
+        if parseFailed > 0, parsedOK == 0 {
+            AppLog.shared.log(
+                "CodexTraceReader: \(parseFailed) usage row(s) in \(db.lastPathComponent) matched but failed to parse — responses-API usage shape may have drifted; not advancing cursor",
+                level: .warn)
+            return
         }
         offsets[db] = currentMax   // advance past ALL scanned rows, not just usage rows
     }

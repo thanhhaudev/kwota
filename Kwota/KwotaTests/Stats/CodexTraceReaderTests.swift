@@ -79,6 +79,41 @@ final class CodexTraceReaderTests: XCTestCase {
         XCTAssertTrue(CodexTraceReader(codexHome: home).read().isEmpty)
     }
 
+    // A batch whose only filter-matched rows fail `parseUsage` (the responses-API
+    // usage shape drifted) must NOT advance the cursor past them, or the tokens are
+    // lost permanently. Once the body becomes parseable, the row still emits.
+    func test_wholeBatchParseFailure_holdsCursorUntilParseable() {
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: ts, threadId: "tA",
+                  body: "trace span input_tokens=42 but no usage object here"),
+        ])
+        let reader = CodexTraceReader(codexHome: home)
+        XCTAssertTrue(reader.read().isEmpty, "unparseable usage row emits nothing")
+
+        // Schema 'fixed': rewrite the same id with a parseable usage body.
+        CodexTraceFixture.writeDB(at: home.appendingPathComponent("logs_2.sqlite"), rows: [
+            .init(id: 1, ts: ts, threadId: "tA",
+                  body: CodexTraceFixture.usageBody(model: "gpt-5.5", input: 10, cached: 0, output: 1)),
+        ])
+        XCTAssertEqual(reader.read().map(\.sessionId), ["tA"],
+                       "cursor wasn't advanced past the failed row, so it emits after the fix")
+    }
+
+    // A lone unparseable row alongside a valid usage row advances normally: the
+    // valid row emits and the cursor moves past BOTH, so the unparseable row is not
+    // a re-scan poison pill (the LIKE filter can substring-match non-usage rows).
+    func test_mixedParseFailure_advancesPastBothRows() {
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: ts, threadId: "tA",
+                  body: "trace span input_tokens mentioned but no usage object"),
+            .init(id: 2, ts: ts, threadId: "tB",
+                  body: CodexTraceFixture.usageBody(model: "gpt-5.5", input: 10, cached: 0, output: 1)),
+        ])
+        let reader = CodexTraceReader(codexHome: home)
+        XCTAssertEqual(reader.read().map(\.sessionId), ["tB"], "valid row emits; unparseable one is skipped")
+        XCTAssertTrue(reader.read().isEmpty, "cursor advanced past both rows -> nothing re-scanned")
+    }
+
     func test_cursorIsIncremental_secondReadSeesOnlyNewRows() {
         home = CodexTraceFixture.makeHome(rows: [
             .init(id: 1, ts: ts, threadId: "tA",
