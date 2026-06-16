@@ -392,7 +392,7 @@ final class ProfileSwitcherCardTests: XCTestCase {
         }
         let registry = makeRegistry([provider])
         let p = Profile(id: UUID(), name: "Hau", authMethod: .cliSync,
-                        providerID: .antigravity, subscriptionPlan: "AI Pro")
+                        providerID: .antigravity, subscriptionPlan: "Pro")
         let liveSummary = ProviderUsageSummary(
             providerID: .antigravity, fetchedAt: Date(),
             primary: nil, secondary: nil, payload: 0 as Int)
@@ -401,14 +401,14 @@ final class ProfileSwitcherCardTests: XCTestCase {
         let withoutSummary = ProfileSwitcherCard.switcherSections(
             profiles: [p], registry: registry, activeID: nil,
             now: Date(timeIntervalSince1970: 1_700_000_000))
-        XCTAssertEqual(withoutSummary[0].rows[0].subtitle, "AI Pro")
+        XCTAssertEqual(withoutSummary[0].rows[0].subtitle, "Pro")
 
         // With a summary lookup → fallback estimate renders.
         let withSummary = ProfileSwitcherCard.switcherSections(
             profiles: [p], registry: registry, activeID: nil,
             now: Date(timeIntervalSince1970: 1_700_000_000),
             summaryFor: { _ in liveSummary })
-        XCTAssertTrue(withSummary[0].rows[0].subtitle.hasPrefix("AI Pro · Resets "),
+        XCTAssertTrue(withSummary[0].rows[0].subtitle.hasPrefix("Pro · Resets "),
                       withSummary[0].rows[0].subtitle)
     }
 

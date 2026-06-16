@@ -74,6 +74,36 @@ final class RenewalEstimatorTests: XCTestCase {
         XCTAssertEqual(RenewalEstimator.subtitleString(est), "Est. resets 18 Jun 2026")
     }
 
+    // MARK: - daysRelative sub-day resolution
+
+    func test_daysRelative_imminentFutureReset_showsHours() {
+        let now = date("2026-06-16T10:00:00Z")
+        XCTAssertEqual(
+            RenewalEstimator.daysRelative(from: now, to: now.addingTimeInterval(3 * 3_600)),
+            "in 3h")
+    }
+
+    func test_daysRelative_underAnHour_showsMinutes() {
+        let now = date("2026-06-16T10:00:00Z")
+        XCTAssertEqual(
+            RenewalEstimator.daysRelative(from: now, to: now.addingTimeInterval(20 * 60)),
+            "in 20m")
+    }
+
+    func test_daysRelative_multiDayReset_staysDayGranular() {
+        let now = date("2026-06-16T10:00:00Z")
+        XCTAssertEqual(
+            RenewalEstimator.daysRelative(from: now, to: now.addingTimeInterval(3 * 86_400)),
+            "in 3 days")
+    }
+
+    func test_daysRelative_pastSameDay_stillToday() {
+        let now = date("2026-06-16T10:00:00Z")
+        XCTAssertEqual(
+            RenewalEstimator.daysRelative(from: now, to: now.addingTimeInterval(-2 * 3_600)),
+            "today")
+    }
+
     func test_subtitleString_relativePrefixOnly() {
         // Relative wording is locale/clock-dependent; assert the prefix and
         // that no absolute date leaks in.

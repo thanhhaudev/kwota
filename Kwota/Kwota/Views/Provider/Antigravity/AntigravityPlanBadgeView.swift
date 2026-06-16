@@ -5,8 +5,8 @@
 //  Compact tier pill shown next to the profile name. Reads
 //  `Profile.subscriptionPlan` which AntigravityProvider back-fills from
 //  the GetUserStatus response — preferring the canonical
-//  `AntigravityTier.displayName` ("AI Pro" / "AI Free" / "AI Ultra 5x" /
-//  "AI Ultra 20x") over the raw wire `planName`. Falls back to a neutral
+//  `AntigravityTier.displayName` ("Pro" / "Free" / "Ultra 5x" /
+//  "Ultra 20x") over the raw wire `planName`. Falls back to a neutral
 //  "Antigravity" pill when the plan name isn't known yet.
 //
 

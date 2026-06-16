@@ -4,7 +4,7 @@
 //
 //  Canonical plan-tier classifier for Antigravity. Maps the wire fields
 //  surfaced by the language_server's GetUserStatus into a small set of
-//  cases that drive both the plan-badge label (e.g. "AI Pro") and the
+//  cases that drive both the plan-badge label (e.g. "Pro") and the
 //  AI Credits overage-pool ceiling used to render the bar in the Usage
 //  tab. Sources:
 //
@@ -36,10 +36,10 @@ enum AntigravityTier: String, Equatable, Sendable {
     /// for `.unknown` so callers can fall back to the wire's raw plan name.
     var displayName: String? {
         switch self {
-        case .free:     return "AI Free"
-        case .pro:      return "AI Pro"
-        case .ultra5x:  return "AI Ultra 5x"
-        case .ultra20x: return "AI Ultra 20x"
+        case .free:     return "Free"
+        case .pro:      return "Pro"
+        case .ultra5x:  return "Ultra 5x"
+        case .ultra20x: return "Ultra 20x"
         case .unknown:  return nil
         }
     }

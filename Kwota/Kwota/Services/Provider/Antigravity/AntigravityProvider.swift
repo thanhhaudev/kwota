@@ -196,8 +196,8 @@ final class AntigravityProvider: AccountProvider {
             updated.name = name
             changed = true
         }
-        // Prefer the canonical tier display name ("AI Pro" / "AI Free" /
-        // "AI Ultra 5x" / "AI Ultra 20x") from AntigravityTier so the
+        // Prefer the canonical tier display name ("Pro" / "Free" /
+        // "Ultra 5x" / "Ultra 20x") from AntigravityTier so the
         // switcher and badge stay in sync with the Usage tab. Fall back
         // to the raw wire `planName` only for unknown tiers, so we never
         // strip away a label we don't have a canonical form for.
@@ -295,6 +295,14 @@ final class AntigravityProvider: AccountProvider {
                          now: Date) -> RenewalEstimate? {
         if let cycle = observedCreditCycleEstimate(profile: profile, now: now) { return cycle }
         if let quota = (summary?.payload as? AntigravityUsagePayload)?.quota {
+            // The card is the *stablest-signal* surface, so prefer the weekly
+            // window's reset (days out, a meaningful countdown) over the 5-hour
+            // rolling window — whose reset is always within the day and reads as
+            // a perpetual "Resets today". Fall back to the soonest of whatever
+            // buckets exist only when there is no weekly window at all.
+            if let weekly = quota.worstWeekly?.bucket.resetTime {
+                return RenewalEstimate(date: weekly, prefix: "Weekly resets", absolute: false)
+            }
             let soonest = quota.groups.flatMap { $0.buckets }.compactMap { $0.resetTime }.min()
             if let soonest { return RenewalEstimate(date: soonest, prefix: "Resets", absolute: false) }
         }
@@ -305,7 +313,7 @@ final class AntigravityProvider: AccountProvider {
                                  summary: ProviderUsageSummary?,
                                  now: Date) -> RenewalEstimate? {
         if let reset = (summary?.payload as? AntigravityUsagePayload)?.quota?.worstFiveHour?.bucket.resetTime {
-            return RenewalEstimate(date: reset, prefix: "Resets", absolute: false)
+            return RenewalEstimate(date: reset, prefix: "5-hour resets", absolute: false)
         }
         return observedCreditCycleEstimate(profile: profile, now: now)
     }
@@ -319,7 +327,7 @@ final class AntigravityProvider: AccountProvider {
               let next = RenewalEstimator.next(after: anchor, now: now) else {
             return nil
         }
-        return RenewalEstimate(date: next, prefix: "Est. resets", absolute: true)
+        return RenewalEstimate(date: next, prefix: "Est. credits reset", absolute: true)
     }
 
     func evaluateCreditCycle(summary: ProviderUsageSummary,

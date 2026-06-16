@@ -468,13 +468,14 @@ final class AntigravityProviderTests: XCTestCase {
             profile: profile, summary: nil,
             now: ISO8601DateFormatter().date(from: "2026-05-29T00:00:00Z")!)
         XCTAssertEqual(est?.date, ISO8601DateFormatter().date(from: "2026-06-18T00:00:00Z"))
-        XCTAssertEqual(est?.prefix, "Est. resets")
+        XCTAssertEqual(est?.prefix, "Est. credits reset")
         XCTAssertEqual(est?.absolute, true)
     }
 
-    func test_renewalEstimate_fallsBackToSoonestQuotaReset() {
-        // Header estimate, pre-observation: with no observed cycle yet, fall
-        // back to the soonest quota-bucket reset across all groups/windows.
+    func test_renewalEstimate_fallsBackToWeeklyQuotaReset() {
+        // Header estimate, pre-observation: with no observed cycle yet, prefer
+        // the weekly window's reset over the 5-hour rolling window, so the card
+        // shows a meaningful multi-day countdown instead of a perpetual "today".
         let provider = makeProvider(transport: { _ in
             (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
                                      statusCode: 200, httpVersion: nil, headerFields: nil)!)
@@ -484,9 +485,24 @@ final class AntigravityProviderTests: XCTestCase {
         let summary = quotaSummary(fiveHourReset: fiveHour, weeklyReset: weekly)
         let est = provider.renewalEstimate(
             profile: makeProfile(), summary: summary, now: .distantPast)
-        XCTAssertEqual(est?.date, fiveHour, "soonest of the two bucket resets")
-        XCTAssertEqual(est?.prefix, "Resets")
+        XCTAssertEqual(est?.date, weekly, "weekly window outranks the 5h rolling window")
+        XCTAssertEqual(est?.prefix, "Weekly resets")
         XCTAssertEqual(est?.absolute, false)
+    }
+
+    func test_renewalEstimate_fallsBackToFiveHour_whenNoWeeklyWindow() {
+        // Degenerate payload with only a 5h bucket: still surface something
+        // honest rather than nothing.
+        let provider = makeProvider(transport: { _ in
+            (Data(), HTTPURLResponse(url: URL(string: "http://127.0.0.1")!,
+                                     statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }, watcher: StubAntigravityProcessWatcher())
+        let fiveHour = ISO8601DateFormatter().date(from: "2026-05-29T02:00:00Z")!
+        let summary = quotaSummary(fiveHourReset: fiveHour, weeklyReset: nil)
+        let est = provider.renewalEstimate(
+            profile: makeProfile(), summary: summary, now: .distantPast)
+        XCTAssertEqual(est?.date, fiveHour, "no weekly bucket → soonest available reset")
+        XCTAssertEqual(est?.prefix, "Resets")
     }
 
     func test_renewalEstimate_observedAnchorWins_overQuotaReset() {
@@ -505,7 +521,7 @@ final class AntigravityProviderTests: XCTestCase {
             now: ISO8601DateFormatter().date(from: "2026-05-29T00:00:00Z")!)
         XCTAssertEqual(est?.date, ISO8601DateFormatter().date(from: "2026-06-18T00:00:00Z"),
                        "observed cycle must win over the quota cooldown")
-        XCTAssertEqual(est?.prefix, "Est. resets")
+        XCTAssertEqual(est?.prefix, "Est. credits reset")
         XCTAssertEqual(est?.absolute, true)
     }
 
@@ -537,7 +553,7 @@ final class AntigravityProviderTests: XCTestCase {
         let summary = quotaSummary(fiveHourReset: fiveHour, weeklyReset: weekly)
         let est = provider.switcherRenewalEstimate(profile: makeProfile(), summary: summary, now: now)
         XCTAssertEqual(est?.date, fiveHour, "must follow the worst-group 5h bucket")
-        XCTAssertEqual(est?.prefix, "Resets")
+        XCTAssertEqual(est?.prefix, "5-hour resets")
     }
 
     func test_switcherRenewalEstimate_fiveHourWinsOverObservedAnchor() {
@@ -555,7 +571,7 @@ final class AntigravityProviderTests: XCTestCase {
             profile: profile, summary: summary,
             now: ISO8601DateFormatter().date(from: "2026-05-29T00:00:00Z")!)
         XCTAssertEqual(est?.date, reset)
-        XCTAssertEqual(est?.prefix, "Resets")
+        XCTAssertEqual(est?.prefix, "5-hour resets")
     }
 
     func test_switcherRenewalEstimate_fallsBackToCreditCycle_whenNoFiveHourReset() {
@@ -572,7 +588,7 @@ final class AntigravityProviderTests: XCTestCase {
             profile: profile, summary: summary,
             now: ISO8601DateFormatter().date(from: "2026-05-29T00:00:00Z")!)
         XCTAssertEqual(est?.date, ISO8601DateFormatter().date(from: "2026-06-18T00:00:00Z"))
-        XCTAssertEqual(est?.prefix, "Est. resets")
+        XCTAssertEqual(est?.prefix, "Est. credits reset")
         XCTAssertEqual(est?.absolute, true)
     }
 

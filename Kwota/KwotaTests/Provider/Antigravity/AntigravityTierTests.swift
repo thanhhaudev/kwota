@@ -84,10 +84,10 @@ final class AntigravityTierTests: XCTestCase {
     // MARK: - displayName
 
     func test_displayName_perCase() {
-        XCTAssertEqual(AntigravityTier.free.displayName, "AI Free")
-        XCTAssertEqual(AntigravityTier.pro.displayName, "AI Pro")
-        XCTAssertEqual(AntigravityTier.ultra5x.displayName, "AI Ultra 5x")
-        XCTAssertEqual(AntigravityTier.ultra20x.displayName, "AI Ultra 20x")
+        XCTAssertEqual(AntigravityTier.free.displayName, "Free")
+        XCTAssertEqual(AntigravityTier.pro.displayName, "Pro")
+        XCTAssertEqual(AntigravityTier.ultra5x.displayName, "Ultra 5x")
+        XCTAssertEqual(AntigravityTier.ultra20x.displayName, "Ultra 20x")
         XCTAssertNil(AntigravityTier.unknown.displayName)
     }
 

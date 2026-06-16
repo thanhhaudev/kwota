@@ -77,7 +77,18 @@ enum RenewalEstimator {
     /// Day-granularity countdown. Apple's RelativeDateTimeFormatter buckets
     /// 7–13 days into "in 1 week"; users reading a subscription estimate want
     /// the exact day count, not a softened range.
+    ///
+    /// Sub-day resolution for an imminent future reset (e.g. Antigravity's
+    /// 5-hour window, which by definition resets within hours): a whole-day
+    /// count flattens every such reset to "today", reading as a perpetual
+    /// "Resets today". Inside 24h we report hours, and under an hour minutes.
     static func daysRelative(from now: Date, to date: Date) -> String {
+        let secs = date.timeIntervalSince(now)
+        if secs > 0, secs < 86_400 {
+            let hours = Int(secs / 3_600)
+            if hours >= 1 { return "in \(hours)h" }
+            return "in \(max(1, Int((secs / 60).rounded())))m"
+        }
         let cal = Calendar.current
         let days = cal.dateComponents([.day], from: cal.startOfDay(for: now),
                                                  to: cal.startOfDay(for: date)).day ?? 0
