@@ -154,13 +154,25 @@ final class StatsStore {
             // Safe point: the read has completed and the next one hasn't begun,
             // so reading the reader's cursors here can't race `read()`. Refresh
             // the cache that clear/flush/persist snapshot from.
-            lastReaderStates[curProvider] = reader.state()
+            let prevReaderState = lastReaderStates[curProvider]
+            let newReaderState = reader.state()
+            lastReaderStates[curProvider] = newReaderState
             // If `clear(provider:)` ran while we were suspended off-main, the
             // batch we just read is pre-clear history — dropping it (the reader
             // already advanced past it) is what makes Clear stick. Without this,
             // a Clear during the startup backfill would be silently undone.
             if (generation[curProvider] ?? 0) == gen {
-                ingest(events, provider: curProvider)
+                if events.isEmpty {
+                    // An empty emission can still advance reader cursors — zero-token
+                    // / non-usage / rollout-excluded / trace-noise rows consume the
+                    // cursor without producing billable events. `ingest` only persists
+                    // when it has events, so persist here when the snapshot moved, or
+                    // the progress is lost on an unclean exit and those rows are
+                    // re-scanned next launch.
+                    if newReaderState != prevReaderState { schedulePersist() }
+                } else {
+                    ingest(events, provider: curProvider)
+                }
             } else {
                 // Cleared mid-read. The batch is pre-clear history being wiped —
                 // EXCEPT any events that arrived after the clear (timestamp >=

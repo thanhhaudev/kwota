@@ -13,6 +13,36 @@ final class StatsStoreTests: XCTestCase {
         return f.date(from: iso)!
     }
 
+    /// A read that emits no events can still advance reader cursors (zero-token /
+    /// non-usage / rollout-excluded / noise rows). That progress must be persisted
+    /// so an unclean exit doesn't re-scan the consumed rows on next launch.
+    func test_readChanged_emptyEmissionPersistsAdvancedCursor() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("stats-empty-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = FakeJSONLogReader()
+        // Empty queue → read() emits nothing, but state() reports an advanced cursor.
+        reader.stateOverride = ReaderState(entries: ["db": .init(offset: 7, mtime: .distantPast)])
+        let store = StatsStore(reader: reader, ledgerURL: url,
+                               clock: { self.date("2026-06-13T10:00:00.000Z") }, persistDebounce: 0)
+        await store.readChanged(nil, provider: .claude)
+
+        // schedulePersist writes async on the persist queue; wait for it to land.
+        let deadline = Date().addingTimeInterval(2)
+        while !FileManager.default.fileExists(atPath: url.path), Date() < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path),
+                      "empty-but-advancing read must persist the advanced cursor")
+
+        let reloaded = FakeJSONLogReader()
+        _ = StatsStore(reader: reloaded, ledgerURL: url,
+                       clock: { self.date("2026-06-13T10:00:00.000Z") }, persistDebounce: 0)
+        XCTAssertEqual(reloaded.restoredState?.entries["db"]?.offset, 7,
+                       "reload restores the persisted cursor instead of re-reading from scratch")
+    }
+
     func test_ingestEvents_bucketsByDayAndModel() {
         let store = StatsStore(reader: FakeJSONLogReader(),
                                ledgerURL: URL(fileURLWithPath: "/dev/null"),
