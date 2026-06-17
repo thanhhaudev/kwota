@@ -338,9 +338,26 @@ struct StatsTimeChart: View {
         Calendar.current.date(from: DateComponents(year: year, month: month, day: day, hour: hour))
     }
 
+    /// Models ordered by total billable across the whole visible range
+    /// (descending), tie-broken by id so the order is fully deterministic —
+    /// `byModel` is a Dictionary, so without this the stack order would shuffle
+    /// every launch. Drives both the bar emission order and the foreground-style
+    /// scale domain, keeping each color in the same band across every bucket
+    /// (Screen Time style: the heaviest model anchors the baseline).
+    private var orderedModels: [String] {
+        var totals: [String: Int] = [:]
+        for p in points {
+            for (model, tb) in p.byModel { totals[model, default: 0] += tb.billable }
+        }
+        return totals.keys.sorted { (totals[$0]!, $1) > (totals[$1]!, $0) }
+    }
+
     private var bars: [Bar] {
-        points.flatMap { p in
-            p.byModel.map { Bar(date: p.date, key: p.key, model: $0.key, billable: $0.value.billable) }
+        let order = orderedModels
+        return points.flatMap { p in
+            order.compactMap { model in
+                p.byModel[model].map { Bar(date: p.date, key: p.key, model: model, billable: $0.billable) }
+            }
         }
     }
 
@@ -365,16 +382,16 @@ struct StatsTimeChart: View {
         }
     }
 
-    /// Pretty model label → color, built from the data so colors match the
-    /// per-model cards (and stay consistent if a model is missing on some days).
-    private var labelColors: [String: Color] {
-        var map: [String: Color] = [:]
-        for p in points {
-            for model in p.byModel.keys {
-                map[StatsModelPalette.label(for: model)] = colors[model] ?? .gray
-            }
-        }
-        return map
+    /// Pretty labels in stack order (heaviest model first). Doubles as the
+    /// foreground-style scale domain so segments stack in a stable order and the
+    /// colors match the per-model cards below.
+    private var orderedLabels: [String] {
+        orderedModels.map { StatsModelPalette.label(for: $0) }
+    }
+
+    /// Colors aligned 1:1 with `orderedLabels` (the scale range).
+    private var orderedColors: [Color] {
+        orderedModels.map { colors[$0] ?? .gray }
     }
 
     private func isDimmed(_ bar: Bar) -> Bool {
@@ -503,7 +520,7 @@ struct StatsTimeChart: View {
             }
         }
         .chartXSelection(value: $selectedDate)
-        .chartForegroundStyleScale { (label: String) in labelColors[label] ?? Color.gray }
+        .chartForegroundStyleScale(domain: orderedLabels, range: orderedColors)
         .chartLegend(.hidden)   // the BY MODEL grid below already shows the color key
         .chartYAxis {
             AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { value in
