@@ -122,6 +122,58 @@ final class CaffeinateManagerTests: XCTestCase {
         XCTAssertFalse(manager.isActive)
     }
 
+    // MARK: - App Nap suppression
+
+    // The fix for the 7h-stuck-awake bug: while caffeinated, suppress App Nap so
+    // the in-process release timers (idle timer / manual timeout) keep firing
+    // instead of being frozen while the user is away.
+    func testEnableSuppressesAppNap() throws {
+        let nap = MockAppNapSuppressor()
+        let manager = CaffeinateManager(holder: MockSleepAssertionHolder(), appNap: nap)
+
+        try manager.enable(options: allFlagsOptions())
+
+        XCTAssertEqual(nap.beginCount, 1)
+        XCTAssertEqual(nap.liveSuppressions, 1, "App Nap must be suppressed while active")
+    }
+
+    func testDisableEndsAppNapSuppression() throws {
+        let nap = MockAppNapSuppressor()
+        let manager = CaffeinateManager(holder: MockSleepAssertionHolder(), appNap: nap)
+
+        try manager.enable(options: allFlagsOptions())
+        manager.disable()
+
+        XCTAssertEqual(nap.endCount, 1)
+        XCTAssertEqual(nap.liveSuppressions, 0, "App Nap suppression must be released on disable")
+    }
+
+    func testEnableDisableCyclesKeepAppNapBalanced() throws {
+        let nap = MockAppNapSuppressor()
+        let manager = CaffeinateManager(holder: MockSleepAssertionHolder(), appNap: nap)
+
+        for _ in 0..<3 {
+            try manager.enable(options: allFlagsOptions())
+            manager.disable()
+        }
+
+        XCTAssertEqual(nap.beginCount, 3)
+        XCTAssertEqual(nap.endCount, 3)
+        XCTAssertEqual(nap.liveSuppressions, 0)
+    }
+
+    // A failed acquire throws before we reach the suppression call, so no token
+    // is begun (and thus none leaks).
+    func testFailedAcquireDoesNotSuppressAppNap() {
+        let nap = MockAppNapSuppressor()
+        let holder = CountingFailingHolder(failOnNthAcquire: 1, error: NSError(domain: "t", code: 1))
+        let manager = CaffeinateManager(holder: holder, appNap: nap)
+
+        XCTAssertThrowsError(try manager.enable(options: allFlagsOptions()))
+        XCTAssertEqual(nap.beginCount, 0, "no App Nap token when acquisition fails")
+        XCTAssertEqual(nap.liveSuppressions, 0)
+    }
+
     func testTimeoutAutoDisables() async throws {
         let mock = MockSleepAssertionHolder()
         let manager = CaffeinateManager(holder: mock)
@@ -180,4 +232,25 @@ private final class CountingFailingHolder: SleepAssertionHolder {
 
     func release(_ assertion: SleepAssertion) { released.append(assertion) }
     func declareUserActivity(name: String) { declareUserActivityCount += 1 }
+}
+
+// MARK: - App Nap suppressor test double
+
+/// Records begin/end calls and tracks live (unbalanced) suppressions so tests
+/// can assert App Nap is held exactly across the caffeinated window.
+private final class MockAppNapSuppressor: AppNapSuppressing {
+    private(set) var beginCount = 0
+    private(set) var endCount = 0
+    private(set) var lastReason: String?
+    var liveSuppressions: Int { beginCount - endCount }
+
+    func begin(reason: String) -> NSObjectProtocol {
+        beginCount += 1
+        lastReason = reason
+        return NSObject()
+    }
+
+    func end(_ token: NSObjectProtocol) {
+        endCount += 1
+    }
 }

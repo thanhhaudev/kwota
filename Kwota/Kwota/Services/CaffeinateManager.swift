@@ -14,6 +14,33 @@ import Foundation
 import AppKit
 import Combine
 
+/// Suppresses macOS App Nap while a keep-awake assertion is held. Without it the
+/// menu-bar app gets napped once the user steps away and activity goes quiet,
+/// which freezes the in-process release timers (`AwakeSupervisor`'s idle timer
+/// and the manual `timeoutTask` below). The IOKit assertion lives in the kernel,
+/// independent of the napped app, so it then lingers for hours until something
+/// wakes the app — keeping the Mac awake long after the agent went idle.
+/// Injectable so tests can verify begin/end pairing without touching `ProcessInfo`.
+protocol AppNapSuppressing: AnyObject {
+    func begin(reason: String) -> NSObjectProtocol
+    func end(_ token: NSObjectProtocol)
+}
+
+final class ProcessInfoAppNapSuppressor: AppNapSuppressing {
+    func begin(reason: String) -> NSObjectProtocol {
+        // `.userInitiatedAllowingIdleSystemSleep` disables App Nap but, unlike
+        // `.userInitiated`, leaves idle system sleep alone — sleep stays governed
+        // solely by the IOKit assertions we configure per the user's flags, so
+        // suppressing App Nap never silently keeps the Mac awake on its own.
+        ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep, reason: reason)
+    }
+
+    func end(_ token: NSObjectProtocol) {
+        ProcessInfo.processInfo.endActivity(token)
+    }
+}
+
 @MainActor
 final class CaffeinateManager: ObservableObject {
     @Published private(set) var isActive: Bool = false
@@ -21,11 +48,15 @@ final class CaffeinateManager: ObservableObject {
     @Published private(set) var startedAt: Date?
 
     private let holder: SleepAssertionHolder
+    private let appNap: AppNapSuppressing
     private var assertions: [SleepAssertion] = []
+    private var appNapToken: NSObjectProtocol?
     private var timeoutTask: Task<Void, Never>?
 
-    init(holder: SleepAssertionHolder = IOKitSleepAssertionHolder()) {
+    init(holder: SleepAssertionHolder = IOKitSleepAssertionHolder(),
+         appNap: AppNapSuppressing = ProcessInfoAppNapSuppressor()) {
         self.holder = holder
+        self.appNap = appNap
     }
 
     func enable(options: CaffeinateOptions = .default) throws {
@@ -51,6 +82,10 @@ final class CaffeinateManager: ObservableObject {
             throw error
         }
         self.assertions = acquired
+        // Hold an App Nap-suppressing activity for as long as we're caffeinated,
+        // so the in-process release timers (auto idle timer / manual timeout)
+        // keep firing instead of being frozen while the user is away.
+        appNapToken = appNap.begin(reason: "Kwota keep-awake")
         isActive = true
         currentOptions = options
         startedAt = Date()
@@ -75,6 +110,10 @@ final class CaffeinateManager: ObservableObject {
     func disable() {
         timeoutTask?.cancel()
         timeoutTask = nil
+        if let token = appNapToken {
+            appNap.end(token)
+            appNapToken = nil
+        }
         let toRelease = assertions
         assertions = []
         for a in toRelease { holder.release(a) }
@@ -98,5 +137,6 @@ final class CaffeinateManager: ObservableObject {
         // The @Published state mutations from disable() are skipped — no
         // observer can subscribe to a deallocated instance.
         for a in assertions { holder.release(a) }
+        if let appNapToken { appNap.end(appNapToken) }
     }
 }
