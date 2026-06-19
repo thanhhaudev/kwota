@@ -275,4 +275,76 @@ final class CycleAnchorResolverTests: XCTestCase {
         XCTAssertEqual(anchor.cycleStart, twoDaysAgo)
         XCTAssertTrue(anchor.isHeuristic)
     }
+
+    // MARK: - latestRecalibrationStart / isRecalibrationActive
+
+    func testRecalibrationDetectedOnLargeMidCycleDrop() {
+        let now = Date()
+        let drop = now.addingTimeInterval(-1 * 3600)
+        let history = [
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-3 * 3600), fiveHour: nil, sevenDay: 84),
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-2 * 3600), fiveHour: nil, sevenDay: 87),
+            UsageHistoryEntry(id: UUID(), at: drop,                              fiveHour: nil, sevenDay: 58),
+        ]
+        XCTAssertEqual(UsageTrendChart.latestRecalibrationStart(in: history), drop)
+    }
+
+    func testNoRecalibrationWhenDropBelowThreshold() {
+        let now = Date()
+        let history = [
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-2 * 3600), fiveHour: nil, sevenDay: 87),
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-1 * 3600), fiveHour: nil, sevenDay: 80),
+        ]
+        XCTAssertNil(UsageTrendChart.latestRecalibrationStart(in: history))
+    }
+
+    func testResetIsNotRecalibration() {
+        let now = Date()
+        let history = [
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-2 * 3600), fiveHour: nil, sevenDay: 50),
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-1 * 3600), fiveHour: nil, sevenDay: 5),
+        ]
+        XCTAssertNil(UsageTrendChart.latestRecalibrationStart(in: history))
+    }
+
+    func testMonotonicIncreaseHasNoRecalibration() {
+        let now = Date()
+        let history = [
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-2 * 3600), fiveHour: nil, sevenDay: 40),
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-1 * 3600), fiveHour: nil, sevenDay: 60),
+        ]
+        XCTAssertNil(UsageTrendChart.latestRecalibrationStart(in: history))
+    }
+
+    func testReturnsLatestRecalibrationWhenMultiple() {
+        let now = Date()
+        let latestDrop = now.addingTimeInterval(-2 * 3600)
+        let history = [
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-5 * 3600), fiveHour: nil, sevenDay: 80),
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-4 * 3600), fiveHour: nil, sevenDay: 55), // drop 25
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-3 * 3600), fiveHour: nil, sevenDay: 90),
+            UsageHistoryEntry(id: UUID(), at: latestDrop,                        fiveHour: nil, sevenDay: 60), // drop 30
+        ]
+        XCTAssertEqual(UsageTrendChart.latestRecalibrationStart(in: history), latestDrop)
+    }
+
+    func testRecalibrationActiveWhenWithinCurrentCycle() {
+        let now = Date()
+        let cycleStart = now.addingTimeInterval(-7 * 86_400)
+        let history = [
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-2 * 3600), fiveHour: nil, sevenDay: 87),
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-1 * 3600), fiveHour: nil, sevenDay: 58),
+        ]
+        XCTAssertTrue(UsageTrendChart.isRecalibrationActive(history: history, cycleStart: cycleStart))
+    }
+
+    func testRecalibrationInactiveWhenBeforeCurrentCycle() {
+        let now = Date()
+        let cycleStart = now.addingTimeInterval(-1 * 3600) // cycle started AFTER the drop
+        let history = [
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-3 * 3600), fiveHour: nil, sevenDay: 87),
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-2 * 3600), fiveHour: nil, sevenDay: 58),
+        ]
+        XCTAssertFalse(UsageTrendChart.isRecalibrationActive(history: history, cycleStart: cycleStart))
+    }
 }

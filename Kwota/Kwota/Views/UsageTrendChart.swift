@@ -320,6 +320,37 @@ struct UsageTrendChart {
         return cycleStart
     }
 
+    /// Most recent mid-cycle server recalibration of the weekly limit: a
+    /// chronological `sevenDay` drop large enough to be a deliberate cap change
+    /// (≥ 15 points) yet NOT a reset (`current >= 10`, which the strict-reset path
+    /// already owns). Returns the timestamp of the sample the drop landed on, or
+    /// `nil`. Drives ONLY the explanatory "server recalibrated" footnote — it never
+    /// moves the cycle anchor, bars, or avg-line.
+    static func latestRecalibrationStart(in history: [UsageHistoryEntry]) -> Date? {
+        let samples = history
+            .compactMap { e -> (at: Date, value: Double)? in
+                e.sevenDay.map { (e.at, $0) }
+            }
+            .sorted { $0.at < $1.at }
+        guard !samples.isEmpty else { return nil }
+        var recalibration: Date? = nil
+        var prev: Double? = nil
+        for (at, v) in samples {
+            if let p = prev, p - v >= 15, v >= 10 {
+                recalibration = at
+            }
+            prev = v
+        }
+        return recalibration
+    }
+
+    /// True when the latest detected recalibration falls inside the currently
+    /// displayed cycle (`>= cycleStart`), so the hint clears at the next real
+    /// reset / new cycle instead of lingering.
+    static func isRecalibrationActive(history: [UsageHistoryEntry], cycleStart: Date) -> Bool {
+        latestRecalibrationStart(in: history).map { $0 >= cycleStart } ?? false
+    }
+
     @ViewBuilder
     private func section<Trailing: View>(
         bucket: UsageBucket,
