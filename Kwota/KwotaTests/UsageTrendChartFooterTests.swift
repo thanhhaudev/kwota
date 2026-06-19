@@ -528,4 +528,28 @@ final class UsageTrendChartFooterTests: XCTestCase {
         )
         XCTAssertEqual(text, "Waiting for first fetch…")
     }
+
+    // MARK: - weeklyFootnoteText recalibration label
+
+    func testWeeklyFootnoteAppendsServerRecalibratedWhenFlagged() {
+        let bucket = UsageBucket(utilization: 60, resetsAt: Date().addingTimeInterval(86_400))
+        let text = UsageTrendChart.weeklyFootnoteText(
+            bucket: bucket, hasRealData: true, isHeuristic: false, isRecalibrated: true)
+        XCTAssertTrue(text.contains("server recalibrated"), text)
+    }
+
+    func testWeeklyFootnoteOmitsServerRecalibratedWhenNotFlagged() {
+        let bucket = UsageBucket(utilization: 60, resetsAt: Date().addingTimeInterval(86_400))
+        let text = UsageTrendChart.weeklyFootnoteText(
+            bucket: bucket, hasRealData: true, isHeuristic: false, isRecalibrated: false)
+        XCTAssertFalse(text.contains("server recalibrated"), text)
+    }
+
+    func testWeeklyFootnoteResetShowsCalibratingNotRecalibrated() {
+        let bucket = UsageBucket(utilization: 5, resetsAt: Date().addingTimeInterval(86_400))
+        let text = UsageTrendChart.weeklyFootnoteText(
+            bucket: bucket, hasRealData: true, isHeuristic: true, isRecalibrated: false)
+        XCTAssertTrue(text.contains("calibrating"), text)
+        XCTAssertFalse(text.contains("server recalibrated"), text)
+    }
 }

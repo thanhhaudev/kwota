@@ -795,6 +795,7 @@ struct UsageTrendChart {
         bucket: UsageBucket,
         hasRealData: Bool,
         isHeuristic: Bool,
+        isRecalibrated: Bool = false,
         now: Date = Date()
     ) -> String {
         guard hasRealData else { return "Waiting for first fetch…" }
@@ -811,16 +812,22 @@ struct UsageTrendChart {
         if isHeuristic {
             parts.append("calibrating")
         }
+        if isRecalibrated {
+            parts.append("server recalibrated")
+        }
         return parts.joined(separator: " · ")
     }
 
     private func footnote(for bucket: UsageBucket, isSession: Bool) -> String? {
         if !isSession {
             let anchor = cycleAnchor
+            let isRecalibrated = Self.isRecalibrationActive(
+                history: history, cycleStart: anchor.cycleStart)
             let text = Self.weeklyFootnoteText(
                 bucket: bucket,
                 hasRealData: hasRealData,
-                isHeuristic: anchor.isHeuristic
+                isHeuristic: anchor.isHeuristic,
+                isRecalibrated: isRecalibrated
             )
             return text.isEmpty ? nil : text
         }
