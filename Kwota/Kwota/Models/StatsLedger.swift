@@ -5,13 +5,15 @@
 
 import Foundation
 
-/// Persisted rollup of token consumption: provider → UTC day → model →
+/// Persisted rollup of token consumption: provider → day → model →
 /// `TokenBreakdown`. Pure value type with no IO — `StatsStore` owns
-/// persistence. Day keys are UTC-anchored for the same reason as
-/// `UsageLedger`: the on-disk aggregate must be invariant under the user's
-/// timezone, or cross-tz travel reshuffles past buckets.
+/// persistence. The day/hour key helpers take an explicit `calendar` (default
+/// UTC); `StatsStore` injects its own (the viewer's LOCAL calendar in
+/// production, UTC in tests for determinism) so buckets land on the day the
+/// user actually sees. Keys are plain "yyyy-MM-dd" strings, so a timezone
+/// change only affects how new events bucket — it never reshuffles past keys.
 struct StatsLedger: Codable, Equatable {
-    /// providerRawValue → dayKey("yyyy-MM-dd", UTC) → modelKey → tokens
+    /// providerRawValue → dayKey("yyyy-MM-dd") → modelKey → tokens
     private(set) var byProvider: [String: [String: [String: TokenBreakdown]]] = [:]
     private(set) var lastUpdate: Date = .distantPast
     private(set) var schemaVersion: Int = 1

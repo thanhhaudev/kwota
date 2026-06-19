@@ -213,7 +213,7 @@ final class StatsStore {
         for e in events {
             if let clearedBefore, e.timestamp < clearedBefore { continue }
             let model = e.model ?? "unknown"
-            let day = ledger.dayKey(for: e.timestamp)
+            let day = ledger.dayKey(for: e.timestamp, calendar: calendar)
             ledger.merge(provider: provider, day: day, model: model, delta: e.tokens, now: now)
             // Hourly only tracks the recent window — skip old backfill events so
             // we don't churn buckets that prune would immediately drop.
@@ -288,10 +288,12 @@ final class StatsStore {
     ///   daysAgo == nil → [earliest ledger day … today]  (all time; empty → today only)
     /// Ascending by day key. Drives the chart's bars, x-axis span, and the
     /// per-day average (denominator = window day count). Days are generated with
-    /// the UTC keys calendar so they match stored ledger keys exactly.
+    /// the store's injected calendar (LOCAL in production) so the window ends on
+    /// the viewer's today — not the UTC day, which lags behind it east of GMT
+    /// during the local-midnight → UTC-midnight window.
     func paddedDailySeries(provider: ProviderID, daysAgo: Int?)
         -> [(day: String, byModel: [String: TokenBreakdown])] {
-        let cal = StatsLedger.utcCalendarForKeys
+        let cal = calendar
         let now = clock()
         let data = Dictionary(uniqueKeysWithValues:
             ledger.dailySeries(provider: provider, sinceDay: nil).map { ($0.day, $0.byModel) })
@@ -312,7 +314,7 @@ final class StatsStore {
         let end = cal.startOfDay(for: now)
         var guardCount = 0
         while cursor <= end, guardCount < 4000 {   // bound: pathological earliest-key can't spin forever
-            let key = ledger.dayKey(for: cursor)
+            let key = ledger.dayKey(for: cursor, calendar: calendar)
             out.append((day: key, byModel: data[key] ?? [:]))
             guard let next = cal.date(byAdding: .day, value: 1, to: cursor) else { break }
             cursor = next
@@ -323,7 +325,7 @@ final class StatsStore {
 
     /// The chart series at an adaptive granularity. Picks a granularity from the
     /// window's day-span, then sums each model's tokens into buckets keyed by the
-    /// bucket's START day ("yyyy-MM-dd", UTC), keeping empty buckets. `.day`
+    /// bucket's START day ("yyyy-MM-dd", store calendar), keeping empty buckets. `.day`
     /// reuses the padded daily series (≤90 days). Week/month/year build the bucket
     /// order by stepping the granularity unit across the FULL [start, today] span
     /// — bounded by bucket count, not day count — so a wide All-time range (e.g.
@@ -332,7 +334,7 @@ final class StatsStore {
     /// count. Ascending.
     func chartSeries(provider: ProviderID, daysAgo: Int?)
         -> (granularity: StatsGranularity, points: [(day: String, byModel: [String: TokenBreakdown])]) {
-        let cal = StatsLedger.utcCalendarForKeys
+        let cal = calendar
         let now = clock()
         let data = Dictionary(uniqueKeysWithValues:
             ledger.dailySeries(provider: provider, sinceDay: nil).map { ($0.day, $0.byModel) })
@@ -354,7 +356,7 @@ final class StatsStore {
         let lastStart = cal.dateInterval(of: gran.component, for: endDay)?.start ?? endDay
         var guardCount = 0
         while cursor <= lastStart, guardCount < 6000 {
-            let key = ledger.dayKey(for: cursor)
+            let key = ledger.dayKey(for: cursor, calendar: calendar)
             if buckets[key] == nil { buckets[key] = [:]; order.append(key) }   // keep empty buckets
             guard let next = cal.date(byAdding: gran.component, value: 1, to: cursor) else { break }
             cursor = next
@@ -367,7 +369,7 @@ final class StatsStore {
                   let date = cal.date(from: DateComponents(year: y, month: m, day: d)),
                   date >= startDay, date <= endDay else { continue }
             let start = cal.dateInterval(of: gran.component, for: date)?.start ?? date
-            let key = ledger.dayKey(for: start)
+            let key = ledger.dayKey(for: start, calendar: calendar)
             if buckets[key] == nil { buckets[key] = [:]; order.append(key) }   // safety
             for (model, tok) in byModel {
                 buckets[key]![model] = (buckets[key]![model] ?? .zero) + tok
@@ -380,7 +382,7 @@ final class StatsStore {
     /// for All time, or today when there's no usage. Shared by `chartSeries` and
     /// `paddedDailySeries` so both agree on the span.
     private func chartStartDate(daysAgo: Int?, now: Date, days: Dictionary<String, [String: TokenBreakdown]>.Keys) -> Date {
-        let cal = StatsLedger.utcCalendarForKeys
+        let cal = calendar
         if let daysAgo { return cal.date(byAdding: .day, value: -daysAgo, to: now) ?? now }
         if let earliest = days.min(),
            let (y, m, d) = Self.parseDay(earliest),
@@ -390,12 +392,12 @@ final class StatsStore {
         return now
     }
 
-    /// "yyyy-MM-dd" key for `daysAgo` days before now, UTC. nil for "All".
+    /// "yyyy-MM-dd" key for `daysAgo` days before now, in the store calendar. nil for "All".
     func sinceDayKey(daysAgo: Int?) -> String? {
         guard let daysAgo else { return nil }
-        let cal = StatsLedger.utcCalendarForKeys
+        let cal = calendar
         let day = cal.date(byAdding: .day, value: -daysAgo, to: clock()) ?? clock()
-        return ledger.dayKey(for: day)
+        return ledger.dayKey(for: day, calendar: calendar)
     }
 
     // MARK: Persistence

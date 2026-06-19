@@ -434,6 +434,30 @@ final class StatsStoreTests: XCTestCase {
         XCTAssertFalse(series.first { $0.day == "2026-06-13" }!.byModel.isEmpty)
     }
 
+    /// Regression: at 01:00 local in a UTC+7 timezone the UTC day still lags one
+    /// behind the viewer's day. The daily window (and event bucketing) must follow
+    /// the injected LOCAL calendar so the current day's bar appears during the
+    /// 00:00–07:00 local window, instead of dropping to the previous UTC day.
+    func test_paddedDailySeries_localTimezone_includesTodayAfterLocalMidnight() {
+        var plus7 = Calendar(identifier: .iso8601)
+        plus7.timeZone = TimeZone(secondsFromGMT: 7 * 3600)!
+        let store = StatsStore(reader: FakeJSONLogReader(),
+                               ledgerURL: URL(fileURLWithPath: "/dev/null"),
+                               clock: { self.date("2026-06-19T18:00:00.000Z") }, // 01:00 on 06-20 in UTC+7
+                               calendar: plus7,
+                               persistDebounce: 0)
+        store.ingest([
+            UsageEvent(uuid: "now", sessionId: "s", timestamp: date("2026-06-19T18:00:00.000Z"),
+                       tokens: TokenBreakdown(input: 42), model: "claude-opus-4-8"),
+        ], provider: .claude)
+
+        let series = store.paddedDailySeries(provider: .claude, daysAgo: 6)
+        XCTAssertEqual(series.map(\.day),
+                       ["2026-06-14","2026-06-15","2026-06-16","2026-06-17","2026-06-18","2026-06-19","2026-06-20"])
+        XCTAssertEqual(series.last?.day, "2026-06-20", "window ends on local today, not UTC yesterday")
+        XCTAssertFalse(series.last!.byModel.isEmpty, "today's event buckets into local today")
+    }
+
     func test_paddedDailySeries_countIsWindowSize_forAvgDenominator() {
         let store = paddedStore()
         store.ingest([
