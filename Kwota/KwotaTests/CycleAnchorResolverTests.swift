@@ -328,6 +328,34 @@ final class CycleAnchorResolverTests: XCTestCase {
         XCTAssertEqual(UsageTrendChart.latestRecalibrationStart(in: history), latestDrop)
     }
 
+    func testRecalibrationAtExactThresholdBoundaryIsDetected() {
+        let now = Date()
+        let drop = now.addingTimeInterval(-1 * 3600)
+        let history = [
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-2 * 3600), fiveHour: nil, sevenDay: 25),
+            UsageHistoryEntry(id: UUID(), at: drop,                              fiveHour: nil, sevenDay: 10), // drop exactly 15, current exactly 10
+        ]
+        XCTAssertEqual(UsageTrendChart.latestRecalibrationStart(in: history), drop)
+    }
+
+    func testRecalibrationJustBelowDropThresholdIsIgnored() {
+        let now = Date()
+        let history = [
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-2 * 3600), fiveHour: nil, sevenDay: 24),
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-1 * 3600), fiveHour: nil, sevenDay: 10), // drop 14 (< 15)
+        ]
+        XCTAssertNil(UsageTrendChart.latestRecalibrationStart(in: history))
+    }
+
+    func testRecalibrationJustBelowCurrentFloorIsIgnored() {
+        let now = Date()
+        let history = [
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-2 * 3600), fiveHour: nil, sevenDay: 50),
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-1 * 3600), fiveHour: nil, sevenDay: 9), // current 9 (< 10) → reset territory
+        ]
+        XCTAssertNil(UsageTrendChart.latestRecalibrationStart(in: history))
+    }
+
     func testRecalibrationActiveWhenWithinCurrentCycle() {
         let now = Date()
         let cycleStart = now.addingTimeInterval(-7 * 86_400)
