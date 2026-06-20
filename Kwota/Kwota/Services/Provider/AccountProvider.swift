@@ -86,6 +86,19 @@ protocol AccountProvider: AnyObject {
     /// metadata is a side-effect of the usage fetch) and reports no diff.
     func refreshProfileMetadata(for profile: Profile, credential: Credential) async throws -> Bool
 
+    /// Whether this provider's plan/billing metadata is refreshed from an
+    /// endpoint SEPARATE from `fetchUsage` (true), or is merely a side-effect
+    /// (or literal re-run) of the usage fetch (false). Claude is the only
+    /// `true` today: its plan tier ("Max 20x" / "Max 5x") lives behind
+    /// `/api/oauth/profile`, distinct from the `/api/oauth/usage` bars.
+    ///
+    /// The popover's manual Refresh uses this to decide whether a post-usage
+    /// plan re-probe is worth a second round-trip. Providers whose
+    /// `refreshProfileMetadata` delegates to `fetchUsage` (Codex, Antigravity,
+    /// and the protocol default) MUST stay `false`, or a single Refresh would
+    /// fire the usage request twice and burn rate-limit budget. Default: false.
+    var hasSeparatePlanMetadataRefresh: Bool { get }
+
     /// Sentence shown in the re-auth banner when a refresh fails with
     /// `.unauthorized`. Default names this provider's CLI; providers whose
     /// auth is brokered differently (e.g. a running app) override it.
@@ -170,6 +183,8 @@ extension AccountProvider {
         _ = try await fetchUsage(credential: credential, profile: profile)
         return false
     }
+
+    var hasSeparatePlanMetadataRefresh: Bool { false }
 
     var reauthInstruction: String {
         "Authorization expired. Sign in to the \(displayName) CLI again."

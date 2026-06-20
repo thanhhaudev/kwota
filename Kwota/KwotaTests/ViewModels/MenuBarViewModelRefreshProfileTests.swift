@@ -308,6 +308,166 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
         XCTAssertEqual(stored.organizationId, "org-A")
         XCTAssertNil(stored.subscriptionPlan)
     }
+
+    // MARK: - Manual Refresh re-probes plan metadata
+
+    /// A manual popover Refresh self-heals a stale plan badge: when the usage
+    /// fetch leaves the provider healthy AND the provider keeps its plan
+    /// behind a separate endpoint (Claude), the shell fires the post-usage
+    /// metadata probe. Proven via the probe call count.
+    ///
+    /// (`fetchError: .offline` is benign — it routes to the generic catch, so
+    /// authState stays `.authenticated` and no rate-limit is armed; the probe
+    /// is gated on health, not on the usage fetch returning data.)
+    func test_manualRefresh_separatePlanProvider_probesWhenHealthy() async throws {
+        let p = Profile(name: "Hau", authMethod: .cliSync,
+                        providerID: .claude, email: "h@x.com")
+        try profileStore.add(p)
+        try keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
+                                     expiresAt: .distantFuture), for: p.id)
+        let provider = CountingProvider(id: .claude, separatePlan: true)
+        let registry = ProviderRegistry()
+        registry.register(provider)
+        let vm = makeVM(stubFetcher: StubOAuthProfileFetcher(), registry: registry)
+
+        _ = await poll { provider.fetchUsageCount >= 1 }   // drain init refresh
+        provider.metadataCount = 0
+        vm.lastFetchAttemptAt = nil
+
+        vm.refreshUsageNow(trigger: .manual)
+
+        let probed = await poll { provider.metadataCount >= 1 }
+        XCTAssertTrue(probed, "healthy manual Refresh should re-probe plan metadata")
+    }
+
+    /// A manual Refresh whose usage fetch hits 429 must NOT then probe plan
+    /// metadata — that second request burns rate-limit budget while Anthropic
+    /// is already throttling us (and the swallowed result hides the failure).
+    /// The init refresh fails benignly (offline) so the manual gate is open;
+    /// the manual fetch arms the 429.
+    func test_manualRefresh_rateLimited_doesNotProbePlanMetadata() async throws {
+        let p = Profile(name: "Hau", authMethod: .cliSync,
+                        providerID: .claude, email: "h@x.com")
+        try profileStore.add(p)
+        try keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
+                                     expiresAt: .distantFuture), for: p.id)
+        let provider = CountingProvider(id: .claude, separatePlan: true)
+        let registry = ProviderRegistry()
+        registry.register(provider)
+        let vm = makeVM(stubFetcher: StubOAuthProfileFetcher(), registry: registry)
+
+        _ = await poll { provider.fetchUsageCount >= 1 }   // drain init (offline)
+        provider.fetchUsageCount = 0
+        provider.metadataCount = 0
+        vm.lastFetchAttemptAt = nil
+        // Arm the manual fetch to 429.
+        provider.fetchError = ClaudeAPIClient.APIError.rateLimited(retryAfter: 30)
+
+        vm.refreshUsageNow(trigger: .manual)
+
+        _ = await poll { provider.fetchUsageCount >= 1 }   // manual usage fetch (429)
+        let probed = await poll(timeout: 0.8) { provider.metadataCount >= 1 }
+        XCTAssertFalse(probed, "must not probe plan metadata while rate-limited")
+        XCTAssertEqual(provider.metadataCount, 0)
+    }
+
+    /// A manual Refresh whose usage fetch hits 401 (`authState == .expired`)
+    /// must NOT probe plan metadata — `/api/oauth/profile` would 401 too; the
+    /// user has to re-auth first.
+    func test_manualRefresh_unauthorized_doesNotProbePlanMetadata() async throws {
+        let p = Profile(name: "Hau", authMethod: .cliSync,
+                        providerID: .claude, email: "h@x.com")
+        try profileStore.add(p)
+        try keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
+                                     expiresAt: .distantFuture), for: p.id)
+        let provider = CountingProvider(id: .claude, separatePlan: true)
+        let registry = ProviderRegistry()
+        registry.register(provider)
+        let vm = makeVM(stubFetcher: StubOAuthProfileFetcher(), registry: registry)
+
+        _ = await poll { provider.fetchUsageCount >= 1 }   // drain init (offline)
+        provider.fetchUsageCount = 0
+        provider.metadataCount = 0
+        vm.lastFetchAttemptAt = nil
+        provider.fetchError = ClaudeAPIClient.APIError.unauthorized
+
+        vm.refreshUsageNow(trigger: .manual)
+
+        _ = await poll { provider.fetchUsageCount >= 1 }   // manual usage fetch (401)
+        let probed = await poll(timeout: 0.8) { provider.metadataCount >= 1 }
+        XCTAssertFalse(probed, "must not probe plan metadata when auth expired")
+        XCTAssertEqual(provider.metadataCount, 0)
+    }
+
+    /// The automatic background poll must NOT pay the extra `/api/oauth/profile`
+    /// round-trip — only `.manual` re-probes. Stale plan persists until the
+    /// user (or a CLI account change) triggers a refresh.
+    func test_automaticRefresh_doesNotReprobePlanMetadata() async throws {
+        let p = try seedProfile(plan: "Max 20x")
+        let stub = StubOAuthProfileFetcher()
+        stub.outcome = .success(makeResponse(planLabel: "Max 5x"))
+        let vm = makeVM(stubFetcher: stub)
+        vm.lastFetchAttemptAt = nil
+
+        vm.refreshUsageNow(trigger: .automatic)
+
+        // Give the spawned refresh Task ample time to run; the probe, if it
+        // were going to fire, runs immediately after the (instant, stubbed)
+        // usage fetch. A timeout with zero calls is the assertion.
+        let fired = await poll(timeout: 1.5) { stub.callCount >= 1 }
+        XCTAssertFalse(fired, "automatic refresh must NOT re-probe plan metadata")
+        let stored = profileStore.profiles.first(where: { $0.id == p.id })!
+        XCTAssertEqual(stored.subscriptionPlan, "Max 20x", "plan unchanged on automatic refresh")
+    }
+
+    /// Regression for the Codex adversarial finding: a provider WITHOUT a
+    /// separate plan endpoint (Codex/Antigravity — their
+    /// `refreshProfileMetadata` re-runs `fetchUsage`) must NOT get the
+    /// post-refresh plan probe on a manual Refresh, or one Refresh fires the
+    /// usage request twice. Proven via a counting provider: exactly one
+    /// `fetchUsage` and zero `refreshProfileMetadata` calls.
+    func test_manualRefresh_nonSeparatePlanProvider_doesNotDoubleFetchUsage() async throws {
+        let p = Profile(name: "Gx", authMethod: .cliSync,
+                        providerID: .codex, email: "g@x.com")
+        try profileStore.add(p)
+        try keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
+                                     expiresAt: .distantFuture), for: p.id)
+        let provider = CountingProvider(id: .codex)
+        let registry = ProviderRegistry()
+        registry.register(provider)
+        let vm = makeVM(stubFetcher: StubOAuthProfileFetcher(), registry: registry)
+
+        // Drain the init-driven automatic refresh, then zero the counters so
+        // we measure only the manual Refresh below.
+        _ = await poll { provider.fetchUsageCount >= 1 }
+        provider.fetchUsageCount = 0
+        provider.metadataCount = 0
+        vm.lastFetchAttemptAt = nil
+
+        vm.refreshUsageNow(trigger: .manual)
+
+        _ = await poll { provider.fetchUsageCount >= 1 }
+        // If the gate regressed, refreshProfileMetadata would fire and re-run
+        // fetchUsage → counts would climb past these. Give it room to happen.
+        let doubled = await poll(timeout: 0.8) {
+            provider.fetchUsageCount >= 2 || provider.metadataCount >= 1
+        }
+        XCTAssertFalse(doubled, "non-separate-plan provider must not double-fetch on manual Refresh")
+        XCTAssertEqual(provider.fetchUsageCount, 1, "exactly one usage fetch")
+        XCTAssertEqual(provider.metadataCount, 0, "no plan metadata probe")
+    }
+
+    /// Polls `cond` on the main actor until it holds or the deadline passes.
+    /// `Task.sleep` yields so the detached refresh Task spawned by
+    /// `refreshUsageNow` can make progress between checks.
+    private func poll(timeout: TimeInterval = 3, until cond: () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if cond() { return true }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        return cond()
+    }
 }
 
 /// Minimal AccountProvider whose `refreshProfileMetadata` returns a fixed
@@ -342,6 +502,56 @@ private final class StubRefreshProvider: AccountProvider {
         case .unchanged:      return false
         case .fail(let err):  throw err
         }
+    }
+
+    func usageDetailView(summary: ProviderUsageSummary,
+                         history: [UsageHistoryEntry],
+                         profile: Profile) -> AnyView { AnyView(EmptyView()) }
+    func planBadgeView(profile: Profile) -> AnyView { AnyView(EmptyView()) }
+}
+
+/// Counts `fetchUsage` / `refreshProfileMetadata` calls and mirrors the
+/// Codex/Antigravity contract where metadata refresh re-runs `fetchUsage`.
+/// `separatePlan` drives `hasSeparatePlanMetadataRefresh`; `fetchError` is
+/// what `fetchUsage` throws (mutable so a test can let the init-driven
+/// automatic refresh fail benignly, then arm a 401/429 for the manual one).
+@MainActor
+private final class CountingProvider: AccountProvider {
+    let id: ProviderID
+    let displayName = "Counting"
+    let iconAssetName = "Mascot"
+    var separatePlan: Bool
+    /// Thrown by `fetchUsage`. Default `.offline` is benign: `refresh(profile:)`
+    /// routes it to the generic catch (authState stays `.authenticated`, no
+    /// rate-limit armed), so it never blocks the probe by itself.
+    var fetchError: Error
+    var fetchUsageCount = 0
+    var metadataCount = 0
+
+    init(id: ProviderID,
+         separatePlan: Bool = false,
+         fetchError: Error = ProviderMetadataRefreshError.offline) {
+        self.id = id
+        self.separatePlan = separatePlan
+        self.fetchError = fetchError
+    }
+
+    var hasSeparatePlanMetadataRefresh: Bool { separatePlan }
+
+    var supportedAuthMethods: [any ProviderAuthMethod] { [] }
+
+    func fetchUsage(credential: Credential, profile: Profile) async throws -> ProviderUsageSummary {
+        fetchUsageCount += 1
+        // Throwing keeps the fixture from needing a full ProviderUsageSummary;
+        // refresh(profile:) classifies the error. The COUNT + thrown type are
+        // what the tests assert.
+        throw fetchError
+    }
+
+    func refreshProfileMetadata(for profile: Profile, credential: Credential) async throws -> Bool {
+        metadataCount += 1
+        _ = try? await fetchUsage(credential: credential, profile: profile)
+        return false
     }
 
     func usageDetailView(summary: ProviderUsageSummary,

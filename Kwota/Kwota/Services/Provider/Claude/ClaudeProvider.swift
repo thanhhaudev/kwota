@@ -19,6 +19,13 @@ final class ClaudeProvider: AccountProvider {
         "Run `claude login` in your terminal to refresh tokens. Kwota will pick up the new session automatically."
     }
 
+    /// Claude's plan tier lives behind `/api/oauth/profile` (via
+    /// `refreshProfileMetadata` → `OAuthProfileFetcher`), an endpoint
+    /// distinct from the `/api/oauth/usage` bars `fetchUsage` reads — so a
+    /// post-usage manual re-probe costs one extra GET, not a duplicate usage
+    /// fetch. See `AccountProvider.hasSeparatePlanMetadataRefresh`.
+    let hasSeparatePlanMetadataRefresh = true
+
     private let apiClient: ClaudeAPIClient
     private let cliReader: CLICredentialReader
     private let cliRefresher: CLITokenRefresher

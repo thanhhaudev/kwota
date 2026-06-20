@@ -1711,7 +1711,52 @@ final class MenuBarViewModel {
         // flight when a newer trigger fires gets invalidated at commit
         // time so only the freshest data lands.
         refreshGeneration &+= 1
-        Task { await self.refresh(profile: profile) }
+        Task {
+            await self.refresh(profile: profile)
+            // A manual Refresh re-probes plan metadata for providers whose
+            // plan lives behind an endpoint SEPARATE from the usage fetch —
+            // today only Claude (/api/oauth/profile `rate_limit_tier`, the
+            // "Max 20x" / "Max 5x" badge). That lets a same-account plan
+            // change self-heal without the user opening Settings ▸ Profiles.
+            // Runs AFTER the usage fetch so the quota bars update first; the
+            // plan-probe result is intentionally swallowed (a plan-only
+            // failure must not disrupt the usage refresh — bars stay the
+            // primary signal). `shouldReprobePlanMetadata` decides whether the
+            // extra round-trip is warranted given what the usage fetch we just
+            // ran revealed about the provider's health.
+            if trigger == .manual, self.shouldReprobePlanMetadata(after: profile) {
+                _ = await self.refreshProfileMetadata(for: profile.id)
+            }
+        }
+    }
+
+    /// Whether the manual usage refresh just completed should be followed by a
+    /// plan-metadata re-probe. The probe is only worth a second round-trip
+    /// when the usage fetch left the provider healthy AND the provider keeps
+    /// its plan behind a separate endpoint. It is suppressed when:
+    ///
+    ///   - the profile is no longer active (the user switched away mid-fetch),
+    ///     so a probe would write a stale account's data;
+    ///   - the usage fetch hit 401 (`authState == .expired`) — `/api/oauth/
+    ///     profile` would 401 too, and the user needs to re-auth first;
+    ///   - the usage fetch hit 429 and armed this provider's rate-limit window
+    ///     — probing now burns request budget while Anthropic is throttling us
+    ///     (and the swallowed result means a fresh 429 wouldn't even surface);
+    ///   - the provider's plan is a side-effect of the usage fetch, not a
+    ///     separate endpoint (Codex/Antigravity — whose `refreshProfileMetadata`
+    ///     re-runs `fetchUsage`, so probing here would double the usage call).
+    ///
+    /// `.probe` and `.automatic` triggers never reach here — the caller scopes
+    /// this to `.manual`.
+    private func shouldReprobePlanMetadata(after profile: Profile) -> Bool {
+        guard profile.id == profileStore.activeProfileId else { return false }
+        guard authState != .expired else { return false }
+        if rateLimitedProviderID == profile.providerID,
+           let until = rateLimitedUntil, until > now() {
+            return false
+        }
+        return registry.provider(for: profile.providerID)?
+            .hasSeparatePlanMetadataRefresh == true
     }
 
     /// Returns the on-disk history store for the given profile. When the

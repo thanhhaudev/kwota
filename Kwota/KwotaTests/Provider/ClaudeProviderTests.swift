@@ -47,6 +47,14 @@ final class ClaudeProviderTests: XCTestCase {
                       "Claude re-auth detail must reference `claude login`")
     }
 
+    /// Claude's plan tier lives behind `/api/oauth/profile`, separate from the
+    /// usage bars — so the popover's manual Refresh re-probes it (other
+    /// providers fold plan into `fetchUsage` and stay at the default `false`).
+    func test_hasSeparatePlanMetadataRefresh_isTrue() {
+        let provider = makeProvider(transport: { _ in throw URLError(.unknown) })
+        XCTAssertTrue(provider.hasSeparatePlanMetadataRefresh)
+    }
+
     private func makeProvider(transport: @escaping ClaudeAPIClient.Transport) -> ClaudeProvider {
         let service = "com.thanhhaudev.Kwota.test.\(UUID())"
         let store = KeychainCredentialStore(service: service)
