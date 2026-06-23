@@ -137,3 +137,14 @@ final class LiveAccountRecorder {
         return out
     }
 }
+
+@MainActor
+protocol LiveAccountRecording: AnyObject {
+    func recordNonActive(
+        profiles: [Profile],
+        currentActiveID: @escaping () -> UUID?,
+        backoffUntil: (ProviderID) -> Date?
+    ) async
+}
+
+extension LiveAccountRecorder: LiveAccountRecording {}

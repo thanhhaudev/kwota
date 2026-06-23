@@ -232,6 +232,7 @@ final class MenuBarViewModel {
     /// `AppPaths.usageHistoryFile(id:)`; tests inject a temp-dir mapping so
     /// 200-path refreshes never write under the real per-profile dirs.
     private let historyFileProvider: (UUID) -> URL
+    private let liveAccountRecorder: any LiveAccountRecording
     var refreshCoordinator: UsageRefreshCoordinator?
     /// Disk-backed Cache-tab state (settings, AI evals, custom paths,
     /// toggles, risky-alert acks). Read once on init to seed `cacheState`,
@@ -614,6 +615,7 @@ final class MenuBarViewModel {
         agentProcessScanner: AgentProcessScanner? = nil,
         agentProcessKiller: (any AgentProcessKilling)? = nil,
         historyFileProvider: ((UUID) -> URL)? = nil,
+        liveAccountRecorder: (any LiveAccountRecording)? = nil,
         now: @escaping () -> Date = Date.init,
         startupMode: StartupMode = .live
     ) {
@@ -735,6 +737,10 @@ final class MenuBarViewModel {
                 ]
             }
         )
+        self.liveAccountRecorder = liveAccountRecorder ?? LiveAccountRecorder(
+            fetcher: self.profileUsageFetcher,
+            historyFile: self.historyFileProvider,
+            now: self.now)
         self.oauthProfileFetcher = resolvedFetcher
         self.autoProfileCoordinator = autoProfileCoordinator ?? AutoProfileCoordinator(
             watcher: resolvedWatcher,
@@ -979,6 +985,9 @@ final class MenuBarViewModel {
                 now: self.now,
                 onTick: { [weak self] in
                     self?.refreshUsageNow()
+                    Task { @MainActor [weak self] in
+                        await self?.recordLiveNonActiveAccounts()
+                    }
                 }
             )
             self.refreshCoordinator = coord
@@ -1677,6 +1686,19 @@ final class MenuBarViewModel {
         guard let activeId = profileStore.activeProfileId,
               let profile = profileStore.profiles.first(where: { $0.id == activeId }) else { return }
         refreshUsageNow(profile: profile, trigger: trigger)
+    }
+
+    /// Fetch + record usage history for every non-active live account, so
+    /// their Session + Weekly charts stay populated without being selected on
+    /// the popover. Invoked from the refresh tick after the active refresh.
+    func recordLiveNonActiveAccounts() async {
+        await liveAccountRecorder.recordNonActive(
+            profiles: profileStore.profiles,
+            currentActiveID: { [weak self] in self?.profileStore.activeProfileId },
+            backoffUntil: { [weak self] provider in
+                self?.refreshCoordinator?.backoffUntil(for: provider)
+            }
+        )
     }
 
     private func refreshUsageNow(profile: Profile, trigger: RefreshTrigger = .automatic) {
