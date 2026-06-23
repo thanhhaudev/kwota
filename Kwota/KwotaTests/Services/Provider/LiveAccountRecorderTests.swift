@@ -184,6 +184,51 @@ final class LiveAccountRecorderTests: XCTestCase {
         let store = UsageHistoryStore(historyFile: tmp.file("h-\(codex.id.uuidString).json"))
         XCTAssertEqual(try store.load().first?.sevenDay ?? -1, 7, accuracy: 0.001)
     }
+
+    // MARK: Antigravity group history
+
+    private func agQuota(at: Date) -> AntigravityQuotaSummary {
+        AntigravityQuotaSummary(
+            fetchedAt: at,
+            groups: [
+                .init(displayName: "Gemini Models", description: nil, buckets: [
+                    .init(bucketId: "gemini-weekly", displayName: "Weekly Limit",
+                          window: .weekly, remainingFraction: 0.6, resetTime: nil),
+                    .init(bucketId: "gemini-5h", displayName: "Five Hour Limit",
+                          window: .fiveHour, remainingFraction: 0.2, resetTime: nil)])
+            ])
+    }
+
+    func test_record_antigravity_writesGroupHistory() async throws {
+        let tmp = TempDirectory()
+        let at = Date(timeIntervalSince1970: 5_000)
+        let ag = Profile(id: UUID(), name: "ag", authMethod: .cliSync,
+                         providerID: .antigravity, email: "ag@x.com")
+        let payload = AntigravityUsagePayload(
+            snapshot: AntigravityUsageSnapshot(fetchedAt: at),
+            quota: agQuota(at: at))
+        let s = ProviderUsageSummary(
+            providerID: .antigravity, fetchedAt: at,
+            primary: UsageBucket(utilization: 40, resetsAt: nil),
+            secondary: UsageBucket(utilization: 80, resetsAt: nil),
+            payload: payload)
+        let fetcher = StubFetcher()
+        fetcher.byProfile[ag.id] = .success(s)
+        let rec = LiveAccountRecorder(
+            fetcher: fetcher,
+            historyFile: { _ in tmp.file("usage-history.json") },
+            now: { Date(timeIntervalSince1970: 10_000) })
+
+        let wrote = await rec.record(profile: ag, backoffUntil: nil, isStillNonActive: { true })
+
+        XCTAssertTrue(wrote)
+        // Main file got the headline entry.
+        XCTAssertEqual(try UsageHistoryStore(historyFile: tmp.file("usage-history.json"))
+            .load().first?.sevenDay ?? -1, 80, accuracy: 0.001)
+        // Gemini group file got its own entry (weekly = (1 - 0.6) * 100 = 40).
+        let gemini = UsageHistoryStore(historyFile: tmp.file("usage-history-gemini.json"))
+        XCTAssertEqual(try gemini.load().first?.sevenDay ?? -1, 40, accuracy: 0.001)
+    }
 }
 
 /// Local helper: copy a Profile with a different kind (no public `kind` setter

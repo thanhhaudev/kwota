@@ -87,7 +87,25 @@ final class LiveAccountRecorder {
                 level: .error)
             return false
         }
+
+        if profile.providerID == .antigravity,
+           let quota = (summary.payload as? AntigravityUsagePayload)?.quota {
+            recordAntigravityGroups(quota: quota, profileID: profile.id, at: summary.fetchedAt)
+        }
         return true
+    }
+
+    /// Mirror MenuBarViewModel.appendAntigravityGroupHistory for the non-active
+    /// path: one entry per group into the sibling usage-history-<key>.json.
+    private func recordAntigravityGroups(
+        quota: AntigravityQuotaSummary, profileID: UUID, at: Date
+    ) {
+        let dir = historyFile(profileID).deletingLastPathComponent()
+        for (key, entry) in AntigravityGroupHistoryBuilder.entries(from: quota, at: at) {
+            let store = makeStore(dir.appendingPathComponent("usage-history-\(key).json"))
+            try? store.append(entry)
+            try? store.flushPendingWrite()
+        }
     }
 
     /// Resolve and record every non-active live account, one fetch per provider.
