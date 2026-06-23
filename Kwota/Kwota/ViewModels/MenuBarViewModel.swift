@@ -171,6 +171,12 @@ final class MenuBarViewModel {
     /// value is honored as-is.
     private var consecutive429Count: Int = 0
 
+    /// Guards against overlapping background recorder runs. Set to `true`
+    /// before a `recordLiveNonActiveAccounts` task is launched; cleared when
+    /// the task finishes. Both the check and the set happen on @MainActor, so
+    /// they can never interleave.
+    private var liveRecordInFlight = false
+
     /// True when the user has not added any profile yet. Drives the
     /// empty-state UI in `UsageTabView`.
     var hasNoProfiles: Bool { profileStore.profiles.isEmpty }
@@ -232,7 +238,7 @@ final class MenuBarViewModel {
     /// `AppPaths.usageHistoryFile(id:)`; tests inject a temp-dir mapping so
     /// 200-path refreshes never write under the real per-profile dirs.
     private let historyFileProvider: (UUID) -> URL
-    private let liveAccountRecorder: any LiveAccountRecording
+    private var liveAccountRecorder: any LiveAccountRecording
     var refreshCoordinator: UsageRefreshCoordinator?
     /// Disk-backed Cache-tab state (settings, AI evals, custom paths,
     /// toggles, risky-alert acks). Read once on init to seed `cacheState`,
@@ -737,11 +743,15 @@ final class MenuBarViewModel {
                 ]
             }
         )
+        self.oauthProfileFetcher = resolvedFetcher
+        // Assign early so Phase-1 initialization is satisfied. When no injection
+        // is provided, the real LiveAccountRecorder (with the onRateLimited callback
+        // that captures [weak self]) is wired after all stored `let` properties are
+        // initialized — see the reassignment below after `self.activityHistorian`.
         self.liveAccountRecorder = liveAccountRecorder ?? LiveAccountRecorder(
             fetcher: self.profileUsageFetcher,
             historyFile: self.historyFileProvider,
             now: self.now)
-        self.oauthProfileFetcher = resolvedFetcher
         self.autoProfileCoordinator = autoProfileCoordinator ?? AutoProfileCoordinator(
             watcher: resolvedWatcher,
             profileStore: self.profileStore,
@@ -835,6 +845,23 @@ final class MenuBarViewModel {
                 autoBackfillDelay: startupMode == .live ? 5 : 0,
                 persistURL: startupMode == .live ? ActivityHistorian.defaultPersistURL() : nil
             )
+
+        // All stored `let` properties are now initialized (Phase 1 complete),
+        // so `[weak self]` is safe. Replace the early-assigned recorder with
+        // the full version that routes background 429s to the refresh coordinator.
+        // Skipped when a recorder was explicitly injected (test or custom path).
+        if liveAccountRecorder == nil {
+            self.liveAccountRecorder = LiveAccountRecorder(
+                fetcher: self.profileUsageFetcher,
+                historyFile: self.historyFileProvider,
+                now: self.now,
+                onRateLimited: { [weak self] provider, retryAfter in
+                    guard let self else { return }
+                    let backoff = retryAfter.flatMap { $0 > 0 ? $0 : nil }
+                        ?? Self.fallbackBackoff(forConsecutiveCount: 1)
+                    self.refreshCoordinator?.applyRetryAfter(backoff, for: provider)
+                })
+        }
 
         // Forward non-Claude activity into the historian so the chart can draw a
         // per-provider wave. Claude already flows through the uuid-deduped
@@ -985,9 +1012,7 @@ final class MenuBarViewModel {
                 now: self.now,
                 onTick: { [weak self] in
                     self?.refreshUsageNow()
-                    Task { @MainActor [weak self] in
-                        await self?.recordLiveNonActiveAccounts()
-                    }
+                    self?.launchLiveRecordingIfIdle()
                 }
             )
             self.refreshCoordinator = coord
@@ -1699,6 +1724,19 @@ final class MenuBarViewModel {
                 self?.refreshCoordinator?.backoffUntil(for: provider)
             }
         )
+    }
+
+    /// Launch a background live-account recording pass only if the previous
+    /// one has finished. Prevents overlapping coordinator ticks from
+    /// double-fetching the same provider when a fetch is slow. @MainActor, so
+    /// the flag check/set never interleaves.
+    func launchLiveRecordingIfIdle() {
+        guard !liveRecordInFlight else { return }
+        liveRecordInFlight = true
+        Task { @MainActor [weak self] in
+            await self?.recordLiveNonActiveAccounts()
+            self?.liveRecordInFlight = false
+        }
     }
 
     private func refreshUsageNow(profile: Profile, trigger: RefreshTrigger = .automatic) {

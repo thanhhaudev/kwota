@@ -21,6 +21,74 @@ final class MenuBarViewModelLiveRecorderTests: XCTestCase {
         }
     }
 
+    private final class GatedSpyRecorder: LiveAccountRecording {
+        private(set) var callCount = 0
+        private var gate = Gate()
+
+        final class Gate {
+            private var continuation: CheckedContinuation<Void, Never>?
+            private var released = false
+            private var enteredContinuation: CheckedContinuation<Void, Never>?
+            private var entered = false
+
+            func wait() async {
+                entered = true
+                enteredContinuation?.resume()
+                enteredContinuation = nil
+                if released { return }
+                await withCheckedContinuation { c in self.continuation = c }
+            }
+
+            func release() {
+                released = true
+                continuation?.resume()
+                continuation = nil
+            }
+
+            func waitUntilEntered() async {
+                if entered { return }
+                await withCheckedContinuation { c in self.enteredContinuation = c }
+            }
+        }
+
+        func waitUntilEntered() async { await gate.waitUntilEntered() }
+        func release() { gate.release() }
+
+        private var finishedContinuation: CheckedContinuation<Void, Never>?
+        private var finished = false
+
+        func waitUntilFinished() async {
+            if finished { return }
+            await withCheckedContinuation { c in self.finishedContinuation = c }
+        }
+
+        func recordNonActive(
+            profiles: [Profile],
+            currentActiveID: @escaping () -> UUID?,
+            backoffUntil: (ProviderID) -> Date?
+        ) async {
+            callCount += 1
+            await gate.wait()
+            finished = true
+            finishedContinuation?.resume()
+            finishedContinuation = nil
+        }
+    }
+
+    func test_launchLiveRecordingIfIdle_skipsWhileInFlight() async {
+        let spy = GatedSpyRecorder()
+        let vm = MenuBarViewModelLiveRecorderFixture.make(recorder: spy)
+
+        vm.launchLiveRecordingIfIdle()       // run 1 starts, blocks in recordNonActive
+        await spy.waitUntilEntered()
+        vm.launchLiveRecordingIfIdle()       // must be skipped — prior run in flight
+
+        spy.release()                        // let run 1 finish
+        await spy.waitUntilFinished()
+
+        XCTAssertEqual(spy.callCount, 1)
+    }
+
     func test_recordLiveNonActiveAccounts_forwardsProfilesAndActiveID() async {
         let spy = SpyRecorder()
         let vm = MenuBarViewModelLiveRecorderFixture.make(recorder: spy)

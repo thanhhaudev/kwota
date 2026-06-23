@@ -21,19 +21,22 @@ final class LiveAccountRecorder {
     private let now: () -> Date
     private let minRecordInterval: TimeInterval
     private let makeStore: @MainActor (URL) -> UsageHistoryStore
+    private let onRateLimited: (ProviderID, TimeInterval?) -> Void
 
     init(
         fetcher: any ProfileUsageFetching,
         historyFile: @escaping (UUID) -> URL,
         now: @escaping () -> Date = Date.init,
         minRecordInterval: TimeInterval = 45,
-        makeStore: @escaping @MainActor (URL) -> UsageHistoryStore = { UsageHistoryStore(historyFile: $0) }
+        makeStore: @escaping @MainActor (URL) -> UsageHistoryStore = { UsageHistoryStore(historyFile: $0) },
+        onRateLimited: @escaping (ProviderID, TimeInterval?) -> Void = { _, _ in }
     ) {
         self.fetcher = fetcher
         self.historyFile = historyFile
         self.now = now
         self.minRecordInterval = minRecordInterval
         self.makeStore = makeStore
+        self.onRateLimited = onRateLimited
     }
 
     /// Fetch `profile` and append a history entry to its own file. Returns
@@ -67,6 +70,9 @@ final class LiveAccountRecorder {
         let summary: ProviderUsageSummary
         do {
             summary = try await fetcher.fetch(profile: profile)
+        } catch ClaudeAPIClient.APIError.rateLimited(let retryAfter) {
+            onRateLimited(profile.providerID, retryAfter)
+            return false
         } catch {
             return false
         }

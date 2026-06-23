@@ -185,6 +185,45 @@ final class LiveAccountRecorderTests: XCTestCase {
         XCTAssertEqual(try store.load().first?.sevenDay ?? -1, 7, accuracy: 0.001)
     }
 
+    func test_record_propagatesRateLimitToCallback() async {
+        let tmp = TempDirectory()
+        let p = claude()
+        let fetcher = StubFetcher()
+        fetcher.byProfile[p.id] = .failure(ClaudeAPIClient.APIError.rateLimited(retryAfter: 30))
+        var captured: [(ProviderID, TimeInterval?)] = []
+        let rec = LiveAccountRecorder(
+            fetcher: fetcher,
+            historyFile: { _ in tmp.file("usage-history.json") },
+            now: { Date(timeIntervalSince1970: 10_000) },
+            onRateLimited: { captured.append(($0, $1)) })
+
+        let wrote = await rec.record(profile: p, backoffUntil: nil, isStillNonActive: { true })
+
+        XCTAssertFalse(wrote)
+        XCTAssertEqual(captured.count, 1)
+        XCTAssertEqual(captured.first?.0, .claude)
+        XCTAssertEqual(captured.first?.1 ?? -1, 30, accuracy: 0.001)
+        XCTAssertTrue((try? UsageHistoryStore(historyFile: tmp.file("usage-history.json")).load())?.isEmpty ?? true)
+    }
+
+    func test_record_nonRateLimitError_doesNotCallBackoffCallback() async {
+        let tmp = TempDirectory()
+        let p = claude()
+        let fetcher = StubFetcher()
+        struct Boom: Error {}
+        fetcher.byProfile[p.id] = .failure(Boom())
+        var called = false
+        let rec = LiveAccountRecorder(
+            fetcher: fetcher,
+            historyFile: { _ in tmp.file("usage-history.json") },
+            now: { Date(timeIntervalSince1970: 10_000) },
+            onRateLimited: { _, _ in called = true })
+
+        _ = await rec.record(profile: p, backoffUntil: nil, isStillNonActive: { true })
+
+        XCTAssertFalse(called)
+    }
+
     // MARK: Antigravity group history
 
     private func agQuota(at: Date) -> AntigravityQuotaSummary {
