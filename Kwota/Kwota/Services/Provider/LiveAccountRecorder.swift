@@ -40,16 +40,25 @@ final class LiveAccountRecorder {
     }
 
     /// Fetch `profile` and append a history entry to its own file. Returns
-    /// false (no write) when: the provider is in a back-off window; a sample
-    /// was recorded within `minRecordInterval`; the fetch throws; the summary
-    /// has no bucket data; or `isStillNonActive()` is false after the fetch
-    /// (the profile became active mid-fetch — the active path now owns it).
+    /// false (no write) when: the profile is already active at entry; the
+    /// provider is in a back-off window; a sample was recorded within
+    /// `minRecordInterval`; the fetch throws; the summary has no bucket data;
+    /// or `isStillNonActive()` is false after the fetch (the profile became
+    /// active mid-fetch — the active path now owns it).
     @discardableResult
     func record(
         profile: Profile,
         backoffUntil: Date?,
         isStillNonActive: () -> Bool
     ) async -> Bool {
+        // Skip entirely if the profile is already active when its turn comes
+        // up (the active profile switched during an earlier target's in-flight
+        // fetch). The active path owns its own refresh; issuing a background
+        // fetch here would just duplicate it and waste rate-limit budget. The
+        // post-fetch isStillNonActive guard below still covers a switch that
+        // happens DURING this fetch's await.
+        guard isStillNonActive() else { return false }
+
         if let until = backoffUntil, until > now() { return false }
 
         let store = makeStore(historyFile(profile.id))

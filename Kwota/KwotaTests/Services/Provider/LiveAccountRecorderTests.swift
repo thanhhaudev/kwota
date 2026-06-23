@@ -112,8 +112,31 @@ final class LiveAccountRecorderTests: XCTestCase {
         let wrote = await rec.record(profile: p, backoffUntil: nil, isStillNonActive: { false })
 
         XCTAssertFalse(wrote)
+        XCTAssertEqual(fetcher.fetchCount, 0)   // early guard skips the fetch, not just the write
         let store = UsageHistoryStore(historyFile: tmp.file("usage-history.json"))
         XCTAssertTrue((try store.load()).isEmpty)
+    }
+
+    func test_record_postFetchActivation_fetchesButDropsWrite() async {
+        let tmp = TempDirectory()
+        let p = claude()
+        let fetcher = StubFetcher()
+        fetcher.byProfile[p.id] = .success(summary(.claude, five: 10, seven: 20))
+        var calls = 0
+        let stillNonActive: () -> Bool = {
+            calls += 1
+            return calls == 1   // non-active at start, active by the post-fetch check
+        }
+        let rec = LiveAccountRecorder(
+            fetcher: fetcher,
+            historyFile: { _ in tmp.file("usage-history.json") },
+            now: { Date(timeIntervalSince1970: 10_000) })
+
+        let wrote = await rec.record(profile: p, backoffUntil: nil, isStillNonActive: stillNonActive)
+
+        XCTAssertFalse(wrote)
+        XCTAssertEqual(fetcher.fetchCount, 1)   // early guard passed → fetch happened
+        XCTAssertTrue((try? UsageHistoryStore(historyFile: tmp.file("usage-history.json")).load())?.isEmpty ?? true)
     }
 
     func test_record_dropsEmptySummary() async throws {
