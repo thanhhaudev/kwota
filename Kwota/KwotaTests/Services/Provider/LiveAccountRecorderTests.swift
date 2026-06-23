@@ -152,6 +152,15 @@ final class LiveAccountRecorderTests: XCTestCase {
         XCTAssertFalse(out.contains { $0.id == codexArchived.id })
     }
 
+    func test_liveNonActiveProfiles_firstSeenWinsPerProvider() {
+        let first = Profile(id: UUID(), name: "co1", authMethod: .cliSync,
+                            providerID: .codex, email: "co1@x.com")
+        let second = Profile(id: UUID(), name: "co2", authMethod: .cliSync,
+                             providerID: .codex, email: "co2@x.com")
+        let out = LiveAccountRecorder.liveNonActiveProfiles([first, second], activeProfileID: nil)
+        XCTAssertEqual(out.map(\.id), [first.id])
+    }
+
     func test_recordNonActive_fetchesEachNonActiveLiveProvider() async throws {
         let tmp = TempDirectory()
         let activeId = UUID()

@@ -50,7 +50,15 @@ final class LiveAccountRecorder {
         if let until = backoffUntil, until > now() { return false }
 
         let store = makeStore(historyFile(profile.id))
-        let existing = (try? store.load()) ?? []
+        let existing: [UsageHistoryEntry]
+        do {
+            existing = try store.load()
+        } catch {
+            AppLog.shared.log(
+                "LiveAccountRecorder: history load failed for \(profile.id) — skipping to avoid clobbering: \(error)",
+                level: .error)
+            return false
+        }
         if let last = existing.map(\.at).max(),
            now().timeIntervalSince(last) < minRecordInterval {
             return false
@@ -70,8 +78,15 @@ final class LiveAccountRecorder {
             fiveHour: summary.primary?.utilization,
             sevenDay: summary.secondary?.utilization
         )
-        try? store.append(entry)
-        try? store.flushPendingWrite()
+        do {
+            try store.append(entry)
+            try store.flushPendingWrite()
+        } catch {
+            AppLog.shared.log(
+                "LiveAccountRecorder: history write failed for \(profile.id): \(error)",
+                level: .error)
+            return false
+        }
         return true
     }
 
