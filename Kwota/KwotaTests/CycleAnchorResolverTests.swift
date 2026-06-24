@@ -375,4 +375,33 @@ final class CycleAnchorResolverTests: XCTestCase {
         ]
         XCTAssertFalse(UsageTrendChart.isRecalibrationActive(history: history, cycleStart: cycleStart))
     }
+
+    // F-001 live repro: a normal weekly reset that fell into a multi-day
+    // sampling gap (app closed / Mac asleep). The pre-gap sample (69%)
+    // predates the current cycle; the post-gap sample (44%) is the first
+    // reading of the new cycle. This is a reset, NOT a mid-cycle
+    // recalibration — the drop only looks like one because the gap hid the
+    // intervening reset. Because `prev` predates `cycleStart`, the drop must
+    // not be counted.
+    func testRecalibrationInactiveWhenPrevSamplePredatesCycle() {
+        let now = Date()
+        let cycleStart = now.addingTimeInterval(-6 * 86_400) // new cycle started after the 69% sample
+        let history = [
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-7 * 86_400), fiveHour: nil, sevenDay: 69), // before cycle
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-1 * 86_400), fiveHour: nil, sevenDay: 44), // first sample of new cycle
+        ]
+        XCTAssertFalse(UsageTrendChart.isRecalibrationActive(history: history, cycleStart: cycleStart))
+    }
+
+    // A genuine mid-cycle cap change: both samples land inside the current
+    // cycle, so the recalibration is real and must still be detected.
+    func testRecalibrationActiveWhenBothSamplesInCycle() {
+        let now = Date()
+        let cycleStart = now.addingTimeInterval(-3 * 86_400)
+        let history = [
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-2 * 86_400), fiveHour: nil, sevenDay: 80), // in cycle
+            UsageHistoryEntry(id: UUID(), at: now.addingTimeInterval(-1 * 86_400), fiveHour: nil, sevenDay: 55), // in cycle, drop 25
+        ]
+        XCTAssertTrue(UsageTrendChart.isRecalibrationActive(history: history, cycleStart: cycleStart))
+    }
 }

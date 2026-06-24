@@ -326,7 +326,17 @@ struct UsageTrendChart {
     /// already owns). Returns the timestamp of the sample the drop landed on, or
     /// `nil`. Drives ONLY the explanatory "server recalibrated" footnote — it never
     /// moves the cycle anchor, bars, or avg-line.
-    static func latestRecalibrationStart(in history: [UsageHistoryEntry]) -> Date? {
+    ///
+    /// `cycleStart` discriminates a genuine recalibration from a normal reset that
+    /// straddled a sampling gap (app closed / Mac asleep). A drop is only counted
+    /// when BOTH the `prev` and the `cur` sample fall inside the current cycle. If
+    /// `prev` predates `cycleStart`, the apparent drop spans the cycle boundary —
+    /// i.e. a reset hidden by the gap, not a mid-cycle cap change (F-001). The
+    /// default `.distantPast` makes the bound a no-op for callers that don't supply
+    /// a cycle (the value-only threshold tests).
+    static func latestRecalibrationStart(
+        in history: [UsageHistoryEntry], cycleStart: Date = .distantPast
+    ) -> Date? {
         let samples = history
             .compactMap { e -> (at: Date, value: Double)? in
                 e.sevenDay.map { (e.at, $0) }
@@ -334,21 +344,23 @@ struct UsageTrendChart {
             .sorted { $0.at < $1.at }
         guard !samples.isEmpty else { return nil }
         var recalibration: Date? = nil
-        var prev: Double? = nil
+        var prev: (at: Date, value: Double)? = nil
         for (at, v) in samples {
-            if let p = prev, p - v >= 15, v >= 10 {
+            if let p = prev, p.value - v >= 15, v >= 10,
+               p.at >= cycleStart, at >= cycleStart {
                 recalibration = at
             }
-            prev = v
+            prev = (at, v)
         }
         return recalibration
     }
 
-    /// True when the latest detected recalibration falls inside the currently
-    /// displayed cycle (`>= cycleStart`), so the hint clears at the next real
-    /// reset / new cycle instead of lingering.
+    /// True when a recalibration is detected entirely within the currently
+    /// displayed cycle, so the hint clears at the next real reset / new cycle
+    /// instead of lingering. The in-cycle bound lives in
+    /// `latestRecalibrationStart`, so a non-nil result is already cycle-scoped.
     static func isRecalibrationActive(history: [UsageHistoryEntry], cycleStart: Date) -> Bool {
-        latestRecalibrationStart(in: history).map { $0 >= cycleStart } ?? false
+        latestRecalibrationStart(in: history, cycleStart: cycleStart) != nil
     }
 
     @ViewBuilder
