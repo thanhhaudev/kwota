@@ -446,7 +446,7 @@ struct UsageTrendChart {
         avgReference: Double?
     ) -> some View {
         if displayEntries.isEmpty {
-            skeletonBars(period: xLabelStyle == .hourSuffixed ? .session : .weekly)
+            _SkeletonBars(period: xLabelStyle == .hourSuffixed ? .session : .weekly)
         } else {
             // Render through a dedicated View so SwiftUI tracks the warm
             // pulse's time-based redraws via `TimelineView`. Keeping the
@@ -464,51 +464,6 @@ struct UsageTrendChart {
                 avgReference: avgReference
             )
         }
-    }
-
-    /// Empty-state skeleton: a chart frame built from dashed lines —
-    /// horizontal gridlines (top / mid / baseline) plus dashed-border bars
-    /// scaled to the container's height. Communicates "chart shape" without
-    /// faking values.
-    @ViewBuilder
-    private func skeletonBars(period: Period) -> some View {
-        let count = period == .session ? 5 : 7
-        let fractions: [CGFloat] = period == .session
-            ? [0.50, 0.70, 0.55, 0.85, 0.65]
-            : [0.40, 0.60, 0.50, 0.80, 0.55, 0.70, 0.45]
-        let stroke = StrokeStyle(lineWidth: 0.8, dash: [3, 2])
-        let color = Color.secondary.opacity(0.35)
-
-        GeometryReader { geo in
-            ZStack {
-                // 3 horizontal dashed gridlines: 100%, 50%, baseline.
-                VStack(spacing: 0) {
-                    skeletonGridline(color: color, stroke: stroke)
-                    Spacer()
-                    skeletonGridline(color: color, stroke: stroke)
-                    Spacer()
-                    skeletonGridline(color: color, stroke: stroke)
-                }
-
-                // Dashed bars scaled to fractions of available height.
-                HStack(alignment: .bottom, spacing: 6) {
-                    ForEach(0..<count, id: \.self) { i in
-                        RoundedRectangle(cornerRadius: 2)
-                            .strokeBorder(color, style: stroke)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: max(8, geo.size.height * (fractions[safe: i] ?? 0.6)))
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                .padding(.horizontal, 4)
-            }
-        }
-    }
-
-    private func skeletonGridline(color: Color, stroke: StrokeStyle) -> some View {
-        SkeletonRule()
-            .stroke(color, style: stroke)
-            .frame(height: 0.5)
     }
 
     // MARK: - Derived
@@ -1148,6 +1103,15 @@ private struct _ChartBody: View {
     let emphasis: UsageTrendChart.BarEmphasis
     let avgReference: Double?
 
+    // Skeleton hairlines render at exactly one device pixel regardless of
+    // display scale. Specifying widths in fractional points (0.5/0.8) left
+    // them sub-pixel on a 1x 2K monitor, where anti-aliasing made each
+    // gridline a different shade. `1 / displayScale` snaps every rule to the
+    // pixel grid so the chart frame reads uniformly across displays.
+    @Environment(\.displayScale) private var displayScale
+
+    private var hairline: CGFloat { 1 / displayScale }
+
     var body: some View {
         // Calendar.current intentional: render-time, user-locale.
         let cal = Calendar.current
@@ -1294,7 +1258,7 @@ private struct _ChartBody: View {
         .chartXDomain(sessionXDomain)
         .chartYAxis {
             AxisMarks(values: .automatic(desiredCount: 3)) { v in
-                AxisGridLine()
+                AxisGridLine(stroke: StrokeStyle(lineWidth: hairline))
                 AxisValueLabel {
                     if let n = v.as(Double.self) {
                         Text("\(Int(n))%")
@@ -1313,13 +1277,13 @@ private struct _ChartBody: View {
                     if let date = v.as(Date.self),
                        let boundary = sessionResetBoundary,
                        abs(date.timeIntervalSince(boundary)) < 30 {
-                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: hairline))
                         AxisTick(length: .longestLabel,
-                                 stroke: StrokeStyle(lineWidth: 0.5))
+                                 stroke: StrokeStyle(lineWidth: hairline))
                     } else {
-                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: hairline, dash: [2, 3]))
                         AxisTick(length: .longestLabel,
-                                 stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
+                                 stroke: StrokeStyle(lineWidth: hairline, dash: [2, 3]))
                     }
                 }
                 AxisMarks(values: sessionLabelTicks) { v in
@@ -1333,7 +1297,7 @@ private struct _ChartBody: View {
                 }
             } else {
                 AxisMarks(values: .stride(by: xStride)) { v in
-                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
+                    AxisGridLine(stroke: StrokeStyle(lineWidth: hairline, dash: [2, 3]))
                     AxisTick()
                     AxisValueLabel(centered: true) {
                         if let date = v.as(Date.self) {
@@ -1360,7 +1324,7 @@ private struct _ChartBody: View {
                     }
                     .stroke(
                         Color.secondary.opacity(0.4),
-                        style: StrokeStyle(lineWidth: 0.5)
+                        style: StrokeStyle(lineWidth: hairline)
                     )
                 }
             }
@@ -1394,6 +1358,60 @@ private struct SkeletonRule: Shape {
         path.move(to: CGPoint(x: rect.minX, y: rect.midY))
         path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
         return path
+    }
+}
+
+/// Empty-state skeleton: a chart frame built from dashed lines — horizontal
+/// gridlines (top / mid / baseline) plus dashed-border bars scaled to the
+/// container's height. Communicates "chart shape" without faking values.
+///
+/// A `View` (rather than a `UsageTrendChart` method) so it can read
+/// `@Environment(\.displayScale)` and snap every dashed rule to one device
+/// pixel — matching `_ChartBody`'s hairline treatment so the skeleton and the
+/// live chart frame read at the same weight on a 1x 2K display.
+private struct _SkeletonBars: View {
+    let period: UsageTrendChart.Period
+
+    @Environment(\.displayScale) private var displayScale
+
+    var body: some View {
+        let count = period == .session ? 5 : 7
+        let fractions: [CGFloat] = period == .session
+            ? [0.50, 0.70, 0.55, 0.85, 0.65]
+            : [0.40, 0.60, 0.50, 0.80, 0.55, 0.70, 0.45]
+        let stroke = StrokeStyle(lineWidth: 1 / displayScale, dash: [3, 2])
+        let color = Color.secondary.opacity(0.35)
+
+        GeometryReader { geo in
+            ZStack {
+                // 3 horizontal dashed gridlines: 100%, 50%, baseline.
+                VStack(spacing: 0) {
+                    gridline(color: color, stroke: stroke)
+                    Spacer()
+                    gridline(color: color, stroke: stroke)
+                    Spacer()
+                    gridline(color: color, stroke: stroke)
+                }
+
+                // Dashed bars scaled to fractions of available height.
+                HStack(alignment: .bottom, spacing: 6) {
+                    ForEach(0..<count, id: \.self) { i in
+                        RoundedRectangle(cornerRadius: 2)
+                            .strokeBorder(color, style: stroke)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: max(8, geo.size.height * (fractions[safe: i] ?? 0.6)))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .padding(.horizontal, 4)
+            }
+        }
+    }
+
+    private func gridline(color: Color, stroke: StrokeStyle) -> some View {
+        SkeletonRule()
+            .stroke(color, style: stroke)
+            .frame(height: 1 / displayScale)
     }
 }
 

@@ -13,6 +13,11 @@ import SwiftUI
 import AppKit
 
 private struct KwotaCardModifier: ViewModifier {
+    // Snap the border to one device pixel so it matches the chart's hairline
+    // gridlines. A fixed 0.5pt stroke rendered sub-pixel on a 1x 2K display,
+    // making the card edge a different shade than the rules it frames.
+    @Environment(\.displayScale) private var displayScale
+
     func body(content: Content) -> some View {
         content
             .padding(.vertical, 12)
@@ -21,7 +26,7 @@ private struct KwotaCardModifier: ViewModifier {
             .background {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(.regularMaterial)
-                    .stroke(Color.secondary.opacity(0.15), lineWidth: 0.5)
+                    .stroke(Color.secondary.opacity(0.18), lineWidth: 1 / displayScale)
             }
             .shadow(color: .black.opacity(0.06), radius: 3, x: 0, y: 1)
     }
