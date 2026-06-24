@@ -23,6 +23,7 @@ struct MenuBarView: View {
 
     let vm: MenuBarViewModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.displayScale) private var displayScale
     @AppStorage(AppStorageKeys.displayTheme) private var themeRaw: String = DisplayTheme.system.rawValue
     @AppStorage(AppStorageKeys.displayPopoverShowStats) private var showStats: Bool = true
     @AppStorage(AppStorageKeys.displayPopoverShowAwake) private var showAwake: Bool = true
@@ -68,6 +69,13 @@ struct MenuBarView: View {
             .padding(.vertical, 8)
         }
         .frame(width: Self.popoverWidth)
+        // MenuBarExtra(.window) reuses one window across opens and caches each
+        // view's rasterized layer keyed on identity, not on the window's backing
+        // scale. After a first open on a 2x screen, reopening on a 1x screen
+        // reuses the stale 2x bitmaps (blurry) because the content is unchanged.
+        // Re-identifying the tree on displayScale change forces SwiftUI to
+        // discard those layers and re-rasterize at the current scale.
+        .id(displayScale)
         // Lets nested overlays (e.g. the switcher bar tooltip) measure their
         // position within the fixed-width popover so they can clamp to its edges.
         .coordinateSpace(.named(Self.popoverCoordinateSpace))
