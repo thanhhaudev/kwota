@@ -52,7 +52,7 @@ final class ProfileDetailFormatterTests: XCTestCase {
     func test_organizationNameMasked_containsEmail() {
         XCTAssertEqual(
             ProfileDetailFormatter.organizationNameMasked("test@example.com's Organization"),
-            "n••••@gmail.com's Organization"
+            "t••••@example.com's Organization"
         )
     }
     func test_organizationNameMasked_plainName() {

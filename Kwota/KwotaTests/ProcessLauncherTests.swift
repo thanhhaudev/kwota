@@ -9,6 +9,27 @@ import XCTest
 @MainActor
 final class ProcessLauncherTests: XCTestCase {
 
+    func test_runDrainsStdoutAndStderrConcurrently() throws {
+        let launcher = SystemProcessLauncher()
+        let stderrBytes = 200_000
+        let script = """
+        $SIG{ALRM}=sub{exit 97};
+        alarm 1;
+        print STDERR "e" x \(stderrBytes);
+        print STDOUT "done\\n";
+        """
+
+        let result = try launcher.run(
+            executable: "/usr/bin/perl",
+            arguments: ["-e", script],
+            environment: nil
+        )
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(result.stdout, "done\n")
+        XCTAssertEqual(result.stderr.count, stderrBytes)
+    }
+
     /// Verify that `onTermination` fires even when the process exits before
     /// the handler is registered — the pre-terminate race that `markTerminated`
     /// + `hasFired` guards against.

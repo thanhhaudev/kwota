@@ -47,6 +47,25 @@ final class AntigravityStatsWatcherTests: XCTestCase {
         watcher.stop()
     }
 
+    func test_burstCoalescesMultipleConversationDBsIntoOneTargetedRead() async {
+        let a = "/Users/x/.gemini/antigravity/brain/abc/.system_generated/logs/transcript.jsonl"
+        let b = "/Users/x/.gemini/antigravity/brain/def/.system_generated/logs/transcript.jsonl"
+        let watcher = AntigravityStatsWatcher(makeFileEvents: makeStream([a, b]),
+                                              pollInterval: 9999, debounce: 0.05)
+        var batches: [Set<URL>] = []
+        watcher.onChangedPaths = { if let paths = $0 { batches.append(paths) } }
+
+        watcher.start()
+        try? await Task.sleep(for: .seconds(0.2))
+
+        XCTAssertEqual(batches.count, 1)
+        XCTAssertEqual(batches.first, [
+            URL(fileURLWithPath: "/Users/x/.gemini/antigravity/conversations/abc.db"),
+            URL(fileURLWithPath: "/Users/x/.gemini/antigravity/conversations/def.db"),
+        ])
+        watcher.stop()
+    }
+
     func test_conversationDB_mapsBrainTranscriptToConversationDB() {
         let ide = "/Users/x/.gemini/antigravity/brain/abc/.system_generated/logs/transcript.jsonl"
         XCTAssertEqual(AntigravityStatsWatcher.conversationDB(forTranscript: ide),

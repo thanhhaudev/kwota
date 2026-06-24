@@ -27,6 +27,7 @@ final class AntigravityStatsWatcher {
     private var consumeTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
     private var flushTask: Task<Void, Never>?
+    private var pendingPaths: Set<URL> = []
 
     init(makeFileEvents: @escaping () -> AsyncStream<String> = { AntigravityActivitySource.defaultFileEvents() },
          pollInterval: TimeInterval = 300,
@@ -58,6 +59,7 @@ final class AntigravityStatsWatcher {
         consumeTask?.cancel(); consumeTask = nil
         pollTask?.cancel(); pollTask = nil
         flushTask?.cancel(); flushTask = nil
+        pendingPaths.removeAll()
     }
 
     private func handle(path: String) {
@@ -65,13 +67,19 @@ final class AntigravityStatsWatcher {
         guard url.lastPathComponent == "transcript.jsonl" else { return }
         // Map the append to its conversation DB so the read touches only that DB.
         // An unmappable path falls back to `nil` (full walk) — safe, just slower.
-        let changed = Self.conversationDB(forTranscript: path).map { Set([$0]) }
+        if let changed = Self.conversationDB(forTranscript: path) {
+            pendingPaths.insert(changed)
+        } else {
+            pendingPaths.removeAll()
+        }
         flushTask?.cancel()
         flushTask = Task { [weak self] in
             guard let self else { return }
             try? await Task.sleep(for: .seconds(self.debounce))
             if Task.isCancelled { return }
-            self.onChangedPaths?(changed)
+            let batch: Set<URL>? = self.pendingPaths.isEmpty ? nil : self.pendingPaths
+            self.pendingPaths.removeAll()
+            self.onChangedPaths?(batch)
         }
     }
 

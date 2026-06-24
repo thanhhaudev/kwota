@@ -59,8 +59,13 @@ private struct PersistedSwitcherSummary: Codable {
         self.primary = summary.primary
         self.secondary = summary.secondary
         self.retryAfter = summary.retryAfter
-        self.antigravityOveragesEnabled =
-            (summary.payload as? AntigravityUsagePayload)?.snapshot.overagesEnabled
+        if let payload = summary.payload as? AntigravityUsagePayload {
+            self.antigravityOveragesEnabled = payload.snapshot.overagesEnabled
+        } else if let snapshot = summary.payload as? AntigravityUsageSnapshot {
+            self.antigravityOveragesEnabled = snapshot.overagesEnabled
+        } else {
+            self.antigravityOveragesEnabled = nil
+        }
     }
 
     /// Reconstructs the in-memory `ProviderUsageSummary` from the persisted

@@ -41,6 +41,13 @@ final class SwitcherSummaryStoreTests: XCTestCase {
         )
     }
 
+    private func loadedAntigravitySnapshot(
+        from map: [UUID: ProviderUsageSummary],
+        id: UUID
+    ) -> AntigravityUsageSnapshot? {
+        (map[id]?.payload as? AntigravityUsagePayload)?.snapshot
+    }
+
     // MARK: - Claude / Codex (no payload metadata)
 
     func test_roundTrip_dropsPayload_forNonAntigravityProviders() {
@@ -74,7 +81,7 @@ final class SwitcherSummaryStoreTests: XCTestCase {
         store.save([id: makeSummary(providerID: .antigravity, payload: snap)])
 
         let loaded = store.load()
-        let payload = loaded[id]?.payload as? AntigravityUsageSnapshot
+        let payload = loadedAntigravitySnapshot(from: loaded, id: id)
         XCTAssertNotNil(payload, "Antigravity row must rehydrate with a real snapshot, not EmptyPayload")
         XCTAssertEqual(payload?.overagesEnabled, false)
     }
@@ -88,7 +95,7 @@ final class SwitcherSummaryStoreTests: XCTestCase {
         snap.overagesEnabled = true
         store.save([id: makeSummary(providerID: .antigravity, payload: snap)])
 
-        let payload = store.load()[id]?.payload as? AntigravityUsageSnapshot
+        let payload = loadedAntigravitySnapshot(from: store.load(), id: id)
         XCTAssertEqual(payload?.overagesEnabled, true)
     }
 
@@ -104,7 +111,7 @@ final class SwitcherSummaryStoreTests: XCTestCase {
         XCTAssertNil(snap.overagesEnabled)
         store.save([id: makeSummary(providerID: .antigravity, payload: snap)])
 
-        let payload = store.load()[id]?.payload as? AntigravityUsageSnapshot
+        let payload = loadedAntigravitySnapshot(from: store.load(), id: id)
         XCTAssertNotNil(payload, "Antigravity row rehydrates with a snapshot even when overagesEnabled is nil")
         XCTAssertNil(payload?.overagesEnabled)
     }
@@ -137,7 +144,7 @@ final class SwitcherSummaryStoreTests: XCTestCase {
 
         let loaded = store.load()
         XCTAssertEqual(loaded.count, 1, "old file must decode without the new field present")
-        let payload = loaded[id]?.payload as? AntigravityUsageSnapshot
+        let payload = loadedAntigravitySnapshot(from: loaded, id: id)
         XCTAssertNotNil(payload)
         XCTAssertNil(payload?.overagesEnabled,
                      "missing field decodes as nil (= unknown)")

@@ -18,6 +18,7 @@ final class AutoDetectFlowIntegrationTests: XCTestCase {
         let temp = TempDirectory()
         let dataRoot = temp.url
         let keychain = KeychainCredentialStore(service: "com.thanhhaudev.Kwota.test.\(UUID())")
+        defer { try? keychain.deleteAll() }
         let store = ProfileStore(
             profilesFile: temp.file("profiles.json"),
             keychain: keychain,
@@ -49,6 +50,9 @@ final class AutoDetectFlowIntegrationTests: XCTestCase {
         let coord = AutoProfileCoordinator(
             watcher: watcher,
             profileStore: store,
+            keychain: keychain,
+            credentialReader: StubCredentialReader(),
+            profileFetcher: AlwaysNilOAuthProfileFetcher(),
             clock: { Date() }
         )
         coord.start()
@@ -234,5 +238,37 @@ final class AutoDetectFlowIntegrationTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 20_000_000) // 20ms
         }
         XCTFail("waitUntil timed out after \(timeout)s", file: file, line: line)
+    }
+}
+
+private struct StubCredentialReader: CLICredentialReading {
+    func read() throws -> CLICredentialReader.SyncResult {
+        CLICredentialReader.SyncResult(
+            credential: .cliToken(
+                accessToken: "test-access",
+                refreshToken: "test-refresh",
+                expiresAt: Date(timeIntervalSinceNow: 3600)
+            ),
+            subscriptionPlan: nil
+        )
+    }
+}
+
+private struct AlwaysNilOAuthProfileFetcher: OAuthProfileFetching {
+    func fetch(credential: Credential) async throws -> OAuthProfileFetcher.Response {
+        OAuthProfileFetcher.Response(
+            planLabel: nil,
+            orgUuid: nil,
+            subscriptionCreatedAt: nil,
+            subscriptionActive: false,
+            hasExtraUsage: false,
+            displayName: nil,
+            email: nil,
+            accountUuid: nil,
+            accountCreatedAt: nil,
+            organizationName: nil,
+            subscriptionStatus: nil,
+            billingType: nil
+        )
     }
 }

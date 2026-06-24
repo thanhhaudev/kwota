@@ -40,10 +40,24 @@ final class SystemProcessLauncher: ProcessLauncher {
         process.standardError = errPipe
 
         try process.run()
-        // TODO(post-usage): read stdout+stderr concurrently — sequential reads can deadlock if child writes >64KB to stderr.
-        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        let outRead = PipeRead()
+        let errRead = PipeRead()
+        let readGroup = DispatchGroup()
+        readGroup.enter()
+        DispatchQueue.global(qos: .utility).async {
+            outRead.set(outPipe.fileHandleForReading.readDataToEndOfFile())
+            readGroup.leave()
+        }
+        readGroup.enter()
+        DispatchQueue.global(qos: .utility).async {
+            errRead.set(errPipe.fileHandleForReading.readDataToEndOfFile())
+            readGroup.leave()
+        }
+
         process.waitUntilExit()
+        readGroup.wait()
+        let outData = outRead.data
+        let errData = errRead.data
 
         return ProcessResult(
             stdout: String(data: outData, encoding: .utf8) ?? "",
@@ -59,6 +73,23 @@ final class SystemProcessLauncher: ProcessLauncher {
         if let environment { process.environment = environment }
         try process.run()
         return SystemProcessHandle(process: process)
+    }
+}
+
+private final class PipeRead: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = Data()
+
+    var data: Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func set(_ data: Data) {
+        lock.lock()
+        storage = data
+        lock.unlock()
     }
 }
 
