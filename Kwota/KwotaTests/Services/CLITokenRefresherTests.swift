@@ -32,7 +32,7 @@ final class CLITokenRefresherTests: XCTestCase {
         )
     }
 
-    private func makeRefresher(reader: CLICredentialReader, now: Date) -> CLITokenRefresher {
+    private func makeRefresher(reader: any CLICredentialReading, now: Date) -> CLITokenRefresher {
         CLITokenRefresher(reader: reader, store: store, now: { now })
     }
 
@@ -279,5 +279,46 @@ final class CLITokenRefresherTests: XCTestCase {
 
         let persisted = try store.read(for: id)
         XCTAssertEqual(persisted, result)
+    }
+
+    func testForceRefreshBypassesSharedCredentialCache() throws {
+        let id = UUID()
+        let previous = cliToken(access: "old", expiresAt: baseDate.addingTimeInterval(3600))
+        let source = CountingRefreshCredentialReader(results: [
+            .success(CLICredentialReader.SyncResult(
+                credential: previous,
+                subscriptionPlan: nil
+            )),
+            .success(CLICredentialReader.SyncResult(
+                credential: cliToken(access: "new", expiresAt: baseDate.addingTimeInterval(7200)),
+                subscriptionPlan: nil
+            ))
+        ])
+        let cachedReader = CachedCLICredentialReader(reader: source, ttl: 60, now: { self.baseDate })
+
+        _ = try cachedReader.read()
+        let refresher = makeRefresher(reader: cachedReader, now: baseDate)
+        let result = try refresher.forceRefresh(profileId: id, previous: previous)
+
+        XCTAssertEqual(source.readCount, 2)
+        guard case .cliToken(let access, _, _)? = result else { return XCTFail("expected cliToken") }
+        XCTAssertEqual(access, "new")
+    }
+}
+
+private final class CountingRefreshCredentialReader: CLICredentialReading {
+    private var results: [Result<CLICredentialReader.SyncResult, Error>]
+    private(set) var readCount = 0
+
+    init(results: [Result<CLICredentialReader.SyncResult, Error>]) {
+        self.results = results
+    }
+
+    func read() throws -> CLICredentialReader.SyncResult {
+        readCount += 1
+        guard !results.isEmpty else {
+            throw NSError(domain: "test", code: 404)
+        }
+        return try results.removeFirst().get()
     }
 }

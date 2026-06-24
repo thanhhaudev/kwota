@@ -13,6 +13,20 @@
 import Foundation
 import Security
 
+/// Seam that lets tests and higher-level services inject a CLI credential
+/// source without touching `CLICredentialReader`'s real Keychain and
+/// filesystem paths.
+protocol CLICredentialReading {
+    func read() throws -> CLICredentialReader.SyncResult
+    func readFresh() throws -> CLICredentialReader.SyncResult
+}
+
+extension CLICredentialReading {
+    func readFresh() throws -> CLICredentialReader.SyncResult {
+        try read()
+    }
+}
+
 struct CLICredentialReader {
     typealias KeychainProbe = () -> Data?
 
@@ -125,5 +139,62 @@ struct CLICredentialReader {
             return n > 1_000_000_000_000 ? Date(timeIntervalSince1970: n / 1000) : Date(timeIntervalSince1970: n)
         }
         return d
+    }
+}
+
+extension CLICredentialReader: CLICredentialReading {
+    /// `CLICredentialReader.read()` is always a live Keychain probe, so a fresh
+    /// read is just another read. Spelled out explicitly (rather than inheriting
+    /// the protocol default) so the "always live" contract stays local: if a
+    /// caching layer is ever added to `read()`, this must stay uncached to keep
+    /// 401 recovery working.
+    func readFresh() throws -> SyncResult {
+        try read()
+    }
+}
+
+/// Short-lived shared cache around Claude Code credential reads. The real read
+/// path probes another app's Keychain item, which can trigger macOS consent
+/// prompts on self-signed/dev builds. Sharing this wrapper between startup
+/// import and usage refresh collapses duplicate reads without hiding a forced
+/// 401 recovery path.
+final class CachedCLICredentialReader: CLICredentialReading {
+    private struct Entry {
+        let result: Result<CLICredentialReader.SyncResult, Error>
+        let at: Date
+    }
+
+    private let reader: any CLICredentialReading
+    private let ttl: TimeInterval
+    private let now: () -> Date
+    private var entry: Entry?
+
+    init(
+        reader: any CLICredentialReading = CLICredentialReader(),
+        ttl: TimeInterval = 10,
+        now: @escaping () -> Date = Date.init
+    ) {
+        self.reader = reader
+        self.ttl = ttl
+        self.now = now
+    }
+
+    func read() throws -> CLICredentialReader.SyncResult {
+        let current = now()
+        if let entry, current.timeIntervalSince(entry.at) < ttl {
+            return try entry.result.get()
+        }
+        return try readFresh()
+    }
+
+    func readFresh() throws -> CLICredentialReader.SyncResult {
+        do {
+            let result = try reader.readFresh()
+            entry = Entry(result: .success(result), at: now())
+            return result
+        } catch {
+            entry = Entry(result: .failure(error), at: now())
+            throw error
+        }
     }
 }

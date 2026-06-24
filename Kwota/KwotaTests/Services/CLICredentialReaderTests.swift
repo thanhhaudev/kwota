@@ -105,4 +105,84 @@ final class CLICredentialReaderTests: XCTestCase {
         let reader = CLICredentialReader(credentialsFile: url, keychainProbe: { nil })
         XCTAssertThrowsError(try reader.read())
     }
+
+    func testCachedReaderReusesSuccessfulReadWithinTTL() throws {
+        var now = Date(timeIntervalSince1970: 1_800_000_000)
+        let source = CountingCredentialReader(results: [
+            .success(syncResult(access: "first")),
+            .success(syncResult(access: "second"))
+        ])
+        let reader = CachedCLICredentialReader(reader: source, ttl: 10, now: { now })
+
+        let first = try reader.read()
+        now = now.addingTimeInterval(5)
+        let second = try reader.read()
+
+        XCTAssertEqual(source.readCount, 1)
+        XCTAssertEqual(accessToken(first.credential), "first")
+        XCTAssertEqual(accessToken(second.credential), "first")
+    }
+
+    func testCachedReaderCachesFailureWithinTTL() {
+        var now = Date(timeIntervalSince1970: 1_800_000_000)
+        let source = CountingCredentialReader(results: [
+            .failure(NSError(domain: "test", code: 1)),
+            .success(syncResult(access: "second"))
+        ])
+        let reader = CachedCLICredentialReader(reader: source, ttl: 10, now: { now })
+
+        XCTAssertThrowsError(try reader.read())
+        now = now.addingTimeInterval(5)
+        XCTAssertThrowsError(try reader.read())
+
+        XCTAssertEqual(source.readCount, 1)
+    }
+
+    func testCachedReaderReadFreshBypassesCache() throws {
+        let source = CountingCredentialReader(results: [
+            .success(syncResult(access: "first")),
+            .success(syncResult(access: "second"))
+        ])
+        let reader = CachedCLICredentialReader(reader: source, ttl: 10)
+
+        let first = try reader.read()
+        let second = try reader.readFresh()
+
+        XCTAssertEqual(source.readCount, 2)
+        XCTAssertEqual(accessToken(first.credential), "first")
+        XCTAssertEqual(accessToken(second.credential), "second")
+    }
+
+    private func syncResult(access: String) -> CLICredentialReader.SyncResult {
+        CLICredentialReader.SyncResult(
+            credential: .cliToken(
+                accessToken: access,
+                refreshToken: "refresh",
+                expiresAt: Date(timeIntervalSince1970: 1_900_000_000)
+            ),
+            subscriptionPlan: nil
+        )
+    }
+
+    private func accessToken(_ credential: Credential) -> String? {
+        guard case .cliToken(let access, _, _) = credential else { return nil }
+        return access
+    }
+}
+
+private final class CountingCredentialReader: CLICredentialReading {
+    private var results: [Result<CLICredentialReader.SyncResult, Error>]
+    private(set) var readCount = 0
+
+    init(results: [Result<CLICredentialReader.SyncResult, Error>]) {
+        self.results = results
+    }
+
+    func read() throws -> CLICredentialReader.SyncResult {
+        readCount += 1
+        guard !results.isEmpty else {
+            throw NSError(domain: "test", code: 404)
+        }
+        return try results.removeFirst().get()
+    }
 }

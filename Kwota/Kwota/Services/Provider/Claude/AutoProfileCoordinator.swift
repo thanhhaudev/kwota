@@ -5,14 +5,6 @@
 
 import Foundation
 
-/// Seam that lets tests inject a fake CLI credential source without
-/// touching `CLICredentialReader`'s real Keychain and filesystem paths.
-protocol CLICredentialReading {
-    func read() throws -> CLICredentialReader.SyncResult
-}
-
-extension CLICredentialReader: CLICredentialReading {}
-
 /// Drives `ProfileStore` from `CLIAccountWatcher` emits and gates the
 /// refresh path. This is the bridge that ensures a refresh for profile A
 /// never executes while the CLI is signed into account B.

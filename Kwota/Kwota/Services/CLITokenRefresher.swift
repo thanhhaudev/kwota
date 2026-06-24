@@ -17,7 +17,7 @@ import Foundation
 
 @MainActor
 final class CLITokenRefresher {
-    private let reader: CLICredentialReader
+    private let reader: any CLICredentialReading
     private let store: KeychainCredentialStore
     private let now: () -> Date
 
@@ -34,7 +34,7 @@ final class CLITokenRefresher {
     private let freshenCacheTTL: TimeInterval = 10
 
     init(
-        reader: CLICredentialReader = CLICredentialReader(),
+        reader: any CLICredentialReading = CLICredentialReader(),
         store: KeychainCredentialStore,
         now: @escaping () -> Date = Date.init
     ) {
@@ -112,7 +112,7 @@ final class CLITokenRefresher {
     ) throws -> Credential? {
         let result: CLICredentialReader.SyncResult
         do {
-            result = try reader.read()
+            result = try reader.readFresh()
         } catch {
             AppLog.shared.log(
                 "CLITokenRefresher.forceRefresh reader failed: \(String(describing: error))",

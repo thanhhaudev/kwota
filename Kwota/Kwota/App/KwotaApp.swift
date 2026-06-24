@@ -110,7 +110,8 @@ struct KwotaApp: App {
             credentialsFile: root.appendingPathComponent("missing-credentials.json"),
             keychainProbe: { nil }
         )
-        let cliRefresher = CLITokenRefresher(reader: cliReader, store: keychain)
+        let cachedCLIReader = CachedCLICredentialReader(reader: cliReader)
+        let cliRefresher = CLITokenRefresher(reader: cachedCLIReader, store: keychain)
         let accountReader = OAuthAccountReader(
             configFile: root.appendingPathComponent(".claude.json"),
             provider: { nil }

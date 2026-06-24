@@ -656,7 +656,11 @@ final class MenuBarViewModel {
         self.credentialStore = resolvedCredentialStore
         let resolvedAPIClient = apiClient ?? ClaudeAPIClient.live()
         self.apiClient = resolvedAPIClient
-        let resolvedCLIRefresher = cliRefresher ?? CLITokenRefresher(store: resolvedCredentialStore)
+        let resolvedCLICredentialReader = CachedCLICredentialReader()
+        let resolvedCLIRefresher = cliRefresher ?? CLITokenRefresher(
+            reader: resolvedCLICredentialReader,
+            store: resolvedCredentialStore
+        )
         self.cliRefresher = resolvedCLIRefresher
         self.cliRunner = cliRunner ?? ClaudeCLIRunner()
         self.codexCLIRunner = codexCLIRunner ?? CodexCLIRunner()
@@ -756,7 +760,7 @@ final class MenuBarViewModel {
             watcher: resolvedWatcher,
             profileStore: self.profileStore,
             keychain: self.credentialStore,
-            credentialReader: CLICredentialReader(),
+            credentialReader: resolvedCLICredentialReader,
             profileFetcher: resolvedFetcher
         )
         self.codexAutoProfileCoordinator = codexAutoProfileCoordinator ?? CodexAutoProfileCoordinator(
