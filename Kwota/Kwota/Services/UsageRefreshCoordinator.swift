@@ -51,6 +51,12 @@ final class UsageRefreshCoordinator {
     /// and diagnostic logging.
     var backoffUntil: Date? { backoffByProvider.values.max() }
 
+    /// One-shot wake deadline for a known quota reset. This does not bypass
+    /// per-provider back-off or the VM's burst throttle; it only makes the
+    /// shared timer wake near `resetsAt` instead of waiting for the slower
+    /// closed-popover cadence.
+    private var resetWakeAt: Date?
+
     /// Per-provider floor lookup. nil = no active back-off for this
     /// provider. Callers gate fetches on this, not on the global
     /// `backoffUntil`, so a Claude 429 doesn't suppress an Antigravity
@@ -143,6 +149,11 @@ final class UsageRefreshCoordinator {
         backoffByProvider[providerID] = nil
     }
 
+    func scheduleResetWake(at date: Date?) {
+        resetWakeAt = date
+        if timer != nil { scheduleNextTick() }
+    }
+
     /// Computes the next delay as `currentInterval` ± jitter.
     ///
     /// Note: the global `backoffUntil` (= max of per-provider floors) is
@@ -165,7 +176,14 @@ final class UsageRefreshCoordinator {
             let signedJitter = (randomUnit() * 2 - 1) * jitterFraction
             delay = baseInterval * (1 + signedJitter)
         }
-        return max(0, delay)
+        let cadenceDelay = max(0, delay)
+        guard let resetWakeAt else { return cadenceDelay }
+
+        let resetDelay = max(0, resetWakeAt.timeIntervalSince(now()))
+        if resetDelay <= 0 {
+            self.resetWakeAt = nil
+        }
+        return min(cadenceDelay, resetDelay)
     }
 
     private func scheduleNextTick() {
@@ -174,10 +192,17 @@ final class UsageRefreshCoordinator {
         let t = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                self.clearExpiredResetWake()
                 self.onTick()
                 self.scheduleNextTick()
             }
         }
         timer = t
+    }
+
+    private func clearExpiredResetWake() {
+        if let resetWakeAt, resetWakeAt <= now() {
+            self.resetWakeAt = nil
+        }
     }
 }

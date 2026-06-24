@@ -126,6 +126,14 @@ final class MenuBarViewModel {
         return .empty
     }
 
+    static func nextResetWakeDate(for summary: ProviderUsageSummary, now: Date) -> Date? {
+        [summary.primary?.resetsAt, summary.secondary?.resetsAt]
+            .compactMap { $0 }
+            .filter { $0 > now }
+            .min()
+            .map { $0.addingTimeInterval(30) }
+    }
+
     /// View-facing shorthand: forwards `self`'s state into the static resolver.
     func usageChartState(for profile: Profile) -> UsageChartState {
         Self.resolveUsageChartState(
@@ -886,6 +894,7 @@ final class MenuBarViewModel {
                         "ACTIVITY_TRACE sink provider=\(event.provider.rawValue) date=\(event.date) deltaFromNow=\(String(format: "%.1f", delta))s",
                         level: .info)
                     self?.activityHistorian.record(provider: event.provider, at: event.date)
+                    self?.quotaRelevantActivityObserved(provider: event.provider)
                 }
                 .store(in: &cancellables)
         }
@@ -919,6 +928,9 @@ final class MenuBarViewModel {
         self.usage.onNewEvents = { [weak self] events in
             Task { @MainActor in
                 self?.activityHistorian.record(events)
+                if !events.isEmpty {
+                    self?.quotaRelevantActivityObserved(provider: .claude)
+                }
             }
         }
         self.usage.onChangedPaths = { [weak self] paths in
@@ -1693,11 +1705,32 @@ final class MenuBarViewModel {
               active.providerID == s.providerID else { return }
         self.summary = s
         rememberSummary(s, for: active.id)
+        scheduleResetWake(for: s)
         self.isSwitchingProfile = false
     }
 
     private func rememberSummary(_ summary: ProviderUsageSummary, for profileID: UUID) {
         lastSummaryByProfile[profileID] = summary
+    }
+
+    private func scheduleResetWake(for summary: ProviderUsageSummary) {
+        refreshCoordinator?.scheduleResetWake(
+            at: Self.nextResetWakeDate(for: summary, now: now())
+        )
+    }
+
+    func quotaRelevantActivityObserved(provider: ProviderID) {
+        guard let active = profileStore.activeProfile,
+              active.providerID == provider else { return }
+        guard !active.notificationsMuted else { return }
+        let settings = notificationSettingsStore.value
+        guard !settings.shortWindowThresholds.isEmpty
+                || !settings.longWindowThresholds.isEmpty else { return }
+        if let last = lastFetchAttemptAt,
+           now().timeIntervalSince(last) < freshnessWindow {
+            return
+        }
+        refreshUsageNow()
     }
 
     private func rebindUsageMonitorOwnership() {
@@ -1996,6 +2029,7 @@ final class MenuBarViewModel {
                     self.snapshot = snap
                     self.summary = summary
                     rememberSummary(summary, for: profile.id)
+                    scheduleResetWake(for: summary)
                     self.lastFetchedAt = snap.fetchedAt
                     self.authState = .authenticated
                     // Rate-limit clearing is generation-gated even though
@@ -2045,6 +2079,7 @@ final class MenuBarViewModel {
                     self.snapshot = nil
                     self.summary = summary
                     rememberSummary(summary, for: profile.id)
+                    scheduleResetWake(for: summary)
                     self.lastFetchedAt = summary.fetchedAt
                     self.authState = .authenticated
                     self.clearRateLimitState(

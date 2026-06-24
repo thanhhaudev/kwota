@@ -813,6 +813,116 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         )
     }
 
+    func test_nextResetWakeDate_usesSoonestFutureBucketResetWithBuffer() {
+        let summary = ProviderUsageSummary(
+            providerID: .claude,
+            fetchedAt: clock,
+            primary: UsageBucket(utilization: 95, resetsAt: clock.addingTimeInterval(3600)),
+            secondary: UsageBucket(utilization: 80, resetsAt: clock.addingTimeInterval(120)),
+            payload: UsageSnapshot.zeroes()
+        )
+
+        XCTAssertEqual(
+            MenuBarViewModel.nextResetWakeDate(for: summary, now: clock),
+            clock.addingTimeInterval(150),
+            "reset wake should wait a small server-side reset buffer after the raw resetsAt boundary"
+        )
+    }
+
+    func test_nextResetWakeDate_ignoresPastBucketReset() {
+        let summary = ProviderUsageSummary(
+            providerID: .claude,
+            fetchedAt: clock,
+            primary: UsageBucket(utilization: 95, resetsAt: clock.addingTimeInterval(-10)),
+            secondary: UsageBucket(utilization: 80, resetsAt: clock.addingTimeInterval(120)),
+            payload: UsageSnapshot.zeroes()
+        )
+
+        XCTAssertEqual(
+            MenuBarViewModel.nextResetWakeDate(for: summary, now: clock),
+            clock.addingTimeInterval(150),
+            "past reset deadlines must not drag the reset wake back to now"
+        )
+    }
+
+    func test_nextResetWakeDate_returnsNilWhenAllBucketResetsArePast() {
+        let summary = ProviderUsageSummary(
+            providerID: .claude,
+            fetchedAt: clock,
+            primary: UsageBucket(utilization: 95, resetsAt: clock.addingTimeInterval(-10)),
+            secondary: UsageBucket(utilization: 80, resetsAt: clock.addingTimeInterval(-120)),
+            payload: UsageSnapshot.zeroes()
+        )
+
+        XCTAssertNil(
+            MenuBarViewModel.nextResetWakeDate(for: summary, now: clock),
+            "past reset deadlines must be ignored"
+        )
+    }
+
+    func test_quotaRelevantActivity_refreshesWhenThresholdNotificationsEnabled() throws {
+        let p = try seedActiveProfile()
+        let vm = makeVM()
+        try profileStore.setActive(id: p.id)
+        vm.notificationSettingsStore.value = NotificationSettings(
+            shortWindowThresholds: [90],
+            longWindowThresholds: [],
+            notifyOnReset: false,
+            notifyOnTokenExpiry: false
+        )
+        vm.lastFetchAttemptAt = nil
+
+        vm.quotaRelevantActivityObserved(provider: .claude)
+
+        XCTAssertEqual(
+            vm.lastFetchAttemptAt, clock,
+            "quota threshold notifications must refresh usage promptly after active-provider activity"
+        )
+    }
+
+    func test_quotaRelevantActivity_skipsWhenRecentFetchIsFresh() throws {
+        let p = try seedActiveProfile()
+        let vm = makeVM()
+        try profileStore.setActive(id: p.id)
+        vm.notificationSettingsStore.value = NotificationSettings(
+            shortWindowThresholds: [90],
+            longWindowThresholds: [],
+            notifyOnReset: false,
+            notifyOnTokenExpiry: false
+        )
+        vm.lastFetchAttemptAt = clock.addingTimeInterval(-30)
+
+        vm.quotaRelevantActivityObserved(provider: .claude)
+
+        XCTAssertEqual(
+            vm.lastFetchAttemptAt,
+            clock.addingTimeInterval(-30),
+            "activity-triggered quota checks must not exceed the 60s freshness cadence"
+        )
+    }
+
+    func test_quotaRelevantActivity_skipsMutedProfile() throws {
+        var p = try seedActiveProfile()
+        p.notificationsMuted = true
+        try profileStore.updateProfile(p)
+        let vm = makeVM()
+        try profileStore.setActive(id: p.id)
+        vm.notificationSettingsStore.value = NotificationSettings(
+            shortWindowThresholds: [90],
+            longWindowThresholds: [],
+            notifyOnReset: false,
+            notifyOnTokenExpiry: false
+        )
+        vm.lastFetchAttemptAt = nil
+
+        vm.quotaRelevantActivityObserved(provider: .claude)
+
+        XCTAssertNil(
+            vm.lastFetchAttemptAt,
+            "muted profiles cannot emit quota notifications, so activity must not trigger a quota refresh"
+        )
+    }
+
     func test_isPopoverOpen_tracksLifecycle() throws {
         try seedActiveProfile()
         let vm = makeVM()

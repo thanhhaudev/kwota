@@ -88,6 +88,48 @@ final class UsageRefreshCoordinatorTests: XCTestCase {
         XCTAssertEqual(coord.nextDelay(), 600)
     }
 
+    func testNextDelayUsesEarlierResetWakeDate() {
+        let baseTime = Date(timeIntervalSince1970: 1_700_000_000)
+        let coord = UsageRefreshCoordinator(
+            openInterval: 60,
+            closedInterval: 600,
+            jitterFraction: 0,
+            now: { baseTime },
+            randomUnit: { 0.5 },
+            onTick: {}
+        )
+
+        coord.scheduleResetWake(at: baseTime.addingTimeInterval(45))
+
+        XCTAssertEqual(
+            coord.nextDelay(), 45,
+            "known quota reset must wake the refresh loop before the closed-popover cadence"
+        )
+    }
+
+    func testResetWakeFiresOnceWithoutImmediateDoubleTick() async throws {
+        var fireCount = 0
+        let coord = UsageRefreshCoordinator(
+            openInterval: 10,
+            closedInterval: 10,
+            jitterFraction: 0,
+            now: Date.init,
+            randomUnit: { 0.5 },
+            onTick: { fireCount += 1 }
+        )
+
+        coord.start()
+        coord.scheduleResetWake(at: Date().addingTimeInterval(0.05))
+        try await Task.sleep(nanoseconds: 250_000_000)
+
+        XCTAssertEqual(
+            fireCount,
+            2,
+            "reset wake should produce the start tick and one reset tick, then resume normal cadence"
+        )
+        coord.stop()
+    }
+
     // MARK: - Back-off floor (per-provider)
 
     /// applyRetryAfter records a per-provider floor without affecting the
