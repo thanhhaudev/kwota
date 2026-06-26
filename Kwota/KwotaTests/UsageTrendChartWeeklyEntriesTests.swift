@@ -142,6 +142,35 @@ final class UsageTrendChartWeeklyEntriesTests: XCTestCase {
         XCTAssertEqual(result[1].value, 0)
     }
 
+    func testFinalBucketIncludesPostMidnightSamplesBeforeReset() throws {
+        var cal = Calendar.current
+        cal.timeZone = .current
+
+        let now = try XCTUnwrap(cal.date(from: DateComponents(
+            year: 2026, month: 6, day: 27, hour: 0, minute: 30
+        )))
+        let resetsAt = try XCTUnwrap(cal.date(from: DateComponents(
+            year: 2026, month: 6, day: 27, hour: 6
+        )))
+        let previousNight = try XCTUnwrap(cal.date(from: DateComponents(
+            year: 2026, month: 6, day: 26, hour: 23, minute: 58
+        )))
+
+        let history = [
+            entry(previousNight, 80),
+            entry(now, 91),
+        ]
+
+        let result = UsageTrendChart.weeklyEntries(
+            snapshot: snapshot(util: 91, resetsAt: resetsAt),
+            history: history,
+            now: now
+        )
+
+        XCTAssertEqual(result.count, 7)
+        XCTAssertEqual(result[6].value, 91)
+    }
+
     // MARK: - weekAverageForChart anchor
 
     func testWeeklyAverageReturnsNilWhenUseAvgLineFalse() {

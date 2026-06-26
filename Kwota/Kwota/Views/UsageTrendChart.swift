@@ -507,6 +507,7 @@ struct UsageTrendChart {
         let anchor = resolveCycleStart(sevenDayResetsAt: sevenDayResetsAt, history: history, now: now)
         let cal = Calendar.current
         let cycleStartDay = cal.startOfDay(for: anchor.cycleStart)
+        let cycleEnd = anchor.cycleStart.addingTimeInterval(7 * 86_400)
         let todayStart = cal.startOfDay(for: now)
 
         // Bucketing snaps to midnight (`cycleStartDay`) so the 7 day-bars
@@ -528,7 +529,11 @@ struct UsageTrendChart {
                 entries.append(Entry(at: dayStart, value: 0, isFuture: true))
                 continue
             }
-            let dayEnd = cal.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart
+            let calendarDayEnd = cal.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart
+            // The chart renders 7 local-day bars, but provider reset times can
+            // be sub-day. Keep the final visible bucket open until the precise
+            // cycle end so post-midnight, pre-reset samples remain visible.
+            let dayEnd = offset == 6 && cycleEnd > calendarDayEnd ? cycleEnd : calendarDayEnd
             let samples = inCycle.filter { $0.at >= dayStart && $0.at < dayEnd }
             let latest = samples
                 .compactMap { e -> (Date, Double)? in

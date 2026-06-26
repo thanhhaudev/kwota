@@ -2007,7 +2007,7 @@ final class MenuBarViewModel {
                     fiveHour: snap.fiveHour.utilization,
                     sevenDay: snap.sevenDay.utilization
                 )
-                try? historyStore.append(entry)
+                let storedEntry = (try? historyStore.append(entry)) ?? entry
 
                 let currentFive = snap.fiveHour.utilization ?? 0
 
@@ -2047,7 +2047,7 @@ final class MenuBarViewModel {
                             includingCoordinatorFloor: !summaryCarriedRetryAfter
                         )
                     }
-                    self.history.append(entry)
+                    self.history.append(storedEntry)
                     self.isSwitchingProfile = false
 
                     // Re-read profile in case a concurrent edit (notifications toggle,
@@ -2116,8 +2116,8 @@ final class MenuBarViewModel {
                             fiveHour: primary.utilization,
                             sevenDay: secondary.utilization
                         )
-                        try? historyStore.append(entry)
-                        self.history.append(entry)
+                        let storedEntry = (try? historyStore.append(entry)) ?? entry
+                        self.history.append(storedEntry)
                     }
 
                     if profile.providerID == .antigravity,

@@ -72,8 +72,10 @@ final class UsageHistoryStore {
         return entries
     }
 
-    func append(_ entry: UsageHistoryEntry) throws {
+    @discardableResult
+    func append(_ entry: UsageHistoryEntry) throws -> UsageHistoryEntry {
         try ensureLoaded()
+        let entry = normalizedForStorage(entry)
         // Run-length dedup. Refresh fires every popover open / coord tick /
         // manual click, so a quiet quota window produces a long run of
         // identical (fiveHour, sevenDay) readings. Each one would burn an
@@ -104,10 +106,26 @@ final class UsageHistoryStore {
         }
         applyCaps()
         scheduleWrite()
+        return entry
     }
 
     private func sameReading(_ a: UsageHistoryEntry, _ b: UsageHistoryEntry) -> Bool {
         a.fiveHour == b.fiveHour && a.sevenDay == b.sevenDay
+    }
+
+    private func normalizedForStorage(_ entry: UsageHistoryEntry) -> UsageHistoryEntry {
+        guard let weekly = entry.sevenDay,
+              let previousWeekly = entries.last(where: { $0.sevenDay != nil }),
+              previousWeekly.sevenDay == weekly,
+              previousWeekly.fiveHour != entry.fiveHour
+        else { return entry }
+
+        return UsageHistoryEntry(
+            id: entry.id,
+            at: entry.at,
+            fiveHour: entry.fiveHour,
+            sevenDay: nil
+        )
     }
 
     /// Forces any pending debounced write to complete synchronously. Called from the willTerminate observer to avoid losing the just-appended entry when the app quits within the debounce window.

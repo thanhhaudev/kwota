@@ -28,13 +28,18 @@ final class UsageHistoryStoreTests: XCTestCase {
 
     func testAppendThenLoadRoundTrips() throws {
         let store = UsageHistoryStore(historyFile: temp.file("h.json"), writeDebounce: 0)
-        // Distinct readings — run-length dedup must not fold them.
+        // Distinct session readings stay distinct. The second entry repeats
+        // the weekly value, so persistence drops that duplicate sevenDay
+        // sample instead of burning the weekly retention cap.
         let e1 = makeEntry(60, fiveHour: 50, sevenDay: 60)
         let e2 = makeEntry(30, fiveHour: 55, sevenDay: 60)
         try store.append(e1)
         try store.append(e2)
         try store.flushPendingWrite()
-        XCTAssertEqual(try store.load(), [e1, e2])
+        XCTAssertEqual(
+            try store.load(),
+            [e1, UsageHistoryEntry(id: e2.id, at: e2.at, fiveHour: 55, sevenDay: nil)]
+        )
     }
 
     func testCapEnforcesSessionLimit() throws {
@@ -94,6 +99,33 @@ final class UsageHistoryStoreTests: XCTestCase {
         }
         try store.flushPendingWrite()
         XCTAssertEqual(try store.load().count, 2) // 2 newest retained, both caps satisfied
+    }
+
+    func testRepeatedWeeklyValueDoesNotBurnWeeklyCapWhenSessionChanges() throws {
+        let store = UsageHistoryStore(
+            historyFile: temp.file("h.json"),
+            sessionCap: 100,
+            weeklyCap: 2,
+            writeDebounce: 0
+        )
+        let base = Date(timeIntervalSince1970: 1_000)
+
+        for i in 0..<5 {
+            try store.append(UsageHistoryEntry(
+                at: base.addingTimeInterval(TimeInterval(i)),
+                fiveHour: Double(i),
+                sevenDay: 42
+            ))
+        }
+        try store.flushPendingWrite()
+
+        let loaded = try store.load()
+        XCTAssertEqual(loaded.count, 5, "session samples must still be retained")
+        XCTAssertEqual(
+            loaded.compactMap(\.sevenDay),
+            [42],
+            "unchanged weekly utilization should be stored once, not once per session refresh"
+        )
     }
 
     func testRunLengthDedupFoldsIdenticalRunToTwoAnchors() throws {
