@@ -142,7 +142,7 @@ final class UsageTrendChartWeeklyEntriesTests: XCTestCase {
         XCTAssertEqual(result[1].value, 0)
     }
 
-    func testFinalBucketIncludesPostMidnightSamplesBeforeReset() throws {
+    func testPreResetPostMidnightWindowSlipsToCurrentDay() throws {
         var cal = Calendar.current
         cal.timeZone = .current
 
@@ -168,6 +168,12 @@ final class UsageTrendChartWeeklyEntriesTests: XCTestCase {
         )
 
         XCTAssertEqual(result.count, 7)
+        XCTAssertTrue(cal.isDate(result[0].at, inSameDayAs: try XCTUnwrap(cal.date(from: DateComponents(
+            year: 2026, month: 6, day: 21
+        )))))
+        XCTAssertTrue(cal.isDate(result[5].at, inSameDayAs: previousNight))
+        XCTAssertEqual(result[5].value, 80)
+        XCTAssertTrue(cal.isDate(result[6].at, inSameDayAs: now))
         XCTAssertEqual(result[6].value, 91)
     }
 

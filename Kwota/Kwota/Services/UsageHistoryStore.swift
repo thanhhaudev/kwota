@@ -4,7 +4,8 @@
 //
 //  Per-profile JSON-backed history. Caps separately by snapshot kind:
 //   - session entries (fiveHour != nil) keep newest sessionCap.
-//   - weekly entries  (sevenDay != nil) keep newest weeklyCap.
+//   - weekly entries  (sevenDay != nil) keep newest weeklyCap, but never
+//     prune the minimum recent window required by the weekly chart.
 //  An entry with both fields counts toward both caps.
 //
 
@@ -21,6 +22,8 @@ final class UsageHistoryStore {
     private var loaded = false
     private var pendingWriteTask: Task<Void, Never>?
     private var willTerminateObserver: NSObjectProtocol?
+
+    private static let minimumWeeklyRetention: TimeInterval = 9 * 86_400
 
     private let encoder: JSONEncoder = {
         let e = JSONEncoder()
@@ -178,8 +181,17 @@ final class UsageHistoryStore {
         }
         let weeklyIdxs = entries.enumerated().compactMap { $0.element.sevenDay != nil ? $0.offset : nil }
         var weeklyIdxsToDrop: [Int] = []
-        if weeklyIdxs.count > weeklyCap {
-            weeklyIdxsToDrop = Array(weeklyIdxs.prefix(weeklyIdxs.count - weeklyCap))
+        if weeklyIdxs.count > weeklyCap,
+           let newestWeeklyAt = weeklyIdxs.map({ entries[$0].at }).max() {
+            let protectedStart = newestWeeklyAt.addingTimeInterval(-Self.minimumWeeklyRetention)
+            let protected = Set(weeklyIdxs.filter { entries[$0].at >= protectedStart })
+            let retainedTarget = max(weeklyCap, protected.count)
+            if weeklyIdxs.count > retainedTarget {
+                weeklyIdxsToDrop = weeklyIdxs
+                    .filter { !protected.contains($0) }
+                    .prefix(weeklyIdxs.count - retainedTarget)
+                    .map { $0 }
+            }
         }
 
         let toDrop = Set(sessionIdxsToDrop).union(Set(weeklyIdxsToDrop))

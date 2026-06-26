@@ -81,9 +81,11 @@ final class UsageHistoryStoreTests: XCTestCase {
             weeklyCap: 2,
             writeDebounce: 0
         )
-        for i in 0..<4 {
+        let base = Date(timeIntervalSince1970: 2_000_000)
+        let offsets: [TimeInterval] = [-20, -19, -18, 0].map { $0 * 86_400 }
+        for (i, offset) in offsets.enumerated() {
             try store.append(UsageHistoryEntry(
-                at: Date(timeIntervalSinceNow: TimeInterval(i)),
+                at: base.addingTimeInterval(offset),
                 fiveHour: nil,
                 sevenDay: Double(i * 10)
             ))
@@ -91,6 +93,29 @@ final class UsageHistoryStoreTests: XCTestCase {
         try store.flushPendingWrite()
         let weeklyEntries = try store.load().filter { $0.fiveHour == nil && $0.sevenDay != nil }
         XCTAssertEqual(weeklyEntries.count, 2)
+    }
+
+    func testWeeklyCapPreservesMinimumRetentionWindow() throws {
+        let store = UsageHistoryStore(
+            historyFile: temp.file("h.json"),
+            sessionCap: 100,
+            weeklyCap: 2,
+            writeDebounce: 0
+        )
+        let base = Date(timeIntervalSince1970: 2_000_000)
+
+        for i in 0..<8 {
+            try store.append(UsageHistoryEntry(
+                at: base.addingTimeInterval(TimeInterval((i - 7) * 86_400)),
+                fiveHour: nil,
+                sevenDay: Double(i)
+            ))
+        }
+        try store.flushPendingWrite()
+
+        let weeklyEntries = try store.load().filter { $0.sevenDay != nil }
+        XCTAssertEqual(weeklyEntries.count, 8)
+        XCTAssertEqual(weeklyEntries.map(\.sevenDay), (0..<8).map(Double.init))
     }
 
     func testEntriesWithBothFieldsCountAgainstBothCaps() throws {

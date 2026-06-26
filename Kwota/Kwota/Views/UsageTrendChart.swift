@@ -509,8 +509,16 @@ struct UsageTrendChart {
         let cycleStartDay = cal.startOfDay(for: anchor.cycleStart)
         let cycleEnd = anchor.cycleStart.addingTimeInterval(7 * 86_400)
         let todayStart = cal.startOfDay(for: now)
+        let cycleEndDay = cal.startOfDay(for: cycleEnd)
+        let visibleStartDay: Date
+        if now < cycleEnd, todayStart >= cycleEndDay,
+           let shiftedStart = cal.date(byAdding: .day, value: -6, to: todayStart) {
+            visibleStartDay = shiftedStart
+        } else {
+            visibleStartDay = cycleStartDay
+        }
 
-        // Bucketing snaps to midnight (`cycleStartDay`) so the 7 day-bars
+        // Bucketing snaps to midnight (`visibleStartDay`) so the 7 day-bars
         // align visually with the user's local clock. The pre-cycle filter
         // uses the precise `anchor.cycleStart` (which can be sub-day, e.g.
         // a 03:00 reset), so prior-cycle samples timestamped between
@@ -524,16 +532,13 @@ struct UsageTrendChart {
         var entries: [Entry] = []
         var lastSeen: Double = 0
         for offset in 0..<7 {
-            guard let dayStart = cal.date(byAdding: .day, value: offset, to: cycleStartDay) else { continue }
+            guard let dayStart = cal.date(byAdding: .day, value: offset, to: visibleStartDay) else { continue }
             if dayStart > todayStart {
                 entries.append(Entry(at: dayStart, value: 0, isFuture: true))
                 continue
             }
             let calendarDayEnd = cal.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart
-            // The chart renders 7 local-day bars, but provider reset times can
-            // be sub-day. Keep the final visible bucket open until the precise
-            // cycle end so post-midnight, pre-reset samples remain visible.
-            let dayEnd = offset == 6 && cycleEnd > calendarDayEnd ? cycleEnd : calendarDayEnd
+            let dayEnd = Swift.min(calendarDayEnd, cycleEnd)
             let samples = inCycle.filter { $0.at >= dayStart && $0.at < dayEnd }
             let latest = samples
                 .compactMap { e -> (Date, Double)? in
