@@ -297,9 +297,10 @@ final class MenuBarViewModel {
     /// SWR window for the opportunistic refresh path. When `popoverDidOpen`
     /// fires and `summary.fetchedAt` is within this many seconds of `now()`,
     /// the refresh call is skipped — the cached summary is fresh enough and
-    /// the periodic 60s tick will issue the next call. Set to the observed
-    /// `/api/oauth/usage` cadence (60s open-interval).
-    let freshnessWindow: TimeInterval = 60
+    /// the periodic open-cadence tick will issue the next call. Kept above
+    /// the observed `/api/oauth/usage` burst limit so activity-triggered
+    /// notification checks don't add a second request stream.
+    let freshnessWindow: TimeInterval = 120
 
     /// Timestamp of the most recent refresh *attempt* — set on entry to
     /// `refreshUsageNow`, not on successful commit. So a failed fetch still
@@ -1155,7 +1156,7 @@ final class MenuBarViewModel {
         // pgrep/ps/lsof on the fast interval.
         antigravityProcessWatcher.popoverDidOpen()
         // SWR gate: if the cached summary is still inside the freshness
-        // window, skip the opportunistic refresh — the periodic 60s tick
+        // window, skip the opportunistic refresh — the periodic open tick
         // will issue the next call. Stops repeated open-close-open from
         // draining the `/api/oauth/usage` token bucket (≈5 calls before
         // 429 with a 300s lockout).

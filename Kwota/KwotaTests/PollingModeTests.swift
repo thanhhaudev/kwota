@@ -8,13 +8,13 @@ import XCTest
 
 final class PollingModeTests: XCTestCase {
     func test_normal_intervals_matchTodaysDefaults() {
-        XCTAssertEqual(PollingMode.normal.openInterval,   60)
-        XCTAssertEqual(PollingMode.normal.closedInterval, 600)
+        XCTAssertEqual(PollingMode.normal.openInterval,   120)
+        XCTAssertEqual(PollingMode.normal.closedInterval, 900)
     }
 
     func test_batterySaver_intervals() {
-        XCTAssertEqual(PollingMode.batterySaver.openInterval,   120)
-        XCTAssertEqual(PollingMode.batterySaver.closedInterval, 1800)
+        XCTAssertEqual(PollingMode.batterySaver.openInterval,   300)
+        XCTAssertEqual(PollingMode.batterySaver.closedInterval, 3600)
     }
 
     func test_resolve_known_rawValues() {

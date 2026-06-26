@@ -20,15 +20,15 @@ enum PollingMode: String, CaseIterable, Identifiable {
 
     var openInterval: TimeInterval {
         switch self {
-        case .normal:       return 60
-        case .batterySaver: return 120
+        case .normal:       return 120
+        case .batterySaver: return 300
         }
     }
 
     var closedInterval: TimeInterval {
         switch self {
-        case .normal:       return 600
-        case .batterySaver: return 1800
+        case .normal:       return 900
+        case .batterySaver: return 3600
         }
     }
 

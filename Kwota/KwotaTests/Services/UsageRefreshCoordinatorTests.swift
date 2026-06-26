@@ -35,11 +35,9 @@ final class UsageRefreshCoordinatorTests: XCTestCase {
         coord.stop()
     }
 
-    func testDefaultOpenIntervalIsOneMinute() {
-        // Cadence bump: 30s → 60s to halve baseline call volume. If you change
-        // this, also update the ban-risk note in ClaudeAPIClient.swift.
+    func testDefaultOpenIntervalIsTwoMinutes() {
         let coord = UsageRefreshCoordinator(onTick: {})
-        XCTAssertEqual(coord.openInterval, 60)
+        XCTAssertEqual(coord.openInterval, 120)
     }
 
     // MARK: - Jitter

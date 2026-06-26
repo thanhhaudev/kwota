@@ -143,6 +143,29 @@ final class UsageHistoryStore {
         guard FileManager.default.fileExists(atPath: historyFile.path) else { return }
         let data = try Data(contentsOf: historyFile)
         entries = try decoder.decode([UsageHistoryEntry].self, from: data)
+        if compactLegacyRepeatedWeeklySamples() {
+            applyCaps()
+            try writeNow()
+        }
+    }
+
+    private func compactLegacyRepeatedWeeklySamples() -> Bool {
+        entries.sort { $0.at < $1.at }
+        var lastWeekly: Double?
+        var changed = false
+        entries = entries.map { entry in
+            guard let weekly = entry.sevenDay else { return entry }
+            defer { lastWeekly = weekly }
+            guard lastWeekly == weekly else { return entry }
+            changed = true
+            return UsageHistoryEntry(
+                id: entry.id,
+                at: entry.at,
+                fiveHour: entry.fiveHour,
+                sevenDay: nil
+            )
+        }
+        return changed
     }
 
     private func applyCaps() {

@@ -21,6 +21,16 @@ final class UsageHistoryStoreTests: XCTestCase {
                           sevenDay: sevenDay)
     }
 
+    private func writeLegacyEntries(_ entries: [UsageHistoryEntry], to file: URL) throws {
+        try FileManager.default.createDirectory(
+            at: file.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        try encoder.encode(entries).write(to: file, options: .atomic)
+    }
+
     func testLoadOnEmptyFileReturnsEmpty() throws {
         let store = UsageHistoryStore(historyFile: temp.file("h.json"))
         XCTAssertEqual(try store.load(), [])
@@ -125,6 +135,34 @@ final class UsageHistoryStoreTests: XCTestCase {
             loaded.compactMap(\.sevenDay),
             [42],
             "unchanged weekly utilization should be stored once, not once per session refresh"
+        )
+    }
+
+    func testLoadCompactsLegacyRepeatedWeeklySamples() throws {
+        let file = temp.file("legacy.json")
+        let base = Date(timeIntervalSince1970: 1_000)
+        let legacyEntries = (0..<5).map { i in
+            UsageHistoryEntry(
+                at: base.addingTimeInterval(TimeInterval(i)),
+                fiveHour: Double(i),
+                sevenDay: 42
+            )
+        }
+        try writeLegacyEntries(legacyEntries, to: file)
+
+        let store = UsageHistoryStore(
+            historyFile: file,
+            sessionCap: 100,
+            weeklyCap: 2,
+            writeDebounce: 0
+        )
+
+        let loaded = try store.load()
+        XCTAssertEqual(loaded.count, 5, "legacy compaction must not drop session history")
+        XCTAssertEqual(
+            loaded.compactMap(\.sevenDay),
+            [42],
+            "legacy duplicate weekly values should be stripped before weeklyCap pruning continues"
         )
     }
 

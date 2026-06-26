@@ -769,7 +769,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         try seedActiveProfile()
         let vm = makeVM()
         // Pre-seed: a successful fetch landed 5s ago. Throttle floor is
-        // 10s but SWR window is 60s; the SWR gate must win and short-circuit
+        // 10s but SWR window is 120s; the SWR gate must win and short-circuit
         // before the throttle check is even reached.
         vm.summary = summary(fetchedAt: clock.addingTimeInterval(-5))
         vm.lastFetchAttemptAt = nil  // throttle would otherwise allow
@@ -778,15 +778,15 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
 
         XCTAssertNil(
             vm.lastFetchAttemptAt,
-            "summary 5s old is well inside 60s freshnessWindow — popoverDidOpen must skip the refresh, leaving lastFetchAttemptAt untouched"
+            "summary 5s old is well inside 120s freshnessWindow — popoverDidOpen must skip the refresh, leaving lastFetchAttemptAt untouched"
         )
     }
 
     func test_popoverDidOpen_refreshes_whenSummaryOutsideFreshnessWindow() throws {
         try seedActiveProfile()
         let vm = makeVM()
-        // Pre-seed: a successful fetch landed 120s ago — outside the 60s
-        // SWR window. popoverDidOpen must refresh.
+        // Pre-seed: a successful fetch landed 120s ago — at the SWR
+        // boundary. popoverDidOpen must refresh.
         vm.summary = summary(fetchedAt: clock.addingTimeInterval(-120))
         vm.lastFetchAttemptAt = nil
 
@@ -794,7 +794,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
 
         XCTAssertEqual(
             vm.lastFetchAttemptAt, clock,
-            "summary 120s old is outside the SWR window — popoverDidOpen must fall through to refreshUsageNow, stamping lastFetchAttemptAt"
+            "summary 120s old is at the SWR boundary — popoverDidOpen must fall through to refreshUsageNow, stamping lastFetchAttemptAt"
         )
     }
 
@@ -897,7 +897,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         XCTAssertEqual(
             vm.lastFetchAttemptAt,
             clock.addingTimeInterval(-30),
-            "activity-triggered quota checks must not exceed the 60s freshness cadence"
+            "activity-triggered quota checks must not exceed the 120s freshness cadence"
         )
     }
 
@@ -939,7 +939,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         // A→B→A→B back-and-forth in the switcher used to fire a fresh
         // fetch on every switch, draining the /api/oauth/usage token
         // bucket. With the SWR gate, a switch to a profile whose
-        // `lastFetchedAt` is still inside the 60s freshness window must
+        // `lastFetchedAt` is still inside the 120s freshness window must
         // NOT fire refreshUsageNow — provided the profile also has a
         // renderable cache (Claude `lastSnapshot`) so the cleared
         // `summary` doesn't leave the chart at `.empty`.
@@ -967,7 +967,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
 
         XCTAssertNil(
             vm.lastFetchAttemptAt,
-            "B's lastFetchedAt 5s ago is inside the 60s SWR window — rebindHistory must skip refresh"
+            "B's lastFetchedAt 5s ago is inside the 120s SWR window — rebindHistory must skip refresh"
         )
     }
 
@@ -1027,7 +1027,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
     func test_profileSwitch_refreshes_whenProfileLastFetchedAtIsStale() throws {
         _ = try seedActiveProfile()
         var b = Profile(name: "B", authMethod: .cliSync, email: "b@x.com")
-        b.lastFetchedAt = clock.addingTimeInterval(-120)  // 120s ago — stale
+        b.lastFetchedAt = clock.addingTimeInterval(-120)  // 120s ago — SWR boundary
         try profileStore.add(b)
         try keychain.write(
             .cliToken(accessToken: "T2", refreshToken: "r2", expiresAt: .distantFuture),
@@ -1041,7 +1041,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
 
         XCTAssertEqual(
             vm.lastFetchAttemptAt, clock,
-            "B's lastFetchedAt 120s ago is outside the SWR window — rebindHistory must refresh"
+            "B's lastFetchedAt 120s ago is at the SWR boundary — rebindHistory must refresh"
         )
     }
 }

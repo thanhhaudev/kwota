@@ -3,10 +3,8 @@
 //  Kwota
 //
 //  Owns a single Timer that fires onTick at an adaptive interval:
-//   - 60 seconds while the popover is open (was 30; bumped to halve the
-//     baseline call volume against claude.ai/api/usage and the Messages
-//     API rate-limit probe — 1-minute freshness is plenty for a quota UI).
-//   - 10 minutes while it is closed.
+//   - 120 seconds while the popover is open.
+//   - 15 minutes while it is closed.
 //
 //  Each scheduled delay is jittered by ±jitterFraction (default 20%) so
 //  the polling pattern is not a clean fixed-period signal that's trivial
@@ -66,8 +64,8 @@ final class UsageRefreshCoordinator {
     }
 
     init(
-        openInterval: TimeInterval = 60,
-        closedInterval: TimeInterval = 600,
+        openInterval: TimeInterval = 120,
+        closedInterval: TimeInterval = 900,
         jitterFraction: Double = 0.2,
         now: @escaping () -> Date = Date.init,
         randomUnit: @escaping () -> Double = { Double.random(in: 0..<1) },
