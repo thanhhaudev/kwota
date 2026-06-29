@@ -45,10 +45,42 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
     private let fm: any CodexFileManager
     private var offsets: [URL: UInt64] = [:]   // high-water rowid consumed per logs DB
     private var mtimes: [URL: Date] = [:]
+    private var traceTurns: [URL: [String: ReaderState.CodexTraceTurn]] = [:]
     private let lastLineLock = OSAllocatedUnfairLock<String?>(initialState: nil)
 
     /// Trace target that carries the responses-API `usage` dump.
     private static let usageTarget = "codex_api::endpoint::responses_websocket"
+    private static let logTarget = "log"
+    private static let turnTarget = "codex_core::session::turn"
+
+    private struct TraceRow {
+        var id: UInt64
+        var ts: Int64
+        var target: String
+        var threadId: String?
+        var processUUID: String?
+        var body: String
+
+        var isExactUsageCandidate: Bool {
+            switch target {
+            case CodexTraceReader.usageTarget:
+                return body.contains("input_tokens")
+            case CodexTraceReader.logTarget:
+                return body.contains("response.completed") && body.contains(#""usage""#)
+            default:
+                return false
+            }
+        }
+    }
+
+    private struct TraceObservation {
+        var key: String
+        var sessionId: String
+        var timestamp: Date
+        var model: String?
+        var tokens: TokenBreakdown
+        var precision: ReaderState.CodexTracePrecision
+    }
 
     init(codexHome: URL = CodexTraceReader.defaultHome(), fileManager: any CodexFileManager = FileManager.default) {
         self.codexHome = codexHome
@@ -67,6 +99,7 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
         let live = Set(dbs)
         offsets = offsets.filter { live.contains($0.key) }
         mtimes = mtimes.filter { live.contains($0.key) }
+        traceTurns = traceTurns.filter { live.contains($0.key) }
         return ingest(dbs)
     }
 
@@ -126,8 +159,12 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
     private func existsUsageRow(_ handle: OpaquePointer, above lower: UInt64) -> Bool? {
         let sql = """
             SELECT 1 FROM logs
-            WHERE id > \(lower) AND target = '\(Self.usageTarget)'
-              AND feedback_log_body LIKE '%input_tokens%'
+            WHERE id > \(lower)
+              AND (
+                (target = '\(Self.usageTarget)' AND feedback_log_body LIKE '%input_tokens%')
+                OR (target = '\(Self.logTarget)' AND feedback_log_body LIKE '%response.completed%' AND feedback_log_body LIKE '%"usage"%')
+                OR (target = '\(Self.turnTarget)' AND feedback_log_body LIKE '%post sampling token usage%')
+              )
             LIMIT 1;
             """
         var stmt: OpaquePointer?
@@ -196,41 +233,83 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
 
         guard let currentMax = maxRowID(handle) else { return }   // empty table
         var lower = offsets[db] ?? 0
-        if currentMax < lower { lower = 0 }        // rotation/replace -> re-read from scratch
+        if currentMax < lower {
+            lower = 0        // rotation/replace -> re-read from scratch
+            traceTurns[db] = [:]
+        }
         if let stored = offsets[db], stored == currentMax, currentMax >= lower {
             return   // up to date, no new rows
         }
 
+        let contextLower = lower > 25 ? lower - 25 : 0
+        let hasProcessUUID = hasColumn("process_uuid", in: "logs", handle: handle)
+        let processUUIDSelect = hasProcessUUID ? "process_uuid" : "NULL AS process_uuid"
+        let contextFilter = hasProcessUUID
+            ? "OR (id > \(contextLower) AND target = '\(Self.turnTarget)' AND process_uuid IS NOT NULL AND thread_id IS NOT NULL)"
+            : ""
         let sql = """
-            SELECT id, ts, thread_id, feedback_log_body FROM logs
-            WHERE id > \(lower) AND id <= \(currentMax)
-              AND target = '\(Self.usageTarget)'
-              AND feedback_log_body LIKE '%input_tokens%'
+            SELECT id, ts, target, thread_id, \(processUUIDSelect), feedback_log_body FROM logs
+            WHERE id <= \(currentMax)
+              AND (
+                (id > \(lower) AND target = '\(Self.usageTarget)' AND feedback_log_body LIKE '%input_tokens%')
+                OR (id > \(lower) AND target = '\(Self.logTarget)' AND feedback_log_body LIKE '%response.completed%' AND feedback_log_body LIKE '%"usage"%')
+                OR (id > \(lower) AND target = '\(Self.turnTarget)' AND feedback_log_body LIKE '%post sampling token usage%')
+                \(contextFilter)
+              )
             ORDER BY id ASC;
             """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else { return }
         defer { sqlite3_finalize(stmt) }
 
+        var rows: [TraceRow] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let targetC = sqlite3_column_text(stmt, 2),
+                  let bodyC = sqlite3_column_text(stmt, 5) else { continue }
+            rows.append(TraceRow(
+                id: UInt64(bitPattern: sqlite3_column_int64(stmt, 0)),
+                ts: sqlite3_column_int64(stmt, 1),
+                target: String(cString: targetC),
+                threadId: Self.columnText(stmt, 3),
+                processUUID: Self.columnText(stmt, 4),
+                body: String(cString: bodyC)
+            ))
+        }
+
+        var observations: [TraceObservation] = []
         var parsedOK = 0     // rows whose usage object decoded (billable OR zero) — schema intact
         var parseFailed = 0  // rows that matched the filter but whose usage object would not decode
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            let id = UInt64(bitPattern: sqlite3_column_int64(stmt, 0))
-            let ts = sqlite3_column_int64(stmt, 1)
-            guard let tidC = sqlite3_column_text(stmt, 2) else { continue }
-            let threadId = String(cString: tidC)
-            guard !rollout.contains(threadId) else { continue }
-            guard let bodyC = sqlite3_column_text(stmt, 3) else { continue }
-            let body = String(cString: bodyC)
-            lastLineLock.withLock { $0 = "\(threadId)@\(id)" }
-            guard let tokens = Self.parseUsage(body) else { parseFailed += 1; continue }
+        for row in rows where row.id > lower && row.isExactUsageCandidate {
+            guard let tokens = Self.parseUsage(row.body) else { parseFailed += 1; continue }
             parsedOK += 1
             guard tokens != .zero else { continue }   // decoded but non-billable
-            emitted.append(UsageEvent(
-                uuid: "\(threadId)@\(id)", sessionId: threadId,
-                timestamp: Date(timeIntervalSince1970: TimeInterval(ts)),
-                tokens: tokens, model: Self.parseModel(body)))
+            guard let observation = Self.exactObservation(from: row, tokens: tokens, rows: rows) else { continue }
+            guard !rollout.contains(observation.sessionId) else { continue }
+            observations.append(observation)
         }
+        var fallbackByTurn: [String: TraceObservation] = [:]
+        for row in rows where row.id > lower && row.target == Self.turnTarget {
+            guard let parsed = Self.parsePostSampling(row.body),
+                  let threadId = row.threadId,
+                  !rollout.contains(threadId) else { continue }
+            let key = "\(threadId)#\(parsed.turnId)"
+            let obs = TraceObservation(
+                key: key,
+                sessionId: threadId,
+                timestamp: Date(timeIntervalSince1970: TimeInterval(row.ts)),
+                model: parsed.model,
+                tokens: TokenBreakdown(totalOnly: parsed.total),
+                precision: .totalOnly
+            )
+            if let current = fallbackByTurn[key] {
+                if obs.tokens.totalOnly > current.tokens.totalOnly { fallbackByTurn[key] = obs }
+            } else {
+                fallbackByTurn[key] = obs
+            }
+        }
+        let exactKeys = Set(observations.filter { $0.precision == .exact }.map(\.key))
+        observations.append(contentsOf: fallbackByTurn.values.filter { !exactKeys.contains($0.key) })
+        reconcile(observations.sorted(by: { $0.key < $1.key }), db: db, into: &emitted)
         // Whole-batch parse FAILURE is the drift signal: if every filter-matched
         // usage row in this batch failed to parse, the responses-API usage shape
         // likely moved — hold the cursor so the rows are re-read after a decoder fix
@@ -278,11 +357,128 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
                               cacheCreation: 0, cacheRead: cached)
     }
 
+    private static func exactObservation(from row: TraceRow, tokens: TokenBreakdown, rows: [TraceRow]) -> TraceObservation? {
+        guard row.isExactUsageCandidate else { return nil }
+        guard let threadId = row.threadId ?? correlateThreadID(for: row, rows: rows) else { return nil }
+        let key: String
+        if let turnId = correlateTurnID(for: row, rows: rows) {
+            key = "\(threadId)#\(turnId)"
+        } else {
+            key = "\(threadId)#exact#\(row.id)"
+        }
+        return TraceObservation(
+            key: key,
+            sessionId: threadId,
+            timestamp: Date(timeIntervalSince1970: TimeInterval(row.ts)),
+            model: parseModel(row.body),
+            tokens: tokens,
+            precision: .exact
+        )
+    }
+
+    private static func correlateThreadID(for row: TraceRow, rows: [TraceRow]) -> String? {
+        guard let pid = row.processUUID else { return nil }
+        let candidates = rows.filter {
+            $0.processUUID == pid &&
+            $0.target == Self.turnTarget &&
+            $0.threadId != nil &&
+            abs(Int64($0.id) - Int64(row.id)) <= 25
+        }
+        guard candidates.count == 1 else { return nil }
+        return candidates[0].threadId
+    }
+
+    private static func correlateTurnID(for row: TraceRow, rows: [TraceRow]) -> String? {
+        guard let pid = row.processUUID else { return nil }
+        let candidates = rows.compactMap { candidate -> String? in
+            guard candidate.processUUID == pid,
+                  candidate.target == Self.turnTarget,
+                  abs(Int64(candidate.id) - Int64(row.id)) <= 25 else { return nil }
+            if let parsed = parsePostSampling(candidate.body) { return parsed.turnId }
+            return parseToken(after: "turn_id=", in: candidate.body) ?? parseToken(after: "turn=", in: candidate.body)
+        }
+        let unique = Set(candidates)
+        guard unique.count == 1 else { return nil }
+        return unique.first
+    }
+
+    private func reconcile(_ observations: [TraceObservation], db: URL, into emitted: inout [UsageEvent]) {
+        var state = traceTurns[db] ?? [:]
+        for obs in observations {
+            let previous = state[obs.key]
+            switch (previous?.precision, obs.precision) {
+            case (.exact, _):
+                continue
+            case (.totalOnly, .totalOnly):
+                let previousTotal = previous?.tokens.totalOnly ?? 0
+                let delta = obs.tokens.totalOnly - previousTotal
+                guard delta > 0 else { continue }
+                emitted.append(Self.event(from: obs, tokens: TokenBreakdown(totalOnly: delta)))
+                state[obs.key] = ReaderState.CodexTraceTurn(
+                    precision: .totalOnly, timestamp: obs.timestamp, model: obs.model, tokens: obs.tokens)
+                lastLineLock.withLock { $0 = "\(obs.sessionId)@\(obs.key)" }
+            case (.totalOnly, .exact):
+                if let previous {
+                    emitted.append(Self.event(from: obs, tokens: TokenBreakdown(totalOnly: -previous.tokens.totalOnly)))
+                }
+                emitted.append(Self.event(from: obs, tokens: obs.tokens))
+                state[obs.key] = ReaderState.CodexTraceTurn(
+                    precision: .exact, timestamp: obs.timestamp, model: obs.model, tokens: obs.tokens)
+                lastLineLock.withLock { $0 = "\(obs.sessionId)@\(obs.key)" }
+            case (.none, _):
+                emitted.append(Self.event(from: obs, tokens: obs.tokens))
+                state[obs.key] = ReaderState.CodexTraceTurn(
+                    precision: obs.precision, timestamp: obs.timestamp, model: obs.model, tokens: obs.tokens)
+                lastLineLock.withLock { $0 = "\(obs.sessionId)@\(obs.key)" }
+            }
+        }
+        traceTurns[db] = state
+    }
+
+    private static func event(from obs: TraceObservation, tokens: TokenBreakdown) -> UsageEvent {
+        UsageEvent(
+            uuid: "\(obs.key)#\(tokens.input)#\(tokens.output)#\(tokens.cacheRead)#\(tokens.totalOnly)",
+            sessionId: obs.sessionId,
+            timestamp: obs.timestamp,
+            tokens: tokens,
+            model: obs.model
+        )
+    }
+
+    private static func parsePostSampling(_ body: String) -> (turnId: String, model: String?, total: Int)? {
+        guard body.contains("post sampling token usage") else { return nil }
+        guard let total = parseInt(after: "total_usage_tokens=", in: body) else { return nil }
+        let turnId = parseToken(after: "turn_id=", in: body) ?? parseToken(after: "turn=", in: body)
+        guard let turnId else { return nil }
+        return (turnId, parseModel(body) ?? parseToken(after: "model=", in: body), total)
+    }
+
+    private static func parseToken(after marker: String, in body: String) -> String? {
+        guard let range = body.range(of: marker) else { return nil }
+        let tail = body[range.upperBound...]
+        let token = tail.prefix { !$0.isWhitespace && $0 != "," && $0 != ")" }
+        return token.isEmpty ? nil : String(token)
+    }
+
+    private static func parseInt(after marker: String, in body: String) -> Int? {
+        guard let raw = parseToken(after: marker, in: body) else { return nil }
+        return Int(raw)
+    }
+
     /// First `model=<token>` span attribute in the body; token ends at whitespace.
     static func parseModel(_ body: String) -> String? {
-        guard let r = body.range(of: "model=") else { return nil }
-        let tok = body[r.upperBound...].prefix { !$0.isWhitespace }
+        if let r = body.range(of: "model=") {
+            let tok = body[r.upperBound...].prefix { !$0.isWhitespace }
+            return tok.isEmpty ? nil : String(tok)
+        }
+        guard let r = body.range(of: #""model":""#) else { return nil }
+        let tok = body[r.upperBound...].prefix { $0 != "\"" }
         return tok.isEmpty ? nil : String(tok)
+    }
+
+    private static func columnText(_ stmt: OpaquePointer, _ index: Int32) -> String? {
+        guard let text = sqlite3_column_text(stmt, index) else { return nil }
+        return String(cString: text)
     }
 
     private func maxRowID(_ handle: OpaquePointer) -> UInt64? {
@@ -293,6 +489,18 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
         guard sqlite3_step(stmt) == SQLITE_ROW, sqlite3_column_type(stmt, 0) != SQLITE_NULL
         else { return nil }
         return UInt64(bitPattern: sqlite3_column_int64(stmt, 0))
+    }
+
+    private func hasColumn(_ column: String, in table: String, handle: OpaquePointer) -> Bool {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "PRAGMA table_info(\(table));", -1, &stmt, nil) == SQLITE_OK,
+              let stmt else { return false }
+        defer { sqlite3_finalize(stmt) }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let name = sqlite3_column_text(stmt, 1) else { continue }
+            if String(cString: name) == column { return true }
+        }
+        return false
     }
 
     private func openReadOnly(_ db: URL) -> OpaquePointer? {
@@ -310,7 +518,8 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
     func state() -> ReaderState {
         var snapshot: [String: ReaderState.Entry] = [:]
         for (url, id) in offsets {
-            snapshot[url.path] = .init(offset: id, mtime: mtimes[url] ?? .distantPast)
+            snapshot[url.path] = .init(offset: id, mtime: mtimes[url] ?? .distantPast,
+                                       codexTraceTurns: traceTurns[url])
         }
         return ReaderState(entries: snapshot)
     }
@@ -318,10 +527,12 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
     func restore(_ state: ReaderState) {
         offsets.removeAll(keepingCapacity: false)
         mtimes.removeAll(keepingCapacity: false)
+        traceTurns.removeAll(keepingCapacity: false)
         for (path, entry) in state.entries {
             let url = URL(fileURLWithPath: path)
             offsets[url] = entry.offset
             mtimes[url] = entry.mtime
+            traceTurns[url] = entry.codexTraceTurns ?? [:]
         }
     }
 }

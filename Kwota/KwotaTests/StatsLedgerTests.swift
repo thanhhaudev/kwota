@@ -62,6 +62,23 @@ final class StatsLedgerTests: XCTestCase {
         XCTAssertEqual(l.total(provider: .claude, sinceDay: "2026-06-10").input, 10)
     }
 
+    func test_totalOnlyAggregatesButDoesNotChangeBillable() {
+        var l = StatsLedger()
+        let now = date("2026-06-29T10:00:00.000Z")
+        l.merge(provider: .codex, day: "2026-06-29", model: "gpt-5.5",
+                delta: TokenBreakdown(input: 100, output: 10, cacheRead: 20), now: now)
+        l.merge(provider: .codex, day: "2026-06-29", model: "gpt-5.5",
+                delta: TokenBreakdown(totalOnly: 500), now: now)
+
+        let total = l.total(provider: .codex, sinceDay: nil)
+        XCTAssertEqual(total.input, 100)
+        XCTAssertEqual(total.output, 10)
+        XCTAssertEqual(total.cacheRead, 20)
+        XCTAssertEqual(total.totalOnly, 500)
+        XCTAssertEqual(total.billable, 110)
+        XCTAssertEqual(total.observedTotal, 630)
+    }
+
     func test_total_isZeroForUnknownProvider() {
         let l = StatsLedger()
         XCTAssertEqual(l.total(provider: .codex, sinceDay: nil), .zero)

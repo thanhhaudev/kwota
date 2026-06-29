@@ -171,6 +171,163 @@ final class CodexTraceReaderTests: XCTestCase {
         XCTAssertTrue(r2.read().isEmpty, "restored cursor must not re-emit consumed rows")
     }
 
+    func test_fixtureCanStoreProcessUUIDAndNullThreadID() {
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: ts, threadId: nil, processUUID: "pid:1",
+                  body: CodexTraceFixture.responseCompletedBody(model: "gpt-5.5", input: 10, cached: 2, output: 3),
+                  target: "log"),
+        ])
+        let rows = CodexTraceFixture.dumpRows(home: home)
+        XCTAssertEqual(rows.first?.threadId, nil)
+        XCTAssertEqual(rows.first?.processUUID, "pid:1")
+    }
+
+    func test_parsesResponseCompletedFromLogTarget() {
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: ts, threadId: "tPlugin", processUUID: "pid:1",
+                  body: CodexTraceFixture.responseCompletedBody(model: "gpt-5.5", input: 90, cached: 70, output: 6),
+                  target: "log"),
+        ])
+
+        let events = CodexTraceReader(codexHome: home).read()
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0].sessionId, "tPlugin")
+        XCTAssertEqual(events[0].model, "gpt-5.5")
+        XCTAssertEqual(events[0].tokens, TokenBreakdown(input: 20, output: 6, cacheRead: 70))
+    }
+
+    func test_legacyTraceDBWithoutProcessUUIDStillReadsThreadIDUsage() {
+        home = CodexTraceFixture.makeHome(rows: [])
+        CodexTraceFixture.writeLegacyDBWithoutProcessUUID(at: home.appendingPathComponent("logs_2.sqlite"), rows: [
+            .init(id: 1, ts: ts, threadId: "tLegacy",
+                  body: CodexTraceFixture.usageBody(model: "gpt-5.5", input: 40, cached: 10, output: 5)),
+        ])
+
+        let events = CodexTraceReader(codexHome: home).read()
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0].sessionId, "tLegacy")
+        XCTAssertEqual(events[0].tokens, TokenBreakdown(input: 30, output: 5, cacheRead: 10))
+    }
+
+    func test_correlatesNullThreadResponseCompletedByProcessUUID() {
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 10, ts: ts, threadId: nil, processUUID: "pid:2",
+                  body: CodexTraceFixture.responseCompletedBody(model: "gpt-5.5", input: 100, cached: 80, output: 7),
+                  target: "log"),
+            .init(id: 11, ts: ts, threadId: "tCorrelated", processUUID: "pid:2",
+                  body: "app-server turn turn_id=turnA model=gpt-5.5",
+                  target: "codex_core::session::turn"),
+        ])
+
+        let events = CodexTraceReader(codexHome: home).read()
+        XCTAssertEqual(events.map(\.sessionId), ["tCorrelated"])
+        XCTAssertEqual(events.first?.tokens, TokenBreakdown(input: 20, output: 7, cacheRead: 80))
+    }
+
+    func test_parsesPostSamplingAsTotalOnly() {
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: ts, threadId: "tSample", processUUID: "pid:3",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 123, turnId: "turn1"),
+                  target: "codex_core::session::turn"),
+        ])
+
+        let events = CodexTraceReader(codexHome: home).read()
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0].sessionId, "tSample")
+        XCTAssertEqual(events[0].model, "gpt-5.5")
+        XCTAssertEqual(events[0].tokens, TokenBreakdown(totalOnly: 123))
+        XCTAssertEqual(events[0].tokens.billable, 0)
+    }
+
+    func test_postSamplingUsesMaxPerTurn() {
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: ts, threadId: "tSample", processUUID: "pid:3",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 50, turnId: "turn1"),
+                  target: "codex_core::session::turn"),
+            .init(id: 2, ts: ts, threadId: "tSample", processUUID: "pid:3",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 80, turnId: "turn1"),
+                  target: "codex_core::session::turn"),
+        ])
+
+        let events = CodexTraceReader(codexHome: home).read()
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0].tokens, TokenBreakdown(totalOnly: 80))
+    }
+
+    func test_postSamplingExcludesRolloutThread() {
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: ts, threadId: "tPersisted", processUUID: "pid:4",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 123, turnId: "turn1"),
+                  target: "codex_core::session::turn"),
+        ])
+        CodexTraceFixture.addRollout(home: home, threadId: "tPersisted")
+        XCTAssertTrue(CodexTraceReader(codexHome: home).read().isEmpty)
+    }
+
+    func test_postSamplingSecondReadEmitsOnlyDelta() {
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: ts, threadId: "tSample", processUUID: "pid:5",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 50, turnId: "turn1"),
+                  target: "codex_core::session::turn"),
+        ])
+        let reader = CodexTraceReader(codexHome: home)
+        XCTAssertEqual(reader.read().first?.tokens, TokenBreakdown(totalOnly: 50))
+
+        CodexTraceFixture.writeDB(at: home.appendingPathComponent("logs_2.sqlite"), rows: [
+            .init(id: 1, ts: ts, threadId: "tSample", processUUID: "pid:5",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 50, turnId: "turn1"),
+                  target: "codex_core::session::turn"),
+            .init(id: 2, ts: ts, threadId: "tSample", processUUID: "pid:5",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 80, turnId: "turn1"),
+                  target: "codex_core::session::turn"),
+        ])
+
+        XCTAssertEqual(reader.read().first?.tokens, TokenBreakdown(totalOnly: 30))
+    }
+
+    func test_exactUsageCanReplacePriorTotalOnly() {
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: ts, threadId: "tSample", processUUID: "pid:6",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 80, turnId: "turn1"),
+                  target: "codex_core::session::turn"),
+        ])
+        let reader = CodexTraceReader(codexHome: home)
+        XCTAssertEqual(reader.read().first?.tokens, TokenBreakdown(totalOnly: 80))
+
+        CodexTraceFixture.writeDB(at: home.appendingPathComponent("logs_2.sqlite"), rows: [
+            .init(id: 1, ts: ts, threadId: "tSample", processUUID: "pid:6",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 80, turnId: "turn1"),
+                  target: "codex_core::session::turn"),
+            .init(id: 2, ts: ts, threadId: "tSample", processUUID: "pid:6",
+                  body: CodexTraceFixture.responseCompletedBody(model: "gpt-5.5", input: 90, cached: 70, output: 6),
+                  target: "log"),
+        ])
+
+        let replacement = reader.read().map(\.tokens)
+        XCTAssertEqual(replacement, [
+            TokenBreakdown(totalOnly: -80),
+            TokenBreakdown(input: 20, output: 6, cacheRead: 70),
+        ])
+    }
+
+    func test_stateRestore_preservesCodexTraceTurnState() {
+        let turn = ReaderState.CodexTraceTurn(
+            precision: .totalOnly,
+            timestamp: Date(timeIntervalSince1970: TimeInterval(ts)),
+            model: "gpt-5.5",
+            tokens: TokenBreakdown(totalOnly: 100)
+        )
+        let entry = ReaderState.Entry(
+            offset: 9,
+            mtime: Date(timeIntervalSince1970: 1),
+            codexTraceTurns: ["thread#turn": turn]
+        )
+        let state = ReaderState(entries: ["/tmp/logs_2.sqlite": entry])
+        let decoded = try! JSONDecoder().decode(ReaderState.self, from: JSONEncoder().encode(state))
+
+        XCTAssertEqual(decoded.entries["/tmp/logs_2.sqlite"]?.codexTraceTurns?["thread#turn"], turn)
+    }
+
     func test_rotation_whenMaxIdDropsBelowCursor_reReadsFromScratch() {
         home = CodexTraceFixture.makeHome(rows: [
             .init(id: 5, ts: ts, threadId: "tA",

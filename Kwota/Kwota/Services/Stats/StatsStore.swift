@@ -250,6 +250,9 @@ final class StatsStore {
     func total(provider: ProviderID, sinceDay: String?) -> TokenBreakdown {
         ledger.total(provider: provider, sinceDay: sinceDay)
     }
+    func observedTotal(provider: ProviderID, sinceDay: String?) -> Int {
+        total(provider: provider, sinceDay: sinceDay).observedTotal
+    }
     func totalsByModel(provider: ProviderID, sinceDay: String?) -> [String: TokenBreakdown] {
         ledger.totalsByModel(provider: provider, sinceDay: sinceDay)
     }

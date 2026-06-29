@@ -12,6 +12,12 @@ final class TokenBreakdownTests: XCTestCase {
         XCTAssertEqual(t.billable, 150)
     }
 
+    func test_totalOnly_doesNotAffectBillable() {
+        let t = TokenBreakdown(input: 100, output: 50, cacheCreation: 10, cacheRead: 20, totalOnly: 999)
+        XCTAssertEqual(t.billable, 150)
+        XCTAssertEqual(t.observedTotal, 1_179)
+    }
+
     func testAdditionSumsAllFields() {
         let a = TokenBreakdown(input: 1, output: 2, cacheCreation: 3, cacheRead: 4)
         let b = TokenBreakdown(input: 10, output: 20, cacheCreation: 30, cacheRead: 40)
@@ -20,6 +26,12 @@ final class TokenBreakdownTests: XCTestCase {
         XCTAssertEqual(sum.output, 22)
         XCTAssertEqual(sum.cacheCreation, 33)
         XCTAssertEqual(sum.cacheRead, 44)
+    }
+
+    func test_addition_sumsTotalOnly() {
+        let a = TokenBreakdown(input: 10, output: 2, totalOnly: 100)
+        let b = TokenBreakdown(input: 5, output: 3, cacheRead: 7, totalOnly: 50)
+        XCTAssertEqual(a + b, TokenBreakdown(input: 15, output: 5, cacheRead: 7, totalOnly: 150))
     }
 
     func testDecodesFromUsageJSON() throws {
@@ -38,5 +50,12 @@ final class TokenBreakdownTests: XCTestCase {
         let decoded = try JSONDecoder().decode(TokenBreakdown.self, from: json)
         XCTAssertEqual(decoded.cacheCreation, 0)
         XCTAssertEqual(decoded.cacheRead, 0)
+    }
+
+    func test_decodeMissingTotalOnlyDefaultsToZero() throws {
+        let json = #"{"input_tokens":10,"output_tokens":2}"#.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(TokenBreakdown.self, from: json)
+        XCTAssertEqual(decoded, TokenBreakdown(input: 10, output: 2))
+        XCTAssertEqual(decoded.totalOnly, 0)
     }
 }

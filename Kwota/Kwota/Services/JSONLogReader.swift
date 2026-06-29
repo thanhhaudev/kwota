@@ -42,6 +42,18 @@ extension JSONLogReader {
 struct ReaderState: Codable, Equatable, Sendable {
     var entries: [String: Entry]
 
+    enum CodexTracePrecision: String, Codable, Equatable, Sendable {
+        case exact
+        case totalOnly
+    }
+
+    struct CodexTraceTurn: Codable, Equatable, Sendable {
+        var precision: CodexTracePrecision
+        var timestamp: Date
+        var model: String?
+        var tokens: TokenBreakdown
+    }
+
     struct Entry: Codable, Equatable, Sendable {
         var offset: UInt64
         var mtime: Date
@@ -61,14 +73,17 @@ struct ReaderState: Codable, Equatable, Sendable {
         /// these each read so they recover after a decoder fix, without blocking
         /// the valid rows after them. nil/empty for Claude/Codex.
         var failedIdx: [UInt64]?
+        var codexTraceTurns: [String: CodexTraceTurn]?
 
         init(offset: UInt64, mtime: Date, model: String? = nil,
-             codexTotal: CodexTotals? = nil, failedIdx: [UInt64]? = nil) {
+             codexTotal: CodexTotals? = nil, failedIdx: [UInt64]? = nil,
+             codexTraceTurns: [String: CodexTraceTurn]? = nil) {
             self.offset = offset
             self.mtime = mtime
             self.model = model
             self.codexTotal = codexTotal
             self.failedIdx = failedIdx
+            self.codexTraceTurns = codexTraceTurns
         }
     }
 

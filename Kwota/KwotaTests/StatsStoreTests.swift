@@ -94,6 +94,29 @@ final class StatsStoreTests: XCTestCase {
         XCTAssertEqual(store2.total(provider: .claude, sinceDay: nil), TokenBreakdown(input: 100))
     }
 
+    func test_totalOnlyIsPersistedButNotBillable() {
+        let dir = TempDirectory()
+        let url = dir.url.appendingPathComponent("stats-ledger.json")
+        let store = StatsStore(readers: [:], ledgerURL: url,
+                               clock: { self.date("2026-06-29T10:00:00.000Z") },
+                               calendar: StatsLedger.utcCalendarForKeys,
+                               persistDebounce: 0)
+        store.ingest([
+            UsageEvent(uuid: "fallback", sessionId: "s", timestamp: date("2026-06-29T01:00:00.000Z"),
+                       tokens: TokenBreakdown(totalOnly: 500), model: "gpt-5.5"),
+        ], provider: .codex)
+        store.flush()
+
+        let reloaded = StatsStore(readers: [:], ledgerURL: url,
+                                  calendar: StatsLedger.utcCalendarForKeys,
+                                  persistDebounce: 0)
+        let total = reloaded.total(provider: .codex, sinceDay: nil)
+        XCTAssertEqual(total.totalOnly, 500)
+        XCTAssertEqual(total.billable, 0)
+        XCTAssertEqual(total.observedTotal, 500)
+        XCTAssertEqual(reloaded.observedTotal(provider: .codex, sinceDay: nil), 500)
+    }
+
     func test_ingest_retainsOldDataWithoutPruning() {
         let store = StatsStore(reader: FakeJSONLogReader(),
                                ledgerURL: URL(fileURLWithPath: "/dev/null"),
