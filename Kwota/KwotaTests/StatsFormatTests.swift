@@ -86,11 +86,19 @@ final class StatsFormatTests: XCTestCase {
         XCTAssertEqual(map["claude-fable-5"], .pink)
     }
 
+    func test_colorMap_pinsOpusToBlue() {
+        // Opus must stay blue to match PerModelCard's "Opus" — and so it can
+        // never drift onto a pink-adjacent palette color next to Fable.
+        let map = StatsModelPalette.colorMap(for: ["claude-opus-4-8", "claude-fable-5", "gpt-5.5"])
+        XCTAssertEqual(map["claude-opus-4-8"], .blue)
+    }
+
     func test_colorMap_avoidsReservedColors() {
-        // Orange is reserved for Sonnet, pink for Fable, green for the
-        // daily-average rule; no other model may take any of them.
-        let map = StatsModelPalette.colorMap(for: ["claude-opus-4-8", "claude-haiku-4-5-20251001", "gpt-5.5"])
+        // Blue/orange/pink are reserved for pinned Opus/Sonnet/Fable, green
+        // for the daily-average rule; no other model may take any of them.
+        let map = StatsModelPalette.colorMap(for: ["claude-haiku-4-5-20251001", "gpt-5.5", "gemini-3.1-pro"])
         for (_, color) in map {
+            XCTAssertNotEqual(color, .blue)
             XCTAssertNotEqual(color, .orange)
             XCTAssertNotEqual(color, .pink)
             XCTAssertNotEqual(color, .green)
