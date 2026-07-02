@@ -1339,27 +1339,6 @@ private struct _ChartBody: View {
             }
         }
         .chartLegend(.hidden)
-        .chartOverlay { proxy in
-            // Reinforce the session reset boundary with a path-drawn solid
-            // line that spans the full chart frame — AxisTick stroke dash
-            // patterns aren't reliably honored in the label gutter.
-            GeometryReader { geo in
-                if let boundary = sessionResetBoundary,
-                   let plotFrame = proxy.plotFrame,
-                   let xInPlot = proxy.position(forX: boundary) {
-                    let frameRect = geo[plotFrame]
-                    let absX = frameRect.minX + xInPlot
-                    Path { path in
-                        path.move(to: CGPoint(x: absX, y: 0))
-                        path.addLine(to: CGPoint(x: absX, y: geo.size.height))
-                    }
-                    .stroke(
-                        Color.secondary.opacity(0.4),
-                        style: StrokeStyle(lineWidth: hairline)
-                    )
-                }
-            }
-        }
     }
 }
 
