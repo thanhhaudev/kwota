@@ -359,6 +359,83 @@ final class UsageTrendChartFooterTests: XCTestCase {
         XCTAssertLessThan(start(onHour), nowHour)
     }
 
+    // MARK: - Limbo (window expired, next session not started)
+
+    func testSessionEntriesLimboRendersDeadSessionAsGhostsBehindBoundary() {
+        // Between session expiry and the first prompt of the next session
+        // ("limbo"), resetsAt is stale (in the past) and effectiveFiveHour
+        // reads 0%. The dead session's bars must render as previous-session
+        // ghosts behind a boundary anchored at the expired reset — not as
+        // solid "current" bars contradicting the 0% footer.
+        //
+        // Hour-aligned UTC epochs; assumes a whole-hour-offset local zone
+        // (same assumption as the other fixed-epoch tests in this file).
+        let resetsAt = Date(timeIntervalSince1970: 1_704_808_800) // Tue 2024-01-09 14:00 UTC
+        let now = resetsAt.addingTimeInterval(34 * 60)            // 14:34 UTC
+        let snapshot = UsageSnapshot(
+            fiveHour: UsageBucket(utilization: 90, resetsAt: resetsAt),
+            sevenDay: UsageBucket(utilization: 30, resetsAt: now.addingTimeInterval(86_400))
+        )
+        // Dead-session ramp: 20/40/60/90 at 10:30, 11:30, 12:30, 13:30 UTC.
+        let history: [UsageHistoryEntry] = zip(
+            [20.0, 40.0, 60.0, 90.0], (1...4)
+        ).map { value, i in
+            UsageHistoryEntry(
+                at: resetsAt.addingTimeInterval(Double(i - 4) * 3600 - 1800),
+                fiveHour: value,
+                sevenDay: 30
+            )
+        }
+        let entries = UsageTrendChart.sessionEntries(
+            snapshot: snapshot,
+            history: history,
+            now: now
+        )
+        XCTAssertEqual(entries.count, 5)
+        XCTAssertEqual(
+            entries.prefix(4).map(\.isPreviousSession), [true, true, true, true],
+            "dead-session bars must be flagged previous-session (ghost)"
+        )
+        XCTAssertEqual(entries.prefix(4).map(\.value), [20, 40, 60, 90])
+        let last = entries.last
+        XCTAssertEqual(last?.isPreviousSession, false)
+        XCTAssertEqual(
+            last?.at, resetsAt,
+            "first current bar must anchor at the expired reset hour so the render layer draws the boundary there"
+        )
+        XCTAssertEqual(last?.value, 0, "not-yet-started session must read 0%")
+    }
+
+    func testSessionEntriesLimboDoesNotLeakPreResetSampleAcrossBoundary() {
+        // A sample recorded just before a mid-hour reset lands in the same
+        // hour bucket as the boundary. It belongs to the dead session and
+        // must not surface as a post-boundary "current" bar value.
+        let resetsAt = Date(timeIntervalSince1970: 1_704_806_520) // Tue 2024-01-09 13:22 UTC
+        let now = Date(timeIntervalSince1970: 1_704_810_840)      // 14:34 UTC
+        let snapshot = UsageSnapshot(
+            fiveHour: UsageBucket(utilization: 90, resetsAt: resetsAt),
+            sevenDay: UsageBucket(utilization: 30, resetsAt: now.addingTimeInterval(86_400))
+        )
+        let history: [UsageHistoryEntry] = [
+            // Pre-reset sample inside the boundary hour (13:05 UTC).
+            UsageHistoryEntry(at: resetsAt.addingTimeInterval(-17 * 60), fiveHour: 90, sevenDay: 30),
+            // Dead-session sample an hour earlier for ghost backfill.
+            UsageHistoryEntry(at: resetsAt.addingTimeInterval(-3600), fiveHour: 70, sevenDay: 30),
+        ]
+        let entries = UsageTrendChart.sessionEntries(
+            snapshot: snapshot,
+            history: history,
+            now: now
+        )
+        let current = entries.filter { !$0.isPreviousSession }
+        XCTAssertEqual(current.count, 2, "hours 13:00 and 14:00 are post-boundary")
+        XCTAssertEqual(
+            current.map(\.value), [0, 0],
+            "pre-reset sample in the boundary hour must not leak into current bars"
+        )
+        XCTAssertFalse(entries.filter(\.isPreviousSession).isEmpty, "dead session should backfill as ghosts")
+    }
+
     // MARK: - formatResetCountdown (single absolute format)
 
     /// Structural check: every non-stale countdown should carry an

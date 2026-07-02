@@ -636,7 +636,28 @@ struct UsageTrendChart {
         let cal = Calendar.current
         guard let nowHour = cal.dateInterval(of: .hour, for: now)?.start else { return [] }
 
-        let currentStart = Self.currentSessionStart(fiveHourResetsAt: fiveHourResetsAt, now: now)
+        let currentStart: Date
+        let currentHistory: [UsageHistoryEntry]
+        if let resetsAt = fiveHourResetsAt.map(Self.snapToMinute),
+           resetsAt < now,
+           let boundaryHour = cal.dateInterval(of: .hour, for: resetsAt)?.start {
+            // Limbo: the previous 5h window expired and the next session
+            // hasn't started server-side (sessions begin on the first
+            // prompt), so `resetsAt` is stale. `currentSessionStart` would
+            // clamp the stale anchor to `nowHour - 5h`, relabeling the dead
+            // session's bars as "current" — solid, no separator — while the
+            // footer already reads 0%. Anchor the boundary at the expired
+            // reset instead: bars before it backfill as previous-session
+            // ghosts, bars after it show the not-yet-started session.
+            // Pre-reset samples sharing the boundary hour belong to the
+            // dead session, so the current segment only sees post-reset
+            // history.
+            currentStart = Swift.max(boundaryHour, nowHour.addingTimeInterval(-5 * 3600))
+            currentHistory = history.filter { $0.at >= resetsAt }
+        } else {
+            currentStart = Self.currentSessionStart(fiveHourResetsAt: fiveHourResetsAt, now: now)
+            currentHistory = history
+        }
 
         // Cap at 5 — when `now.minute < resetsAt.minute`,
         // `currentSessionStart` lands on `nowHour - 5h` (resetsAt-5h rounds
@@ -644,7 +665,7 @@ struct UsageTrendChart {
         // chart's X-domain is locked to a 5-slot frame, so the 6th bleeds
         // past the left edge. Mirror of the cap in `appendingProjection()`.
         let currentBars = Array(Self.hourlyBars(
-            history: history,
+            history: currentHistory,
             from: currentStart,
             through: nowHour,
             seedingFrom: 0,
