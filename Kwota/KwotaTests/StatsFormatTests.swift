@@ -80,12 +80,19 @@ final class StatsFormatTests: XCTestCase {
         XCTAssertEqual(map["claude-sonnet-4-5"], .orange, "all sonnet versions share orange")
     }
 
+    func test_colorMap_pinsFableToPink() {
+        // Fable must stay pink to match PerModelCard's "Fable only".
+        let map = StatsModelPalette.colorMap(for: ["claude-fable-5", "claude-opus-4-8"])
+        XCTAssertEqual(map["claude-fable-5"], .pink)
+    }
+
     func test_colorMap_avoidsReservedColors() {
-        // Orange is reserved for Sonnet, green for the daily-average rule;
-        // no model may take either.
+        // Orange is reserved for Sonnet, pink for Fable, green for the
+        // daily-average rule; no other model may take any of them.
         let map = StatsModelPalette.colorMap(for: ["claude-opus-4-8", "claude-haiku-4-5-20251001", "gpt-5.5"])
         for (_, color) in map {
             XCTAssertNotEqual(color, .orange)
+            XCTAssertNotEqual(color, .pink)
             XCTAssertNotEqual(color, .green)
         }
     }

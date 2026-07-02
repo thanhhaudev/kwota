@@ -14,7 +14,8 @@ final class UsageSnapshotEffectiveBucketTests: XCTestCase {
         sevenDay: UsageBucket,
         opus: UsageBucket? = nil,
         sonnet: UsageBucket? = nil,
-        omelette: UsageBucket? = nil
+        omelette: UsageBucket? = nil,
+        fable: UsageBucket? = nil
     ) -> UsageSnapshot {
         UsageSnapshot(
             fiveHour: fiveHour,
@@ -22,6 +23,7 @@ final class UsageSnapshotEffectiveBucketTests: XCTestCase {
             sevenDayOpus: opus,
             sevenDaySonnet: sonnet,
             sevenDayOmelette: omelette,
+            sevenDayFable: fable,
             extra: nil,
             fetchedAt: now.addingTimeInterval(-3600)
         )
@@ -129,5 +131,26 @@ final class UsageSnapshotEffectiveBucketTests: XCTestCase {
         XCTAssertEqual(s.effectiveSevenDayOmelette(now: now), future)
         XCTAssertNil(s.effectiveSevenDayOpus(now: now))
         XCTAssertNil(s.effectiveSevenDaySonnet(now: now))
+    }
+
+    // MARK: - "Fable only" / sevenDayFable
+
+    func testEffectiveFableClampsToZeroWhenPast() {
+        let past = UsageBucket(utilization: 11, resetsAt: now.addingTimeInterval(-1))
+        let s = snapshot(
+            fiveHour: UsageBucket(utilization: 0, resetsAt: now.addingTimeInterval(3600)),
+            sevenDay: UsageBucket(utilization: 0, resetsAt: now.addingTimeInterval(86400)),
+            fable: past
+        )
+        XCTAssertEqual(s.effectiveSevenDayFable(now: now)?.utilization, 0)
+    }
+
+    func testEffectiveFableReturnsNilWhenSourceNil() {
+        let s = snapshot(
+            fiveHour: UsageBucket(utilization: 0, resetsAt: now.addingTimeInterval(3600)),
+            sevenDay: UsageBucket(utilization: 0, resetsAt: now.addingTimeInterval(86400)),
+            fable: nil
+        )
+        XCTAssertNil(s.effectiveSevenDayFable(now: now))
     }
 }

@@ -40,7 +40,8 @@ struct ClaudeUsageDetailView: View {
                         PerModelCard(
                             opus: effectiveOpus,
                             sonnet: effectiveSonnet,
-                            omelette: effectiveOmelette
+                            omelette: effectiveOmelette,
+                            fable: effectiveFable
                         )
                     }
                 }
@@ -64,10 +65,15 @@ struct ClaudeUsageDetailView: View {
         snapshot.effectiveSevenDayOmelette()
     }
 
+    private var effectiveFable: UsageBucket? {
+        snapshot.effectiveSevenDayFable()
+    }
+
     private var hasPerModelData: Bool {
         (effectiveOpus?.utilization != nil)
             || (effectiveSonnet?.utilization != nil)
             || (effectiveOmelette?.utilization != nil)
+            || (effectiveFable?.utilization != nil)
     }
 
     private var freeOverlay: some View {

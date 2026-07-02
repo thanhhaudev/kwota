@@ -103,6 +103,80 @@ final class ClaudeAPIClientTests: XCTestCase {
                      "explicit null for seven_day_opus must round-trip as nil")
     }
 
+    func testDecodeUsageReadsFableFromScopedWeeklyLimits() throws {
+        // Fixture mirrors the 2026-07 live response: every seven_day_* per-model
+        // key is null (the old "Sonnet only" source dried up) and the per-model
+        // quota moved into the new `limits` array as a weekly_scoped entry whose
+        // scope names the model ("Fable"). Asserts:
+        //   1. sevenDayFable is sourced from limits[kind=weekly_scoped, model=Fable]
+        //   2. non-scoped limits entries (session, weekly_all) are ignored
+        //   3. null seven_day_* siblings still decode to nil
+        let json = #"""
+        {
+          "five_hour":           {"utilization": 31, "resets_at": "2026-07-02T09:29:59.989898+00:00"},
+          "seven_day":           {"utilization": 13, "resets_at": "2026-07-03T22:59:59.989924+00:00"},
+          "seven_day_opus":       null,
+          "seven_day_sonnet":     null,
+          "seven_day_omelette":   null,
+          "tangelo":              null,
+          "limits": [
+            {"kind": "session",       "group": "session", "percent": 31, "severity": "normal",
+             "resets_at": "2026-07-02T09:29:59.989898+00:00", "scope": null, "is_active": true},
+            {"kind": "weekly_all",    "group": "weekly",  "percent": 13, "severity": "normal",
+             "resets_at": "2026-07-03T22:59:59.989924+00:00", "scope": null, "is_active": false},
+            {"kind": "weekly_scoped", "group": "weekly",  "percent": 11, "severity": "normal",
+             "resets_at": "2026-07-03T23:00:00.990218+00:00",
+             "scope": {"model": {"id": null, "display_name": "Fable"}, "surface": null},
+             "is_active": false}
+          ]
+        }
+        """#
+        let snapshot = try ClaudeAPIClient.decodeUsage(
+            data: Data(json.utf8),
+            now: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        XCTAssertEqual(snapshot.sevenDayFable?.utilization, 11)
+        XCTAssertNotNil(snapshot.sevenDayFable?.resetsAt)
+        XCTAssertNil(snapshot.sevenDaySonnet)
+        XCTAssertNil(snapshot.sevenDayOmelette)
+    }
+
+    func testDecodeUsageIgnoresScopedLimitsForOtherModels() throws {
+        // A weekly_scoped entry for some other model must not populate the
+        // Fable bucket — matching is on scope.model.display_name.
+        let json = #"""
+        {
+          "five_hour": {"utilization": 10, "resets_at": "2026-07-02T09:00:00Z"},
+          "seven_day": {"utilization": 20, "resets_at": "2026-07-03T22:00:00Z"},
+          "limits": [
+            {"kind": "weekly_scoped", "group": "weekly", "percent": 40,
+             "resets_at": "2026-07-03T23:00:00Z",
+             "scope": {"model": {"id": null, "display_name": "Opus"}, "surface": null}}
+          ]
+        }
+        """#
+        let snapshot = try ClaudeAPIClient.decodeUsage(
+            data: Data(json.utf8),
+            now: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        XCTAssertNil(snapshot.sevenDayFable)
+    }
+
+    func testUsageSnapshotRoundTripsFableThroughCachedEncoding() throws {
+        // Cached snapshots persist via UsageSnapshot's own Codable encode
+        // (profiles.json), which has no `limits` array — sevenDayFable must
+        // round-trip through its direct seven_day_fable key.
+        let original = UsageSnapshot(
+            fiveHour: UsageBucket(utilization: 31, resetsAt: Date(timeIntervalSince1970: 1_800_000_000)),
+            sevenDay: UsageBucket(utilization: 13, resetsAt: Date(timeIntervalSince1970: 1_800_100_000)),
+            sevenDayFable: UsageBucket(utilization: 11, resetsAt: Date(timeIntervalSince1970: 1_800_200_000)),
+            fetchedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(UsageSnapshot.self, from: data)
+        XCTAssertEqual(decoded.sevenDayFable?.utilization, 11)
+    }
+
     func testDecodeUsageThrowsOnMalformed() {
         XCTAssertThrowsError(try ClaudeAPIClient.decodeUsage(data: Data("oops".utf8), now: Date()))
     }

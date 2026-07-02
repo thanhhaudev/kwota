@@ -16,6 +16,16 @@ struct UsageSnapshot: Codable, Equatable {
     /// the intended graceful-degradation behavior. Re-map the CodingKey when
     /// the rotation lands.
     let sevenDayOmelette: UsageBucket?
+    /// "Fable only" weekly bucket. Unlike its siblings this has no top-level
+    /// `seven_day_fable` key in the API payload — since 2026-07 the per-model
+    /// quota ships inside the `limits` array as a `weekly_scoped` entry whose
+    /// `scope.model.display_name` is "Fable" (the older `seven_day_*` model
+    /// keys all went null at the same time). Decoding falls back to that
+    /// array; if the display name rotates, the field decodes to nil and the
+    /// row disappears — same graceful degradation as `sevenDayOmelette`.
+    /// Cached snapshots (profiles.json) round-trip through the direct
+    /// `seven_day_fable` key we encode ourselves.
+    let sevenDayFable: UsageBucket?
     let extra: ExtraUsage?
     var fetchedAt: Date
 
@@ -25,8 +35,15 @@ struct UsageSnapshot: Codable, Equatable {
         case sevenDayOpus = "seven_day_opus"
         case sevenDaySonnet = "seven_day_sonnet"
         case sevenDayOmelette = "seven_day_omelette"
+        case sevenDayFable = "seven_day_fable"
         case extra = "extra_usage"
         case fetchedAt
+    }
+
+    /// API-payload-only keys, kept out of `CodingKeys` so the auto-generated
+    /// `encode(to:)` (cached snapshots) never writes them.
+    private enum APIOnlyKeys: String, CodingKey {
+        case limits
     }
 
     init(
@@ -35,6 +52,7 @@ struct UsageSnapshot: Codable, Equatable {
         sevenDayOpus: UsageBucket? = nil,
         sevenDaySonnet: UsageBucket? = nil,
         sevenDayOmelette: UsageBucket? = nil,
+        sevenDayFable: UsageBucket? = nil,
         extra: ExtraUsage? = nil,
         fetchedAt: Date = .distantPast
     ) {
@@ -43,6 +61,7 @@ struct UsageSnapshot: Codable, Equatable {
         self.sevenDayOpus = sevenDayOpus
         self.sevenDaySonnet = sevenDaySonnet
         self.sevenDayOmelette = sevenDayOmelette
+        self.sevenDayFable = sevenDayFable
         self.extra = extra
         self.fetchedAt = fetchedAt
     }
@@ -56,6 +75,7 @@ struct UsageSnapshot: Codable, Equatable {
             sevenDayOpus: nil,
             sevenDaySonnet: nil,
             sevenDayOmelette: nil,
+            sevenDayFable: nil,
             extra: nil,
             fetchedAt: .distantPast
         )
@@ -68,10 +88,58 @@ struct UsageSnapshot: Codable, Equatable {
         self.sevenDayOpus = try c.decodeIfPresent(UsageBucket.self, forKey: .sevenDayOpus)
         self.sevenDaySonnet = try c.decodeIfPresent(UsageBucket.self, forKey: .sevenDaySonnet)
         self.sevenDayOmelette = try c.decodeIfPresent(UsageBucket.self, forKey: .sevenDayOmelette)
+        // Direct key first (cached snapshots), then the API's limits array.
+        self.sevenDayFable = try c.decodeIfPresent(UsageBucket.self, forKey: .sevenDayFable)
+            ?? Self.scopedWeeklyBucket(modelDisplayName: "Fable", from: decoder)
         self.extra = try c.decodeIfPresent(ExtraUsage.self, forKey: .extra)
         // API responses don't include fetchedAt (stamped by client after decode).
         // Cached snapshots persisted in profiles.json do — decode if present.
         self.fetchedAt = try c.decodeIfPresent(Date.self, forKey: .fetchedAt) ?? .distantPast
+    }
+
+    /// Minimal projection of one `limits[]` entry — every field optional so a
+    /// shape drift degrades to "no per-model row" instead of failing the
+    /// whole snapshot decode.
+    private struct ScopedLimit: Decodable {
+        let kind: String?
+        let percent: Double?
+        let resetsAt: Date?
+        let scope: Scope?
+
+        struct Scope: Decodable {
+            let model: Model?
+        }
+
+        struct Model: Decodable {
+            let displayName: String?
+
+            private enum CodingKeys: String, CodingKey {
+                case displayName = "display_name"
+            }
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case kind, percent, scope
+            case resetsAt = "resets_at"
+        }
+    }
+
+    /// Per-model weekly quota from the `limits` array: the first
+    /// `weekly_scoped` entry whose `scope.model.display_name` matches
+    /// (case-insensitive). All failures collapse to nil by design.
+    private static func scopedWeeklyBucket(
+        modelDisplayName: String,
+        from decoder: Decoder
+    ) -> UsageBucket? {
+        guard let c = try? decoder.container(keyedBy: APIOnlyKeys.self),
+              let limits = (try? c.decodeIfPresent([ScopedLimit].self, forKey: .limits)) ?? nil,
+              let entry = limits.first(where: {
+                  $0.kind == "weekly_scoped"
+                      && $0.scope?.model?.displayName?
+                          .caseInsensitiveCompare(modelDisplayName) == .orderedSame
+              })
+        else { return nil }
+        return UsageBucket(utilization: entry.percent, resetsAt: entry.resetsAt)
     }
 }
 
@@ -103,6 +171,10 @@ extension UsageSnapshot {
 
     func effectiveSevenDayOmelette(now: Date = Date()) -> UsageBucket? {
         sevenDayOmelette.map { Self.clamp($0, now: now) }
+    }
+
+    func effectiveSevenDayFable(now: Date = Date()) -> UsageBucket? {
+        sevenDayFable.map { Self.clamp($0, now: now) }
     }
 
     private static func clamp(_ bucket: UsageBucket, now: Date) -> UsageBucket {

@@ -20,10 +20,16 @@ struct PerModelCard: View {
     /// label diverges from field name on purpose; if the codename rotates, the
     /// decoder yields nil and the row vanishes. See `UsageSnapshot.sevenDayOmelette`.
     let omelette: UsageBucket?
+    /// "Fable only" — sourced from the API's `limits[]` weekly_scoped entry
+    /// (see `UsageSnapshot.sevenDayFable`). Pink matches the pinned family
+    /// color in `StatsModelPalette` so the model reads consistently across
+    /// the Usage and Stats tabs.
+    let fable: UsageBucket?
 
     private let opusColor: Color = .blue
     private let sonnetColor: Color = .orange
     private let omeletteColor: Color = .purple
+    private let fableColor: Color = .pink
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -32,6 +38,9 @@ struct PerModelCard: View {
             }
             if let sonnet {
                 row(label: "Sonnet only", value: sonnet.utilization, color: sonnetColor)
+            }
+            if let fable {
+                row(label: "Fable only", value: fable.utilization, color: fableColor)
             }
             if let omelette {
                 row(label: "Claude Design", value: omelette.utilization, color: omeletteColor)

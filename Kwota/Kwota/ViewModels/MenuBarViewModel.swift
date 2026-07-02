@@ -427,6 +427,7 @@ final class MenuBarViewModel {
             || snapshot.effectiveSevenDayOpus()?.utilization != nil
             || snapshot.effectiveSevenDaySonnet()?.utilization != nil
             || snapshot.effectiveSevenDayOmelette()?.utilization != nil
+            || snapshot.effectiveSevenDayFable()?.utilization != nil
             || (snapshot.extra?.isEnabled == true)
             
         return planSaysFree && !hasDisplayableData

@@ -10,20 +10,24 @@ import SwiftUI
 /// a view (`colorMap`), not per individual model, so every model on screen gets
 /// a distinct color instead of two unrelated models colliding on the same hash.
 enum StatsModelPalette {
-    /// Distinct colors for non-pinned models. Two colors are intentionally
-    /// absent: `.orange` is reserved for the Sonnet family (matching the weekly
-    /// `PerModelCard` "Sonnet only"), and `.green` is reserved for the chart's
-    /// daily-average rule — so no model bar is ever mistaken for the avg line.
+    /// Distinct colors for non-pinned models. Three colors are intentionally
+    /// absent: `.orange` and `.pink` are reserved for the pinned Sonnet and
+    /// Fable families (matching the weekly `PerModelCard` rows), and `.green`
+    /// is reserved for the chart's daily-average rule — so no model bar is
+    /// ever mistaken for the avg line.
     private static let palette: [Color] = [
-        .blue, .purple, .teal, .pink, .indigo, .red, .mint, .brown
+        .blue, .purple, .teal, .indigo, .red, .mint, .brown
     ]
 
     /// Families pinned to a fixed brand color that must match other surfaces.
-    /// Only Sonnet is pinned (weekly `PerModelCard` shows "Sonnet only" in
-    /// orange). Every other model — including Opus — draws a distinct color from
-    /// `palette` so families like "gpt"/"gemini" with many variants don't all
-    /// collapse onto one color.
-    private static let pinnedFamilyColor: [String: Color] = ["sonnet": .orange]
+    /// Sonnet and Fable are pinned (weekly `PerModelCard` shows "Sonnet only"
+    /// in orange and "Fable only" in pink). Every other model — including
+    /// Opus — draws a distinct color from `palette` so families like
+    /// "gpt"/"gemini" with many variants don't all collapse onto one color.
+    private static let pinnedFamilyColor: [String: Color] = [
+        "sonnet": .orange,
+        "fable": .pink,
+    ]
 
     /// A color for each model in `models`, distinct within the set. Pinned
     /// families keep their brand color; the rest draw from `palette` in a
