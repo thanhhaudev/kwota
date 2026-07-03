@@ -474,13 +474,21 @@ struct StatsTimeChart: View {
         }
     }
 
+    /// Fixed 12-hour formatter ("9 AM") shared by the hourly axis and hover
+    /// readout — deliberately NOT the system 12/24-hour setting: the app's UI
+    /// is English and the Screen Time-style AM/PM reads better in the popover.
+    /// One formatter for both call sites so they can never disagree.
+    static let hourLabelFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "h a"
+        return f
+    }()
+
     /// Label for the selected bucket: hourly → "3 PM"; daily → "Jun 13";
     /// weekly → "Jun 9 – 15"; monthly → "Jun 2026"; yearly → "2026".
     private func selectedLabel(for date: Date) -> String {
-        // Same FormatStyle as the axis (`AxisValueLabel(format: .dateTime.hour())`)
-        // so the hover readout follows the system 12/24-hour setting and can never
-        // disagree with the axis labels.
-        if mode == .hourly { return date.formatted(.dateTime.hour()) }
+        if mode == .hourly { return Self.hourLabelFormatter.string(from: date) }
         let f = DateFormatter()
         f.locale = .current
         switch granularity {
@@ -571,10 +579,15 @@ struct StatsTimeChart: View {
         }
         .chartXAxis {
             if mode == .hourly {
-                AxisMarks(values: .stride(by: .hour, count: 6)) { _ in
+                AxisMarks(values: .stride(by: .hour, count: 6)) { value in
                     AxisGridLine()
                     AxisTick()
-                    AxisValueLabel(format: .dateTime.hour())
+                    AxisValueLabel {
+                        if let d = value.as(Date.self) {
+                            Text(Self.hourLabelFormatter.string(from: d))
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
                 }
             } else if granularity == .day, isWeekScale {
                 // ≤8 days: single weekday letters, centered (too narrow to clip).
