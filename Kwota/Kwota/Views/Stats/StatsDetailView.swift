@@ -502,6 +502,33 @@ struct StatsTimeChart: View {
         }
     }
 
+    /// Evenly-strided x-axis tick dates for daily mode, capped at `maxLabels` so
+    /// labels never collide at popover width (`.automatic` treats desiredCount as
+    /// advisory and overflows). Ticks start at the domain's lower bound and step
+    /// by a whole number of granularity units. Day-tier strides above 4 round up
+    /// to a multiple of 7 so consecutive labels land on the same weekday.
+    static func xTicks(domain: ClosedRange<Date>,
+                       granularity: StatsGranularity,
+                       maxLabels: Int = 5,
+                       calendar: Calendar = .current) -> [Date] {
+        let unit = granularity.component
+        let span = calendar.dateComponents([unit], from: domain.lowerBound,
+                                           to: domain.upperBound).value(for: unit) ?? 0
+        guard span > 0, maxLabels > 0 else { return [domain.lowerBound] }
+        var step = max(1, Int((Double(span) / Double(maxLabels)).rounded(.up)))
+        if granularity == .day, step > 4 {
+            step += (7 - step % 7) % 7
+        }
+        var ticks: [Date] = []
+        var tick = domain.lowerBound
+        while tick < domain.upperBound, ticks.count < maxLabels {
+            ticks.append(tick)
+            guard let next = calendar.date(byAdding: unit, value: step, to: tick) else { break }
+            tick = next
+        }
+        return ticks
+    }
+
     private var chart: some View {
         Chart {
             ForEach(bars) { bar in
