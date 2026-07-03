@@ -30,11 +30,13 @@ final class StatsTimeChartAxisTests: XCTestCase {
                               maxLabels: maxLabels, calendar: cal)
     }
 
-    // 30 days: raw stride ⌈30/5⌉ = 6 > 4 → rounds up to 7. Five boundaries
-    // anchored at the domain end (Jul 1), all the same weekday.
+    // 30 days: raw stride ⌈30/5⌉ = 6 > 4 → rounds up to 7. Four boundaries
+    // anchored at the domain end (Jul 1), all the same weekday — the fifth
+    // (Jun 3) is only 2 days from the plot edge (< half a stride) and is
+    // dropped so its label can't truncate.
     func test_30DayWindow_dayTier_strideRoundsUpToWeek() {
         let t = ticks(date(2026, 6, 1), date(2026, 7, 1), .day)
-        XCTAssertEqual(t, [date(2026, 6, 3), date(2026, 6, 10), date(2026, 6, 17),
+        XCTAssertEqual(t, [date(2026, 6, 10), date(2026, 6, 17),
                            date(2026, 6, 24), date(2026, 7, 1)])
         let weekdays = Set(t.map { cal.component(.weekday, from: $0) })
         XCTAssertEqual(weekdays.count, 1)
@@ -49,13 +51,22 @@ final class StatsTimeChartAxisTests: XCTestCase {
                            date(2026, 6, 20), date(2026, 7, 4)])
     }
 
-    // 90 days (day tier's upper edge): ⌈90/5⌉ = 18 → rounds to 21 → 5
-    // boundaries ending at the domain end.
+    // 90 days (day tier's upper edge): ⌈90/5⌉ = 18 → rounds to 21 → 4
+    // boundaries ending at the domain end; the flooring remainder (Jan 7,
+    // 6 days from the edge, < half a stride) is dropped.
     func test_90DayWindow_dayTier_strideRoundsTo21() {
         let t = ticks(date(2026, 1, 1), date(2026, 4, 1), .day)
-        XCTAssertEqual(t.count, 5)
-        XCTAssertEqual(t[1], date(2026, 1, 28))
-        XCTAssertEqual(t.last, date(2026, 4, 1))
+        XCTAssertEqual(t, [date(2026, 1, 28), date(2026, 2, 18),
+                           date(2026, 3, 11), date(2026, 4, 1)])
+    }
+
+    // Regression for the live "0…" truncation: a 57-day domain leaves the
+    // oldest boundary (May 9) one day from the plot edge; it must be dropped,
+    // while May 23 (15 days in, more than half the 14-day stride) survives.
+    func test_flooringRemainder_dropsSliverBoundary() {
+        let t = ticks(date(2026, 5, 8), date(2026, 7, 4), .day)
+        XCTAssertEqual(t, [date(2026, 5, 23), date(2026, 6, 6),
+                           date(2026, 6, 20), date(2026, 7, 4)])
     }
 
     // 10 days: stride 2 stays as-is — no week rounding below the >4 threshold.

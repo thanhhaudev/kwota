@@ -540,12 +540,18 @@ struct StatsTimeChart: View {
         if granularity == .day, step > 4 {
             step += (7 - step % 7) % 7
         }
+        // A right-anchored label needs room on its left; the flooring remainder
+        // at the oldest edge can drop a boundary a sliver past the plot edge,
+        // truncating its label ("0…"). Keep a boundary only when at least half
+        // a stride separates it from the lower bound (~half a label slot of
+        // plot width). Count guard: dateComponents floors the span, which
+        // could otherwise admit one tick beyond the budget.
+        let halfStep = (step + 1) / 2
         var ticks: [Date] = []
         var tick = domain.upperBound
-        // Strictly > lowerBound: a boundary AT the lower bound would label a
-        // bucket outside the domain. Count guard: dateComponents floors the
-        // span, which could otherwise admit one tick beyond the budget.
-        while tick > domain.lowerBound, ticks.count < maxLabels {
+        while ticks.count < maxLabels,
+              let room = calendar.date(byAdding: unit, value: -halfStep, to: tick),
+              room >= domain.lowerBound {
             ticks.append(tick)
             guard let prev = calendar.date(byAdding: unit, value: -step, to: tick) else { break }
             tick = prev
