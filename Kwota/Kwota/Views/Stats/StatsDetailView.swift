@@ -470,9 +470,12 @@ struct StatsTimeChart: View {
     /// Label for the selected bucket: hourly → "3 PM"; daily → "Jun 13";
     /// weekly → "Jun 9 – 15"; monthly → "Jun 2026"; yearly → "2026".
     private func selectedLabel(for date: Date) -> String {
+        // Same FormatStyle as the axis (`AxisValueLabel(format: .dateTime.hour())`)
+        // so the hover readout follows the system 12/24-hour setting and can never
+        // disagree with the axis labels.
+        if mode == .hourly { return date.formatted(.dateTime.hour()) }
         let f = DateFormatter()
         f.locale = .current
-        if mode == .hourly { f.dateFormat = "h a"; return f.string(from: date) }
         switch granularity {
         case .day:
             f.dateFormat = "MMM d"; return f.string(from: date)
