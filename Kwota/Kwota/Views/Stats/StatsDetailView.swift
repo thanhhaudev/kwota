@@ -447,6 +447,13 @@ struct StatsTimeChart: View {
         return start...end
     }
 
+    /// Explicit tick dates for the daily (non-week-scale) x-axis — bounded by
+    /// xTicks' label budget so labels never truncate. Empty only in the
+    /// defensive nil-domain case (the chart doesn't render without points).
+    private var xTickValues: [Date] {
+        dayDomain.map { Self.xTicks(domain: $0, granularity: granularity) } ?? []
+    }
+
     @ViewBuilder
     private var readout: some View {
         HStack(spacing: 5) {
@@ -577,10 +584,11 @@ struct StatsTimeChart: View {
                     AxisValueLabel(format: .dateTime.weekday(.narrow))
                 }
             } else {
-                // Right-anchored so the trailing-most label grows LEFT and never
-                // overflows into the trailing value-axis gutter (no truncation),
-                // while the value axis stays on the right.
-                AxisMarks(values: .automatic(desiredCount: 6)) { value in
+                // Explicit bounded ticks (xTicks): .automatic treats desiredCount
+                // as advisory and overflows the popover width. Right-anchored so
+                // the trailing-most label grows LEFT into the plot, clear of the
+                // trailing value-axis gutter.
+                AxisMarks(values: xTickValues) { value in
                     AxisGridLine()
                     AxisTick()
                     AxisValueLabel(anchor: .topTrailing) {
