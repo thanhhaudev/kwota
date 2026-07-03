@@ -519,9 +519,12 @@ struct StatsTimeChart: View {
 
     /// Evenly-strided x-axis tick dates for daily mode, capped at `maxLabels` so
     /// labels never collide at popover width (`.automatic` treats desiredCount as
-    /// advisory and overflows). Ticks start at the domain's lower bound and step
-    /// by a whole number of granularity units. Day-tier strides above 4 round up
-    /// to a multiple of 7 so consecutive labels land on the same weekday.
+    /// advisory and overflows). Ticks are anchored at the NEWEST bucket
+    /// (`upperBound` minus one unit — the domain extends one unit past the last
+    /// bucket) and stride backward, so the latest data always carries a label
+    /// and any unlabeled remainder falls on the oldest edge instead of making
+    /// recent bars look unlabeled/stale. Day-tier strides above 4 round up to a
+    /// multiple of 7 so consecutive labels land on the same weekday.
     static func xTicks(domain: ClosedRange<Date>,
                        granularity: StatsGranularity,
                        maxLabels: Int = 5,
@@ -529,19 +532,23 @@ struct StatsTimeChart: View {
         let unit = granularity.component
         let span = calendar.dateComponents([unit], from: domain.lowerBound,
                                            to: domain.upperBound).value(for: unit) ?? 0
-        guard span > 0, maxLabels > 0 else { return [domain.lowerBound] }
+        guard span > 0, maxLabels > 0,
+              let newest = calendar.date(byAdding: unit, value: -1, to: domain.upperBound)
+        else { return [domain.lowerBound] }
         var step = max(1, Int((Double(span) / Double(maxLabels)).rounded(.up)))
         if granularity == .day, step > 4 {
             step += (7 - step % 7) % 7
         }
         var ticks: [Date] = []
-        var tick = domain.lowerBound
-        while tick < domain.upperBound, ticks.count < maxLabels {
+        var tick = newest
+        // count guard: dateComponents floors the span, which could otherwise
+        // admit one tick beyond the budget.
+        while tick >= domain.lowerBound, ticks.count < maxLabels {
             ticks.append(tick)
-            guard let next = calendar.date(byAdding: unit, value: step, to: tick) else { break }
-            tick = next
+            guard let prev = calendar.date(byAdding: unit, value: -step, to: tick) else { break }
+            tick = prev
         }
-        return ticks
+        return ticks.reversed()
     }
 
     private var chart: some View {
