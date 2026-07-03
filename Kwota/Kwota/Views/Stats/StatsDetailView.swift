@@ -519,11 +519,14 @@ struct StatsTimeChart: View {
 
     /// Evenly-strided x-axis tick dates for daily mode, capped at `maxLabels` so
     /// labels never collide at popover width (`.automatic` treats desiredCount as
-    /// advisory and overflows). Ticks are anchored at the NEWEST bucket
-    /// (`upperBound` minus one unit — the domain extends one unit past the last
-    /// bucket) and stride backward, so the latest data always carries a label
-    /// and any unlabeled remainder falls on the oldest edge instead of making
-    /// recent bars look unlabeled/stale. Day-tier strides above 4 round up to a
+    /// advisory and overflows). Ticks are bucket-END boundaries: labels are
+    /// right-anchored (they grow left, into the range they close), so each
+    /// gridline marks where a range ends and its label names that range's last
+    /// day (see the AxisValueLabel call site, which subtracts one day). Anchored
+    /// at `upperBound` — the domain extends one unit past the newest bucket, so
+    /// the final gridline sits at the plot's right edge labeled with the newest
+    /// data — and strides backward; when the budget truncates, the OLDEST edge
+    /// loses its label, never the newest. Day-tier strides above 4 round up to a
     /// multiple of 7 so consecutive labels land on the same weekday.
     static func xTicks(domain: ClosedRange<Date>,
                        granularity: StatsGranularity,
@@ -532,18 +535,17 @@ struct StatsTimeChart: View {
         let unit = granularity.component
         let span = calendar.dateComponents([unit], from: domain.lowerBound,
                                            to: domain.upperBound).value(for: unit) ?? 0
-        guard span > 0, maxLabels > 0,
-              let newest = calendar.date(byAdding: unit, value: -1, to: domain.upperBound)
-        else { return [domain.lowerBound] }
+        guard span > 0, maxLabels > 0 else { return [] }
         var step = max(1, Int((Double(span) / Double(maxLabels)).rounded(.up)))
         if granularity == .day, step > 4 {
             step += (7 - step % 7) % 7
         }
         var ticks: [Date] = []
-        var tick = newest
-        // count guard: dateComponents floors the span, which could otherwise
-        // admit one tick beyond the budget.
-        while tick >= domain.lowerBound, ticks.count < maxLabels {
+        var tick = domain.upperBound
+        // Strictly > lowerBound: a boundary AT the lower bound would label a
+        // bucket outside the domain. Count guard: dateComponents floors the
+        // span, which could otherwise admit one tick beyond the budget.
+        while tick > domain.lowerBound, ticks.count < maxLabels {
             ticks.append(tick)
             guard let prev = calendar.date(byAdding: unit, value: -step, to: tick) else { break }
             tick = prev
@@ -611,9 +613,15 @@ struct StatsTimeChart: View {
                 AxisMarks(values: xTickValues) { value in
                     AxisGridLine()
                     AxisTick()
+                    // Each tick is a bucket-END boundary; the label names the
+                    // day the range closes on (boundary − 1 day), and the
+                    // trailing anchor tucks it left of the gridline, over the
+                    // very range it describes — so a label never reads as
+                    // belonging to the bars on the far side of its line.
                     AxisValueLabel(anchor: .topTrailing) {
-                        if let d = value.as(Date.self) {
-                            Text(Self.xLabel(for: d, granularity: granularity))
+                        if let d = value.as(Date.self),
+                           let rangeEnd = Calendar.current.date(byAdding: .day, value: -1, to: d) {
+                            Text(Self.xLabel(for: rangeEnd, granularity: granularity))
                                 .font(.caption2).foregroundStyle(.secondary)
                         }
                     }
