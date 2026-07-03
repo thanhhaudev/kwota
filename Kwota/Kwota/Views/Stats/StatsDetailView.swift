@@ -447,11 +447,18 @@ struct StatsTimeChart: View {
         return start...end
     }
 
-    /// Explicit tick dates for the daily (non-week-scale) x-axis — bounded by
+    /// Explicit ticks for the daily (non-week-scale) x-axis — bounded by
     /// xTicks' label budget so labels never truncate. Empty only in the
     /// defensive nil-domain case (the chart doesn't render without points).
-    private var xTickValues: [Date] {
+    private var xTickValues: [XTick] {
         dayDomain.map { Self.xTicks(domain: $0, granularity: granularity) } ?? []
+    }
+
+    /// True when the tick at `date` carries a label. Matched by proximity, not
+    /// equality — Charts round-trips axis values through its internal plottable
+    /// representation, which may not preserve the Date bit-for-bit.
+    private func isLabeledTick(_ date: Date) -> Bool {
+        xTickValues.first { abs($0.date.timeIntervalSince(date)) < 1 }?.isLabeled ?? true
     }
 
     @ViewBuilder
@@ -517,21 +524,34 @@ struct StatsTimeChart: View {
         }
     }
 
-    /// Evenly-strided x-axis tick dates for daily mode, capped at `maxLabels` so
-    /// labels never collide at popover width (`.automatic` treats desiredCount as
-    /// advisory and overflows). Ticks are bucket-END boundaries: labels are
+    /// One x-axis tick for daily mode: a gridline position and whether it
+    /// carries a label. Gridlines stay on the even stride all the way to the
+    /// domain's oldest edge so the ranges between them look uniform; only the
+    /// LABEL is suppressed when its boundary sits too close to the plot edge
+    /// to render (`isLabeled == false`).
+    struct XTick: Equatable {
+        let date: Date
+        let isLabeled: Bool
+    }
+
+    /// Evenly-strided x-axis ticks for daily mode, capped at `maxLabels` so
+    /// labels never collide at popover width (`.automatic` treats desiredCount
+    /// as advisory and overflows). Ticks are bucket-END boundaries: labels are
     /// right-anchored (they grow left, into the range they close), so each
     /// gridline marks where a range ends and its label names that range's last
     /// day (see the AxisValueLabel call site, which subtracts one day). Anchored
     /// at `upperBound` — the domain extends one unit past the newest bucket, so
     /// the final gridline sits at the plot's right edge labeled with the newest
     /// data — and strides backward; when the budget truncates, the OLDEST edge
-    /// loses its label, never the newest. Day-tier strides above 4 round up to a
-    /// multiple of 7 so consecutive labels land on the same weekday.
+    /// loses its ticks, never the newest. Day-tier strides above 4 round up to a
+    /// multiple of 7 so consecutive labels land on the same weekday. The oldest
+    /// boundary keeps its gridline but drops its label when less than half a
+    /// stride separates it from the lower bound (the flooring remainder), where
+    /// a right-anchored label would truncate against the plot edge.
     static func xTicks(domain: ClosedRange<Date>,
                        granularity: StatsGranularity,
                        maxLabels: Int = 5,
-                       calendar: Calendar = .current) -> [Date] {
+                       calendar: Calendar = .current) -> [XTick] {
         let unit = granularity.component
         let span = calendar.dateComponents([unit], from: domain.lowerBound,
                                            to: domain.upperBound).value(for: unit) ?? 0
@@ -540,19 +560,15 @@ struct StatsTimeChart: View {
         if granularity == .day, step > 4 {
             step += (7 - step % 7) % 7
         }
-        // A right-anchored label needs room on its left; the flooring remainder
-        // at the oldest edge can drop a boundary a sliver past the plot edge,
-        // truncating its label ("0…"). Keep a boundary only when at least half
-        // a stride separates it from the lower bound (~half a label slot of
-        // plot width). Count guard: dateComponents floors the span, which
-        // could otherwise admit one tick beyond the budget.
+        // Count guard: dateComponents floors the span, which could otherwise
+        // admit one tick beyond the budget.
         let halfStep = (step + 1) / 2
-        var ticks: [Date] = []
+        var ticks: [XTick] = []
         var tick = domain.upperBound
-        while ticks.count < maxLabels,
-              let room = calendar.date(byAdding: unit, value: -halfStep, to: tick),
-              room >= domain.lowerBound {
-            ticks.append(tick)
+        while ticks.count < maxLabels, tick > domain.lowerBound {
+            let labeled = calendar.date(byAdding: unit, value: -halfStep, to: tick)
+                .map { $0 >= domain.lowerBound } ?? false
+            ticks.append(XTick(date: tick, isLabeled: labeled))
             guard let prev = calendar.date(byAdding: unit, value: -step, to: tick) else { break }
             tick = prev
         }
@@ -616,7 +632,7 @@ struct StatsTimeChart: View {
                 // as advisory and overflows the popover width. Right-anchored so
                 // the trailing-most label grows LEFT into the plot, clear of the
                 // trailing value-axis gutter.
-                AxisMarks(values: xTickValues) { value in
+                AxisMarks(values: xTickValues.map(\.date)) { value in
                     AxisGridLine()
                     AxisTick()
                     // Each tick is a bucket-END boundary; the label names the
@@ -624,8 +640,10 @@ struct StatsTimeChart: View {
                     // trailing anchor tucks it left of the gridline, over the
                     // very range it describes — so a label never reads as
                     // belonging to the bars on the far side of its line.
+                    // Unlabeled ticks (isLabeled == false) still draw their
+                    // gridline so the ranges stay visually uniform.
                     AxisValueLabel(anchor: .topTrailing) {
-                        if let d = value.as(Date.self),
+                        if let d = value.as(Date.self), isLabeledTick(d),
                            let rangeEnd = Calendar.current.date(byAdding: .day, value: -1, to: d) {
                             Text(Self.xLabel(for: rangeEnd, granularity: granularity))
                                 .font(.caption2).foregroundStyle(.secondary)
