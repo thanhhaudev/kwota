@@ -11,6 +11,7 @@
 import Foundation
 import AppKit
 import CryptoKit
+import Observation
 
 struct CodexIdentity: Equatable {
     let email: String?
@@ -46,22 +47,23 @@ protocol CodexAccountWatching: AnyObject {
 }
 
 @MainActor
+@Observable
 final class CodexAccountWatcher {
     typealias AuthRead = () -> CodexAuthReader.Auth?
 
-    var onChange: ((CodexIdentity?) -> Void)?
+    @ObservationIgnored var onChange: ((CodexIdentity?) -> Void)?
     private(set) var current: CodexIdentity?
 
-    private let authRead: AuthRead
-    private let fileEvents: AsyncStream<Void>
-    private let pollInterval: TimeInterval
-    private let debounce: TimeInterval
+    @ObservationIgnored private let authRead: AuthRead
+    @ObservationIgnored private let fileEvents: AsyncStream<Void>
+    @ObservationIgnored private let pollInterval: TimeInterval
+    @ObservationIgnored private let debounce: TimeInterval
 
-    private var listenTask: Task<Void, Never>?
-    private var pollTask: Task<Void, Never>?
-    private var pendingTask: Task<Void, Never>?
-    private var wakeObserver: NSObjectProtocol?
-    private var hasEmittedBaseline = false
+    @ObservationIgnored private var listenTask: Task<Void, Never>?
+    @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingTask: Task<Void, Never>?
+    @ObservationIgnored private var wakeObserver: NSObjectProtocol?
+    @ObservationIgnored private var hasEmittedBaseline = false
 
     init(
         authRead: @escaping AuthRead = { CodexAuthReader().read() },

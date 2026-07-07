@@ -14,6 +14,7 @@
 import Foundation
 import AppKit
 import CryptoKit
+import Observation
 
 struct AntigravityIdentity: Equatable {
     /// CSRF token from the language_server's argv. Fingerprinted so
@@ -48,6 +49,7 @@ protocol AntigravityProcessWatching: AnyObject {
 }
 
 @MainActor
+@Observable
 final class AntigravityProcessWatcher: AntigravityProcessWatching {
     /// Probe used to choose which of the candidate ports actually
     /// serves the Connect-RPC endpoint. The default heuristic returns
@@ -63,7 +65,7 @@ final class AntigravityProcessWatcher: AntigravityProcessWatching {
     /// is busy with SwiftUI work, hangs.
     typealias ProbeWorkingPort = @Sendable (Int, [Int], String) async -> Int?
 
-    var onChange: ((AntigravityIdentity?) -> Void)?
+    @ObservationIgnored var onChange: ((AntigravityIdentity?) -> Void)?
     private(set) var current: AntigravityIdentity?
     /// PID of the detected language_server, kept fresh independently of the
     /// identity equality gate so activity sources can sample the live process
@@ -76,23 +78,23 @@ final class AntigravityProcessWatcher: AntigravityProcessWatching {
     /// isolation from the class, and reading `self.detector` from the
     /// nonisolated `recompute()` requires a MainActor hop (which deadlocks
     /// when MainActor is busy with SwiftUI work).
-    nonisolated private let detector: AntigravityProcessDetector
-    nonisolated private let probeWorkingPort: ProbeWorkingPort
+    @ObservationIgnored nonisolated private let detector: AntigravityProcessDetector
+    @ObservationIgnored nonisolated private let probeWorkingPort: ProbeWorkingPort
 
     /// Open/closed poll cadence. Defaults to the closed interval (the popover
     /// starts closed at launch); `popoverDidOpen`/`popoverDidClose` flip it and
     /// respawn the loop. Same shared type `UsageRefreshCoordinator` uses.
-    private var cadence: PopoverPollingCadence
+    @ObservationIgnored private var cadence: PopoverPollingCadence
     /// The interval the poll loop currently sleeps for. Backed by `cadence`.
     var currentInterval: TimeInterval { cadence.currentInterval }
 
-    private var pollTask: Task<Void, Never>?
-    private var wakeObserver: NSObjectProtocol?
-    private var hasEmittedBaseline = false
+    @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var wakeObserver: NSObjectProtocol?
+    @ObservationIgnored private var hasEmittedBaseline = false
     /// Only the running watcher schedules poll loops. Set in `start()`, cleared
     /// in `stop()`, so a cadence flip before `start()` just records the interval
     /// without spawning a stray loop.
-    private var isStarted = false
+    @ObservationIgnored private var isStarted = false
 
     init(
         detector: AntigravityProcessDetector = AntigravityProcessDetector(),

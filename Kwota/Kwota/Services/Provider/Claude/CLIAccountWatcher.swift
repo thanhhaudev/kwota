@@ -6,6 +6,7 @@
 import Foundation
 import AppKit
 import CryptoKit
+import Observation
 
 /// Identity inferred from the Claude CLI's local state. `orgId` starts nil
 /// because oauthAccount in ~/.claude.json doesn't carry it; AutoProfileCoordinator
@@ -61,22 +62,23 @@ protocol CLIAccountWatching: AnyObject {
 }
 
 @MainActor
+@Observable
 final class CLIAccountWatcher {
     typealias OAuthRead = () -> OAuthAccountReader.Account?
 
-    var onChange: ((CLIIdentity?) -> Void)?
+    @ObservationIgnored var onChange: ((CLIIdentity?) -> Void)?
     private(set) var current: CLIIdentity?
 
-    private let oauthRead: OAuthRead
-    private let fileEvents: AsyncStream<Void>
-    private let keychainPollInterval: TimeInterval
-    private let debounce: TimeInterval
+    @ObservationIgnored private let oauthRead: OAuthRead
+    @ObservationIgnored private let fileEvents: AsyncStream<Void>
+    @ObservationIgnored private let keychainPollInterval: TimeInterval
+    @ObservationIgnored private let debounce: TimeInterval
 
-    private var listenTask: Task<Void, Never>?
-    private var pollTask: Task<Void, Never>?
-    private var pendingTask: Task<Void, Never>?
-    private var wakeObserver: NSObjectProtocol?
-    private var hasEmittedBaseline = false
+    @ObservationIgnored private var listenTask: Task<Void, Never>?
+    @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingTask: Task<Void, Never>?
+    @ObservationIgnored private var wakeObserver: NSObjectProtocol?
+    @ObservationIgnored private var hasEmittedBaseline = false
 
     init(
         oauthRead: @escaping OAuthRead = { OAuthAccountReader().read() },
