@@ -296,27 +296,42 @@ private struct StatsModelMiniCard: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
 
-            HStack(spacing: 0) {
-                miniMetric(icon: "arrow.down", value: tokens.input)
-                Spacer(minLength: 6)
-                miniMetric(icon: "arrow.up", value: tokens.output)
-                Spacer(minLength: 6)
-                miniMetric(icon: "bolt", value: tokens.cacheRead)
-            }
-            .help("Input \(StatsFormat.full(tokens.input))   ·   Output \(StatsFormat.full(tokens.output))   ·   Cache read \(StatsFormat.full(tokens.cacheRead))")
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Input \(tokens.input), Output \(tokens.output), Cache read \(tokens.cacheRead) tokens")
+            StatsMiniMetricRow(input: StatsFormat.tokens(tokens.input),
+                               output: StatsFormat.tokens(tokens.output),
+                               cache: StatsFormat.tokens(tokens.cacheRead))
+                .help("Input \(StatsFormat.full(tokens.input))   ·   Output \(StatsFormat.full(tokens.output))   ·   Cache read \(StatsFormat.full(tokens.cacheRead))")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Input \(tokens.input), Output \(tokens.output), Cache read \(tokens.cacheRead) tokens")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .kwotaCard()
     }
+}
 
-    private func miniMetric(icon: String, value: Int) -> some View {
+/// The `↓ ↑ ⚡` row shared by both mini-cards, so their geometry cannot drift.
+/// Values arrive pre-formatted: the headless card has no breakdown to show and
+/// passes the app's "no value" placeholder instead.
+private struct StatsMiniMetricRow: View {
+    let input: String
+    let output: String
+    let cache: String
+
+    var body: some View {
+        HStack(spacing: 0) {
+            metric(icon: "arrow.down", text: input)
+            Spacer(minLength: 6)
+            metric(icon: "arrow.up", text: output)
+            Spacer(minLength: 6)
+            metric(icon: "bolt", text: cache)
+        }
+    }
+
+    private func metric(icon: String, text: String) -> some View {
         HStack(spacing: 2) {
             Image(systemName: icon)
                 .font(.system(size: 8, weight: .semibold))
                 .foregroundStyle(.secondary)
-            Text(StatsFormat.tokens(value))
+            Text(text)
                 .font(.caption2).foregroundStyle(.secondary)
                 .monospacedDigit()
                 .lineLimit(1).minimumScaleFactor(0.6)
@@ -324,36 +339,68 @@ private struct StatsModelMiniCard: View {
     }
 }
 
-/// Grid card for the chart's estimated band. It is that band's color key, so it
-/// carries the same muted fill — and it deliberately has no `In / Out / Cache`
-/// row: headless sessions report a running total and nothing else.
+/// Grid card for the chart's estimated band, and that band's color key.
+///
+/// Deliberately the SAME shape as a model card — dot, name, figure, `↓ ↑ ⚡` row
+/// — because it belongs to the same grid. It differs only where the data does:
+/// a muted dot matching the band, and the app's `—` placeholder in place of a
+/// breakdown that does not exist. Set beside a model card, that reads on sight.
 private struct StatsHeadlessMiniCard: View {
     let tokens: Int
 
+    @State private var showingInfo = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 Circle()
                     .fill(Color.secondary)
                     .opacity(0.55)          // matches the band's own opacity
                     .frame(width: 7, height: 7)
+                    .padding(.trailing, 2)
                 Text(StatsTimeChart.headlessLabel)
                     .font(.system(size: 12, weight: .semibold))
                     .lineLimit(1)
                     .truncationMode(.tail)
+                // Click, not hover: `.help` waits out the system tooltip delay,
+                // and the caveat is the whole point of the card. Same
+                // Button + popover idiom as `SectionHeader`'s info affordance.
+                Button {
+                    showingInfo.toggle()
+                } label: {
+                    Image(systemName: showingInfo ? "info.circle.fill" : "info.circle")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("What \(StatsTimeChart.headlessLabel) means")
+                .popover(isPresented: $showingInfo, arrowEdge: .top) {
+                    Text(StatsTimeChart.headlessExplanation)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(12)
+                        .frame(maxWidth: 280, alignment: .leading)
+                }
+                Spacer(minLength: 0)
             }
+            // "~" carries the caveat on the figure itself, so the number is never
+            // quoted as if it were measured.
             Text("~\(StatsFormat.tokens(tokens))")
                 .font(.system(size: 16, weight: .semibold))
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
 
-            Text("plugin sessions · no breakdown")
-                .font(.caption2).foregroundStyle(.secondary)
-                .lineLimit(1).minimumScaleFactor(0.6)
+            StatsMiniMetricRow(input: ProfileDetailFormatter.placeholder,
+                               output: ProfileDetailFormatter.placeholder,
+                               cache: ProfileDetailFormatter.placeholder)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .help("\(StatsFormat.full(tokens)) tokens (estimated) from sessions run outside the TUI, via the plugin/app-server. Codex reports only a running total for those, so there is no input/output/cache split.")
+        // No card-level `.help`: the ⓘ owns the explanation, and a second
+        // hover-delayed copy of it over the whole card would just get in the way.
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Headless, about \(tokens) tokens, estimated. No input, output or cache breakdown available.")
         .kwotaCard()
     }
 }
@@ -403,12 +450,18 @@ struct StatsTimeChart: View {
         var value: Int { billable + headless }
     }
 
-    /// Legend/card name for the synthetic band carrying headless sessions —
-    /// runs outside the TUI (via the plugin/app-server) that leave no rollout,
-    /// so Codex reports only a running total, never the input/output/cache
-    /// split. Still "(est.)": it is a context-size proxy, not the figure Codex
-    /// itself bills, and it comes with no breakdown.
-    static let headlessLabel = "Headless (est.)"
+    /// Display name for the synthetic band carrying headless sessions — and the
+    /// chart's series name for them. Kept bare: the estimate is signalled by the
+    /// card's ⓘ (see `headlessExplanation`), the "~" on the figure, and the
+    /// dashed breakdown, not by a suffix cluttering every label.
+    static let headlessLabel = "Headless"
+
+    /// The ⓘ tooltip. This is where the estimate is spelled out, so it has to
+    /// say so plainly — nothing else on the card carries the caveat in words.
+    static let headlessExplanation = """
+        Estimated. Sessions run outside the TUI — via the plugin or app-server — leave no rollout, \
+        so Codex reports only a running token total for them and never the input/output/cache split.
+        """
 
     /// Σ billable (`input + output`) across a bucket's models.
     static func billableTotal(_ byModel: [String: TokenBreakdown]) -> Int {

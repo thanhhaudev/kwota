@@ -89,9 +89,15 @@ final class StatsTimeChartHeadlessTests: XCTestCase {
                         .filter(\.isHeadless).count, 0)
     }
 
-    func test_headlessLabel_marksEstimate() {
-        // The band must read as an estimate, not a measured model.
-        XCTAssertTrue(StatsTimeChart.headlessLabel.contains("est."))
+    /// The label is bare ("Headless"), so the ⓘ tooltip is the ONLY place the
+    /// caveat is spelled out. It must actually spell it out — say it is an
+    /// estimate, and say the breakdown does not exist.
+    func test_headlessExplanation_statesTheCaveat() {
+        let text = StatsTimeChart.headlessExplanation.lowercased()
+        XCTAssertTrue(text.contains("estimat"))
+        XCTAssertTrue(text.contains("breakdown") || text.contains("input/output"))
+        // The name itself stays clean — no "(est.)" suffix cluttering the card.
+        XCTAssertFalse(StatsTimeChart.headlessLabel.contains("est."))
     }
 
     // MARK: BY MODEL grid
