@@ -310,6 +310,44 @@ final class CodexTraceReaderTests: XCTestCase {
         ])
     }
 
+    /// The retraction of a total-only estimate must be booked against the bucket
+    /// it was CREDITED to, not the one the exact row happened to be read in. The
+    /// two differ whenever the turn straddles an hour/day boundary or the exact
+    /// row lands on a later poll — and a retraction stamped with the exact row's
+    /// time would leave the original hour holding a positive total-only balance:
+    /// a phantom "Headless (est.)" bar for a turn now counted as billable.
+    func test_exactReplacement_retractsInTheOriginalBucket() {
+        let laterTs = ts + 7_200   // two hours on — a different hourly bucket
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: ts, threadId: "tSample", processUUID: "pid:6",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 80, turnId: "turn1"),
+                  target: "codex_core::session::turn"),
+        ])
+        let reader = CodexTraceReader(codexHome: home)
+        XCTAssertEqual(reader.read().first?.timestamp,
+                       Date(timeIntervalSince1970: TimeInterval(ts)))
+
+        CodexTraceFixture.writeDB(at: home.appendingPathComponent("logs_2.sqlite"), rows: [
+            .init(id: 1, ts: ts, threadId: "tSample", processUUID: "pid:6",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 80, turnId: "turn1"),
+                  target: "codex_core::session::turn"),
+            .init(id: 2, ts: laterTs, threadId: "tSample", processUUID: "pid:6",
+                  body: CodexTraceFixture.responseCompletedBody(model: "gpt-5.5", input: 90, cached: 70, output: 6),
+                  target: "log"),
+        ])
+
+        let events = reader.read()
+        XCTAssertEqual(events.map(\.tokens), [
+            TokenBreakdown(totalOnly: -80),
+            TokenBreakdown(input: 20, output: 6, cacheRead: 70),
+        ])
+        // The retraction lands on the ORIGINAL observation's clock, cancelling
+        // the estimate exactly where it was booked…
+        XCTAssertEqual(events[0].timestamp, Date(timeIntervalSince1970: TimeInterval(ts)))
+        // …while the exact usage is credited where it actually happened.
+        XCTAssertEqual(events[1].timestamp, Date(timeIntervalSince1970: TimeInterval(laterTs)))
+    }
+
     func test_stateRestore_preservesCodexTraceTurnState() {
         let turn = ReaderState.CodexTraceTurn(
             precision: .totalOnly,

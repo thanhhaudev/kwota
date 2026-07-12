@@ -419,7 +419,18 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
                 lastLineLock.withLock { $0 = "\(obs.sessionId)@\(obs.key)" }
             case (.totalOnly, .exact):
                 if let previous {
-                    emitted.append(Self.event(from: obs, tokens: TokenBreakdown(totalOnly: -previous.tokens.totalOnly)))
+                    // Retract the estimate in the bucket it was BOOKED IN, not
+                    // the one the exact row happened to be read in. The two can
+                    // differ (the turn straddles an hour/day boundary, or the
+                    // exact row lands on a later poll); crediting the retraction
+                    // to `obs.timestamp` would leave the original hour/day
+                    // holding a positive total-only balance — a phantom
+                    // "Headless (est.)" bar for a turn now counted as billable.
+                    emitted.append(Self.event(
+                        from: obs,
+                        tokens: TokenBreakdown(totalOnly: -previous.tokens.totalOnly),
+                        at: previous.timestamp,
+                        model: previous.model))
                 }
                 emitted.append(Self.event(from: obs, tokens: obs.tokens))
                 state[obs.key] = ReaderState.CodexTraceTurn(
@@ -435,13 +446,17 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
         traceTurns[db] = state
     }
 
-    private static func event(from obs: TraceObservation, tokens: TokenBreakdown) -> UsageEvent {
+    /// `at`/`model` override the observation's own stamp — used by the
+    /// total-only retraction, which must be booked against the ORIGINAL
+    /// observation's bucket, not the exact row's.
+    private static func event(from obs: TraceObservation, tokens: TokenBreakdown,
+                              at timestamp: Date? = nil, model: String? = nil) -> UsageEvent {
         UsageEvent(
             uuid: "\(obs.key)#\(tokens.input)#\(tokens.output)#\(tokens.cacheRead)#\(tokens.totalOnly)",
             sessionId: obs.sessionId,
-            timestamp: obs.timestamp,
+            timestamp: timestamp ?? obs.timestamp,
             tokens: tokens,
-            model: obs.model
+            model: model ?? obs.model
         )
     }
 

@@ -40,16 +40,47 @@ struct StatsDetailView: View {
 
     private var sinceDay: String? { store.sinceDayKey(daysAgo: range.daysAgo) }
 
-    private var modelRows: [(model: String, tokens: TokenBreakdown)] {
-        // Today is derived from the LOCAL hourly rollup so the per-model cards
-        // match the by-hour chart and the viewer's own clock. Wider ranges read
-        // the UTC daily ledger.
-        let byModel = range == .today
+    /// Today is derived from the LOCAL hourly rollup so the per-model cards
+    /// match the by-hour chart and the viewer's own clock. Wider ranges read
+    /// the UTC daily ledger.
+    private var rangeByModel: [String: TokenBreakdown] {
+        range == .today
             ? hourlyTotalsByModel
             : store.totalsByModel(provider: provider, sinceDay: sinceDay)
-        return byModel
-            .map { (model: $0.key, tokens: $0.value) }
-            .sorted { $0.tokens.billable > $1.tokens.billable }
+    }
+
+    /// The SAME predicate the chart applies to a bucket, applied to the whole
+    /// range. Sharing one function is the point: classifying independently here
+    /// is what let the grid label a lone total-only model "headless" inside a
+    /// range the chart was rendering as measured.
+    private var rangeIsHeadless: Bool { StatsTimeChart.isHeadlessOnly(rangeByModel) }
+
+    private var modelRows: [(model: String, tokens: TokenBreakdown)] {
+        Self.modelRows(from: rangeByModel)
+    }
+
+    /// Rows for the BY MODEL grid.
+    ///
+    /// All-headless range → every card shows its total-only estimate; the grid
+    /// is the only numeric surface there, so it has to carry the figure.
+    ///
+    /// Mixed range → the chart ignores total-only tokens in any bucket that has
+    /// billable, so a headless card would show a number the chart never plots,
+    /// and one that looks addable to the measured totals. Those tokens belong to
+    /// the chart's headless band (keyed by its caption), not to a model card —
+    /// so drop the row rather than print a misleading `0`.
+    static func modelRows(from byModel: [String: TokenBreakdown])
+        -> [(model: String, tokens: TokenBreakdown)] {
+        let rows = byModel.map { (model: $0.key, tokens: $0.value) }
+        // Ties broken by model id so the order is deterministic across launches
+        // (`byModel` is a Dictionary) — billable is 0 for every row in an
+        // all-headless range, which would otherwise make the sort arbitrary.
+        if StatsTimeChart.isHeadlessOnly(byModel) {
+            return rows.sorted { ($0.tokens.totalOnly, $1.model) > ($1.tokens.totalOnly, $0.model) }
+        }
+        return rows
+            .filter { !($0.tokens.billable == 0 && $0.tokens.totalOnly > 0) }
+            .sorted { ($0.tokens.billable, $1.model) > ($1.tokens.billable, $0.model) }
     }
 
     /// Distinct color per model, shared by the chart and the per-model cards so
@@ -141,7 +172,8 @@ struct StatsDetailView: View {
             LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 8) {
                 ForEach(modelRows, id: \.model) { row in
                     StatsModelMiniCard(model: row.model, tokens: row.tokens,
-                                       color: modelColors[row.model] ?? .gray)
+                                       color: modelColors[row.model] ?? .gray,
+                                       isHeadless: rangeIsHeadless)
                 }
             }
         }
@@ -238,10 +270,13 @@ private struct StatsModelMiniCard: View {
     let model: String
     let tokens: TokenBreakdown
     let color: Color
+    /// Decided by the caller over the whole RANGE, never per-model: the chart
+    /// classifies a bucket as headless only when it has no billable at all, and
+    /// the grid must not contradict it by labelling a lone total-only model as
+    /// headless inside a range the chart renders as measured.
+    let isHeadless: Bool
 
-    /// This model's tokens are total-only (headless session): no billable
-    /// split, so show the estimate figure and label rather than three zeros.
-    private var isHeadlessOnly: Bool { tokens.billable == 0 && tokens.totalOnly > 0 }
+    private var isHeadlessOnly: Bool { isHeadless && tokens.totalOnly > 0 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {

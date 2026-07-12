@@ -92,4 +92,55 @@ final class StatsTimeChartHeadlessTests: XCTestCase {
         // don't sum it against billable bars.
         XCTAssertTrue(StatsTimeChart.headlessLabel.contains("est."))
     }
+
+    // MARK: BY MODEL grid must never contradict the chart
+
+    /// The grid classified per-MODEL while the chart classifies per-BUCKET, so a
+    /// model carrying only total-only tokens inside an otherwise-measured range
+    /// got a "headless (est.)" card for tokens the chart deliberately drops —
+    /// a second number that looked addable to the measured totals.
+    func test_mixedRange_totalOnlyModel_getsNoCard() {
+        let byModel = [
+            "gpt-5.5": tb(input: 9_000_000, output: 900_000),
+            "codex-auto-review": tb(totalOnly: 167_348),   // no billable
+        ]
+        XCTAssertFalse(StatsTimeChart.isHeadlessOnly(byModel))   // chart: measured range
+        let rows = StatsDetailView.modelRows(from: byModel)
+        XCTAssertEqual(rows.map(\.model), ["gpt-5.5"])
+    }
+
+    func test_allHeadlessRange_everyCardShowsItsEstimate() {
+        let byModel = [
+            "gpt-5.5": tb(totalOnly: 782_889),
+            "gpt-5.4": tb(totalOnly: 79_709),
+        ]
+        XCTAssertTrue(StatsTimeChart.isHeadlessOnly(byModel))
+        let rows = StatsDetailView.modelRows(from: byModel)
+        // Ordered by the figure actually shown (billable is 0 for all of them).
+        XCTAssertEqual(rows.map(\.model), ["gpt-5.5", "gpt-5.4"])
+        XCTAssertEqual(rows.map(\.tokens.totalOnly), [782_889, 79_709])
+    }
+
+    func test_measuredRange_zeroBillableCacheOnlyModel_stillGetsCard() {
+        // Only total-only rows are dropped. A cache-read-only model has no
+        // total-only tokens, so it keeps its (pre-existing) card.
+        let byModel = [
+            "gpt-5.5": tb(input: 100, output: 10),
+            "gpt-5.4": tb(cacheRead: 50_000),
+        ]
+        let rows = StatsDetailView.modelRows(from: byModel)
+        XCTAssertEqual(Set(rows.map(\.model)), ["gpt-5.5", "gpt-5.4"])
+    }
+
+    func test_modelRows_orderIsDeterministic() {
+        // `byModel` is a Dictionary; equal sort keys must not shuffle per launch.
+        let byModel = [
+            "b-model": tb(input: 50, output: 0),
+            "a-model": tb(input: 50, output: 0),
+        ]
+        let first = StatsDetailView.modelRows(from: byModel).map(\.model)
+        for _ in 0..<20 {
+            XCTAssertEqual(StatsDetailView.modelRows(from: byModel).map(\.model), first)
+        }
+    }
 }
