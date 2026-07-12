@@ -364,6 +364,11 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
         if let turnId = correlateTurnID(for: row, rows: rows) {
             key = "\(threadId)#\(turnId)"
         } else {
+            // F-002: this fallback key can't match the total-only estimate's
+            // `threadId#turnId`, so `reconcile` never reaches the retraction arm
+            // and the turn is booked twice — once estimated, once exact. Latent
+            // only because codex 0.143.0 emits no exact usage rows at all; re-derive
+            // from live data before fixing (docs/findings/F-002-*.md).
             key = "\(threadId)#exact#\(row.id)"
         }
         return TraceObservation(
