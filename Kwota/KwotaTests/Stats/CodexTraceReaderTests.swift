@@ -348,6 +348,58 @@ final class CodexTraceReaderTests: XCTestCase {
         XCTAssertEqual(events[1].timestamp, Date(timeIntervalSince1970: TimeInterval(laterTs)))
     }
 
+    /// `total_usage_tokens` is `active_context_tokens` — the size of the WHOLE
+    /// context, cumulative across a thread's turns. Booking each turn's raw
+    /// figure would re-count every earlier turn's context (turn 2's context
+    /// contains turn 1's), inflating the estimate n-fold on a multi-turn thread.
+    /// Only the growth is new consumption.
+    func test_multiTurnThread_booksOnlyTheContextGrowth() {
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: ts, threadId: "tMulti", processUUID: "pid:9",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 10_000, turnId: "turn1"),
+                  target: "codex_core::session::turn"),
+            .init(id: 2, ts: ts + 60, threadId: "tMulti", processUUID: "pid:9",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 25_000, turnId: "turn2"),
+                  target: "codex_core::session::turn"),
+            .init(id: 3, ts: ts + 120, threadId: "tMulti", processUUID: "pid:9",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 40_000, turnId: "turn3"),
+                  target: "codex_core::session::turn"),
+        ])
+        let events = CodexTraceReader(codexHome: home).read()
+        // Growth per turn — NOT 10k + 25k + 40k = 75k.
+        XCTAssertEqual(events.map(\.tokens.totalOnly), [10_000, 15_000, 15_000])
+        XCTAssertEqual(events.reduce(0) { $0 + $1.tokens.totalOnly }, 40_000)
+    }
+
+    /// Separate threads have separate contexts — one must not baseline the other.
+    func test_separateThreads_doNotShareABaseline() {
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: ts, threadId: "tA", processUUID: "pid:1",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 30_000, turnId: "turn1"),
+                  target: "codex_core::session::turn"),
+            .init(id: 2, ts: ts, threadId: "tB", processUUID: "pid:2",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 20_000, turnId: "turn1"),
+                  target: "codex_core::session::turn"),
+        ])
+        let events = CodexTraceReader(codexHome: home).read()
+        XCTAssertEqual(events.reduce(0) { $0 + $1.tokens.totalOnly }, 50_000)
+    }
+
+    /// Compaction shrinks the context window. That is not new consumption, and it
+    /// must not book a negative estimate either.
+    func test_contextShrink_booksNothing() {
+        home = CodexTraceFixture.makeHome(rows: [
+            .init(id: 1, ts: ts, threadId: "tShrink", processUUID: "pid:7",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 50_000, turnId: "turn1"),
+                  target: "codex_core::session::turn"),
+            .init(id: 2, ts: ts + 60, threadId: "tShrink", processUUID: "pid:7",
+                  body: CodexTraceFixture.postSamplingBody(model: "gpt-5.5", total: 12_000, turnId: "turn2"),
+                  target: "codex_core::session::turn"),
+        ])
+        let events = CodexTraceReader(codexHome: home).read()
+        XCTAssertEqual(events.map(\.tokens.totalOnly), [50_000])
+    }
+
     func test_stateRestore_preservesCodexTraceTurnState() {
         let turn = ReaderState.CodexTraceTurn(
             precision: .totalOnly,

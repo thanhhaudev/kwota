@@ -115,6 +115,25 @@ final class StatsTimeChartHeadlessTests: XCTestCase {
         XCTAssertEqual(StatsTimeChart.headlessTotal(byModel), 782_889)
     }
 
+    /// Emptiness must not be decided from `modelRows` alone: a range spent
+    /// entirely in plugin sessions has NO measured rows, and gating on that sent
+    /// the chart to its "no data" skeleton while sitting on real data — the very
+    /// complaint this feature exists to fix.
+    func test_allPluginRange_isNotEmpty() {
+        let byModel = ["gpt-5.5": tb(totalOnly: 782_889)]
+        XCTAssertTrue(StatsDetailView.modelRows(from: byModel).isEmpty)   // no measured rows…
+        XCTAssertFalse(StatsDetailView.rangeIsEmpty(byModel))             // …but NOT empty
+    }
+
+    func test_genuinelyEmptyRange_isEmpty() {
+        XCTAssertTrue(StatsDetailView.rangeIsEmpty([:]))
+        XCTAssertTrue(StatsDetailView.rangeIsEmpty(["gpt-5.5": .zero]))
+    }
+
+    func test_measuredRange_isNotEmpty() {
+        XCTAssertFalse(StatsDetailView.rangeIsEmpty(["gpt-5.5": tb(input: 1, output: 1)]))
+    }
+
     func test_modelRows_cacheReadOnlyModel_keepsItsCard() {
         // Only total-only rows move to the headless card. A cache-read-only
         // model has none, so it keeps its (pre-existing) card.

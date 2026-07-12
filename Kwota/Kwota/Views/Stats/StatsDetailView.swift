@@ -57,6 +57,16 @@ struct StatsDetailView: View {
     /// chart stacks as its headless band, so the card is that band's color key.
     private var headlessTotal: Int { StatsTimeChart.headlessTotal(rangeByModel) }
 
+    private var rangeIsEmpty: Bool { Self.rangeIsEmpty(rangeByModel) }
+
+    /// Nothing to show: no measured model rows AND no estimate. One function, so
+    /// the chart and the grid cannot disagree about emptiness — they already did
+    /// once, and a range spent entirely in plugin sessions has no model rows at
+    /// all, which sent the chart to its "no data" skeleton on top of real data.
+    static func rangeIsEmpty(_ byModel: [String: TokenBreakdown]) -> Bool {
+        modelRows(from: byModel).isEmpty && StatsTimeChart.headlessTotal(byModel) == 0
+    }
+
     /// Measured rows for the BY MODEL grid: one card per model that has billable
     /// tokens. Total-only tokens are NOT per-model here — they're aggregated into
     /// the single "Headless (est.)" card, mirroring the chart's single band. So a
@@ -69,7 +79,11 @@ struct StatsDetailView: View {
         -> [(model: String, tokens: TokenBreakdown)] {
         byModel
             .map { (model: $0.key, tokens: $0.value) }
-            .filter { !($0.tokens.billable == 0 && $0.tokens.totalOnly > 0) }
+            .filter { row in
+                guard row.tokens != .zero else { return false }   // nothing to show at all
+                // Total-only tokens live on the headless card, not per model.
+                return !(row.tokens.billable == 0 && row.tokens.totalOnly > 0)
+            }
             .sorted { ($0.tokens.billable, $1.model) > ($1.tokens.billable, $0.model) }
     }
 
@@ -145,9 +159,7 @@ struct StatsDetailView: View {
 
     @ViewBuilder
     private var summaryCard: some View {
-        // The headless card alone is enough to make the range non-empty: a range
-        // spent entirely in plugin sessions has no measured model rows at all.
-        if modelRows.isEmpty, headlessTotal == 0 {
+        if rangeIsEmpty {
             VStack(spacing: 6) {
                 Image(systemName: "chart.bar.xaxis")
                     .font(.title2).foregroundStyle(.secondary)
@@ -187,7 +199,7 @@ struct StatsDetailView: View {
                 } else {
                     StatsTimeChart(points: hourlyPoints, mode: .hourly, colors: modelColors)
                 }
-            } else if modelRows.isEmpty {
+            } else if rangeIsEmpty {
                 StatsDailySkeletonChart().frame(height: 96)
             } else {
                 let series = store.chartSeries(provider: provider, daysAgo: range.daysAgo)
@@ -413,13 +425,10 @@ struct StatsTimeChart: View {
     /// 121,311 (0.8% apart). Cache reads are in neither.
     ///
     /// A turn is only ever exact OR total-only (the trace reader retracts the
-    /// estimate when exact usage arrives), so nothing is double-counted.
-    ///
-    /// PRECONDITION: headless sessions are single-turn. The reader books each
-    /// turn's *full* context, so a multi-turn headless thread would re-count the
-    /// earlier turns' context. Every multi-turn path today (`resume`,
-    /// `persistThread`) is non-ephemeral and therefore rollout-backed — i.e.
-    /// exact, not total-only. If that ever changes, this sum inflates.
+    /// estimate when exact usage arrives), so nothing is double-counted. Nor does
+    /// a multi-turn thread re-count its earlier turns: the reader books each
+    /// cumulative context reading against what the thread has already been
+    /// credited, so only the new content lands here.
     static func headlessTotal(_ byModel: [String: TokenBreakdown]) -> Int {
         byModel.values.reduce(0) { $0 + $1.totalOnly }
     }

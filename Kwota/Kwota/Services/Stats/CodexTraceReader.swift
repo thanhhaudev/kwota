@@ -409,13 +409,27 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
             switch (previous?.precision, obs.precision) {
             case (.exact, _):
                 continue
-            case (.totalOnly, .totalOnly):
-                let previousTotal = previous?.tokens.totalOnly ?? 0
-                let delta = obs.tokens.totalOnly - previousTotal
+            case (_, .totalOnly):
+                // `total_usage_tokens` is `active_context_tokens` — the size of
+                // the whole context, which is CUMULATIVE across a thread's turns.
+                // Book only what this observation adds beyond what the thread has
+                // already been credited with; booking the raw figure per turn
+                // would re-count every earlier turn's context. (For the
+                // single-turn threads the plugin actually produces, the baseline
+                // is 0 and this reduces to the raw figure.)
+                let baseline = Self.credited(thread: obs.sessionId, in: state)
+                let delta = obs.tokens.totalOnly - baseline
+                // Not growth: a re-read of an unchanged turn, or a compaction
+                // that shrank the window. Nothing new was consumed.
                 guard delta > 0 else { continue }
                 emitted.append(Self.event(from: obs, tokens: TokenBreakdown(totalOnly: delta)))
+                // Store what the turn has been CREDITED, not the raw context, so
+                // the thread baseline stays a running sum and a later retraction
+                // gives back exactly what was booked.
+                let creditedForTurn = (previous?.tokens.totalOnly ?? 0) + delta
                 state[obs.key] = ReaderState.CodexTraceTurn(
-                    precision: .totalOnly, timestamp: obs.timestamp, model: obs.model, tokens: obs.tokens)
+                    precision: .totalOnly, timestamp: obs.timestamp, model: obs.model,
+                    tokens: TokenBreakdown(totalOnly: creditedForTurn))
                 lastLineLock.withLock { $0 = "\(obs.sessionId)@\(obs.key)" }
             case (.totalOnly, .exact):
                 if let previous {
@@ -436,14 +450,37 @@ final class CodexTraceReader: JSONLogReader, @unchecked Sendable {
                 state[obs.key] = ReaderState.CodexTraceTurn(
                     precision: .exact, timestamp: obs.timestamp, model: obs.model, tokens: obs.tokens)
                 lastLineLock.withLock { $0 = "\(obs.sessionId)@\(obs.key)" }
-            case (.none, _):
+            case (.none, .exact):
                 emitted.append(Self.event(from: obs, tokens: obs.tokens))
                 state[obs.key] = ReaderState.CodexTraceTurn(
-                    precision: obs.precision, timestamp: obs.timestamp, model: obs.model, tokens: obs.tokens)
+                    precision: .exact, timestamp: obs.timestamp, model: obs.model, tokens: obs.tokens)
                 lastLineLock.withLock { $0 = "\(obs.sessionId)@\(obs.key)" }
             }
         }
         traceTurns[db] = state
+    }
+
+    /// Tokens already credited to `thread` across every turn we've booked for it.
+    ///
+    /// This is the baseline a cumulative `active_context_tokens` reading is
+    /// measured against, so it must count everything already attributed to the
+    /// thread's context — including its EXACT turns: `billable`
+    /// (`(input − cached) + output`) is the content newly added to the
+    /// conversation, the same quantity a context reading grows by. Leaving exact
+    /// turns out would let a later total-only turn re-book their content.
+    private static func credited(thread: String,
+                                 in state: [String: ReaderState.CodexTraceTurn]) -> Int {
+        state.reduce(0) { sum, entry in
+            guard Self.threadID(ofKey: entry.key) == thread else { return sum }
+            return sum + entry.value.tokens.totalOnly + entry.value.tokens.billable
+        }
+    }
+
+    /// Observation keys are `<threadId>#<turnId>` (exact rows that can't be
+    /// correlated to a turn fall back to `<threadId>#exact#<rowId>`), so the
+    /// thread is always the segment before the first `#`.
+    private static func threadID(ofKey key: String) -> Substring {
+        key.prefix { $0 != "#" }
     }
 
     /// `at`/`model` override the observation's own stamp — used by the
