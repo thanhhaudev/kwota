@@ -239,6 +239,10 @@ private struct StatsModelMiniCard: View {
     let tokens: TokenBreakdown
     let color: Color
 
+    /// This model's tokens are total-only (headless session): no billable
+    /// split, so show the estimate figure and label rather than three zeros.
+    private var isHeadlessOnly: Bool { tokens.billable == 0 && tokens.totalOnly > 0 }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
@@ -250,22 +254,32 @@ private struct StatsModelMiniCard: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
-            Text(StatsFormat.tokens(tokens.billable))
+            Text(StatsFormat.tokens(isHeadlessOnly ? tokens.totalOnly : tokens.billable))
                 .font(.system(size: 16, weight: .semibold))
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
 
-            HStack(spacing: 0) {
-                miniMetric(icon: "arrow.down", value: tokens.input)
-                Spacer(minLength: 6)
-                miniMetric(icon: "arrow.up", value: tokens.output)
-                Spacer(minLength: 6)
-                miniMetric(icon: "bolt", value: tokens.cacheRead)
+            if isHeadlessOnly {
+                // Headless (plugin/app-server) sessions report only a running
+                // total, so the input/output/cache split isn't available — label
+                // the figure honestly instead of showing three zeros.
+                Text("headless (est.)")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .lineLimit(1).minimumScaleFactor(0.7)
+                    .help("Estimated tokens from non-TUI (plugin/headless) sessions — no per-type breakdown available.")
+            } else {
+                HStack(spacing: 0) {
+                    miniMetric(icon: "arrow.down", value: tokens.input)
+                    Spacer(minLength: 6)
+                    miniMetric(icon: "arrow.up", value: tokens.output)
+                    Spacer(minLength: 6)
+                    miniMetric(icon: "bolt", value: tokens.cacheRead)
+                }
+                .help("Input \(StatsFormat.full(tokens.input))   ·   Output \(StatsFormat.full(tokens.output))   ·   Cache read \(StatsFormat.full(tokens.cacheRead))")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Input \(tokens.input), Output \(tokens.output), Cache read \(tokens.cacheRead) tokens")
             }
-            .help("Input \(StatsFormat.full(tokens.input))   ·   Output \(StatsFormat.full(tokens.output))   ·   Cache read \(StatsFormat.full(tokens.cacheRead))")
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Input \(tokens.input), Output \(tokens.output), Cache read \(tokens.cacheRead) tokens")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .kwotaCard()
@@ -311,17 +325,47 @@ struct StatsTimeChart: View {
     @State private var selectedDate: Date?
 
     private struct Bar: Identifiable {
-        var id: String { "\(key)|\(model)" }
+        let id: String
         let date: Date
         let key: String
-        let model: String
-        let billable: Int
+        let model: String   // real model id — drives color when !isHeadless
+        let value: Int      // plotted height (billable, or total-only for headless)
+        let isHeadless: Bool
     }
 
     private struct Total {
         let date: Date
         let key: String
-        let total: Int
+        let billable: Int
+        let headless: Int
+        /// A bucket where Codex only reported a running total (no per-type
+        /// breakdown) — the signature of a non-TUI/plugin ("headless") session.
+        var isHeadlessOnly: Bool { billable == 0 && headless > 0 }
+    }
+
+    /// Legend/tooltip name for the synthetic "headless" band — sessions that
+    /// ran outside the TUI (via the plugin/app-server) and left only a running
+    /// token total, not the input/output/cache split. Marked "(est.)" because
+    /// the figure is a context-size proxy, not billed-token consumption.
+    static let headlessLabel = "Headless (est.)"
+
+    /// Σ billable (`input + output`) across a bucket's models.
+    static func billableTotal(_ byModel: [String: TokenBreakdown]) -> Int {
+        byModel.values.reduce(0) { $0 + $1.billable }
+    }
+
+    /// Σ total-only tokens across a bucket's models — the headless-session
+    /// figure Codex reports when no per-type breakdown is available.
+    static func headlessTotal(_ byModel: [String: TokenBreakdown]) -> Int {
+        byModel.values.reduce(0) { $0 + $1.totalOnly }
+    }
+
+    /// A bucket carries only a running total (headless session) when it has no
+    /// billable tokens but does have total-only tokens. Buckets with any
+    /// billable render normally and their total-only tokens are ignored, so the
+    /// two never mix units in one bar.
+    static func isHeadlessOnly(_ byModel: [String: TokenBreakdown]) -> Bool {
+        billableTotal(byModel) == 0 && headlessTotal(byModel) > 0
     }
 
     /// "yyyy-MM-dd" → (year, month, day).
@@ -352,27 +396,54 @@ struct StatsTimeChart: View {
         return totals.keys.sorted { (totals[$0]!, $1) > (totals[$1]!, $0) }
     }
 
+    /// True when any visible bucket is a headless-only session — gates whether
+    /// the synthetic "Headless (est.)" band joins the color scale.
+    private var hasHeadless: Bool { points.contains { Self.isHeadlessOnly($0.byModel) } }
+
     private var bars: [Bar] {
         let order = orderedModels
-        return points.flatMap { p in
-            order.compactMap { model in
-                p.byModel[model].map { Bar(date: p.date, key: p.key, model: model, billable: $0.billable) }
+        return points.flatMap { p -> [Bar] in
+            // A headless-only bucket collapses to one faint band summing the
+            // total-only tokens, instead of the per-model billable stack.
+            if Self.isHeadlessOnly(p.byModel) {
+                return [Bar(id: "\(p.key)|~headless", date: p.date, key: p.key,
+                            model: "", value: Self.headlessTotal(p.byModel), isHeadless: true)]
+            }
+            return order.compactMap { model in
+                p.byModel[model].map {
+                    Bar(id: "\(p.key)|\(model)", date: p.date, key: p.key,
+                        model: model, value: $0.billable, isHeadless: false)
+                }
             }
         }
     }
 
-    private var totals: [Total] {
-        points.map { Total(date: $0.date, key: $0.key,
-                           total: $0.byModel.values.reduce(0) { $0 + $1.billable }) }
+    /// Foreground-scale name for a bar: real models keep their palette label;
+    /// headless bars share the single "Headless (est.)" band.
+    private func foregroundLabel(_ bar: Bar) -> String {
+        bar.isHeadless ? Self.headlessLabel : StatsModelPalette.label(for: bar.model)
     }
 
+    private var totals: [Total] {
+        points.map { Total(date: $0.date, key: $0.key,
+                           billable: Self.billableTotal($0.byModel),
+                           headless: Self.headlessTotal($0.byModel)) }
+    }
+
+    // Average and dayTotal stay billable-only so headless (est.) figures never
+    // inflate the real-usage cadence line or the today total; a headless-only
+    // bucket contributes 0 here, exactly as it did before it was rendered.
     private var average: Double {
-        let t = totals.map(\.total)
+        let t = totals.map(\.billable)
         guard !t.isEmpty else { return 0 }
         return Double(t.reduce(0, +)) / Double(t.count)
     }
 
-    private var dayTotal: Int { totals.reduce(0) { $0 + $1.total } }
+    private var dayBillable: Int { totals.reduce(0) { $0 + $1.billable } }
+    private var dayHeadless: Int { totals.reduce(0) { $0 + $1.headless } }
+    /// The whole day ran headless (no billable, some total-only) — drives the
+    /// hourly "tokens today" readout to the est. figure instead of a bare 0.
+    private var dayIsHeadlessOnly: Bool { dayBillable == 0 && dayHeadless > 0 }
 
     /// The bucket nearest the current selection point (nil when none selected).
     private var selected: Total? {
@@ -387,11 +458,21 @@ struct StatsTimeChart: View {
     /// colors match the per-model cards below.
     private var orderedLabels: [String] {
         orderedModels.map { StatsModelPalette.label(for: $0) }
+            + (hasHeadless ? [Self.headlessLabel] : [])
     }
 
-    /// Colors aligned 1:1 with `orderedLabels` (the scale range).
+    /// Colors aligned 1:1 with `orderedLabels` (the scale range). The headless
+    /// band trails in muted secondary so it reads as an estimate, not a model.
     private var orderedColors: [Color] {
         orderedModels.map { colors[$0] ?? .gray }
+            + (hasHeadless ? [Color.secondary] : [])
+    }
+
+    /// Faint the headless band (and dim non-selected bars) so an estimate never
+    /// looks as solid as a measured model bar.
+    private func opacity(for bar: Bar) -> Double {
+        if isDimmed(bar) { return 0.18 }
+        return bar.isHeadless ? 0.55 : 1
     }
 
     private func isDimmed(_ bar: Bar) -> Bool {
@@ -410,8 +491,36 @@ struct StatsTimeChart: View {
             readout
                 .lineLimit(1)
                 .frame(height: 18, alignment: .leading)   // fixed so selection doesn't resize the card
-            chartWithScale.frame(height: 120)
+            // Spacing-0 wrapper with the padding INSIDE the branch: a plain
+            // `if` in a spaced VStack still earns a spacing slot when it
+            // resolves empty, which would shift the chart on headless-free
+            // ranges.
+            VStack(alignment: .leading, spacing: 0) {
+                chartWithScale.frame(height: 120)
+                if hasHeadless {
+                    headlessCaption.padding(.top, 6)
+                }
+            }
         }
+    }
+
+    /// The chart legend is hidden (the BY MODEL grid is the color key), but that
+    /// grid only lists real models — it can't name the synthetic headless band.
+    /// This caption is the band's only key, so it renders whenever one is drawn.
+    private var headlessCaption: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(Color.secondary)
+                .opacity(0.55)          // matches the bar's own opacity
+                .frame(width: 6, height: 6)
+            Text("\(Self.headlessLabel) — plugin sessions, no breakdown")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+            Spacer(minLength: 0)
+        }
+        .help("Sessions run outside the TUI (via the plugin/app-server) report only a running token total, not the input/output/cache split. The figure is an estimate.")
     }
 
     /// Hourly mode pins the x-axis to the full day so a single hour renders as a
@@ -468,10 +577,14 @@ struct StatsTimeChart: View {
                 Text(selectedLabel(for: selected.date))
                     .font(.caption).fontWeight(.semibold)
                 Text("·").foregroundStyle(.secondary)
-                Text("\(StatsFormat.tokens(selected.total)) tokens")
+                Text(selected.isHeadlessOnly
+                     ? "~\(StatsFormat.tokens(selected.headless)) tokens · headless (est.)"
+                     : "\(StatsFormat.tokens(selected.billable)) tokens")
                     .font(.caption).foregroundStyle(.secondary).monospacedDigit()
             } else if mode == .hourly {
-                Text("\(StatsFormat.tokens(dayTotal)) tokens today")
+                Text(dayIsHeadlessOnly
+                     ? "~\(StatsFormat.tokens(dayHeadless)) tokens today · headless (est.)"
+                     : "\(StatsFormat.tokens(dayBillable)) tokens today")
                     .font(.caption).foregroundStyle(.secondary).monospacedDigit()
             } else if average > 0 {
                 Text("Avg \(StatsFormat.tokens(Int(average.rounded())))/\(granularity.avgUnit)")
@@ -580,11 +693,11 @@ struct StatsTimeChart: View {
             ForEach(bars) { bar in
                 BarMark(
                     x: .value("Time", bar.date, unit: unit),
-                    y: .value("Tokens", bar.billable)
+                    y: .value("Tokens", bar.value)
                 )
                 .cornerRadius(3)
-                .foregroundStyle(by: .value("Model", StatsModelPalette.label(for: bar.model)))
-                .opacity(isDimmed(bar) ? 0.18 : 1)
+                .foregroundStyle(by: .value("Model", foregroundLabel(bar)))
+                .opacity(opacity(for: bar))
             }
             if showsAverage {
                 RuleMark(y: .value("Average", average))
