@@ -15,19 +15,22 @@ enum MenuBarUsageDriver {
         guard let summary else {
             return MenuBarReading(utilization: nil, tint: UsageLevel.tint(for: nil))
         }
+        let primary = summary.primary?.utilization
+        let secondary = summary.secondary?.utilization
         let value: Double?
         switch source {
         case .session:
-            value = summary.primary?.utilization
+            // Prefer the 5-hour window; fall back to weekly when the provider
+            // exposes no session window. Codex (after OpenAI collapsed to a
+            // single weekly window) has a nil primary, so without the fallback
+            // the icon would read "no usage" and stay neutral despite a real
+            // weekly load. Falling back keeps the icon colored by the account's
+            // only active limit rather than blanking it.
+            value = primary ?? secondary
         case .weekly:
-            value = summary.secondary?.utilization
+            value = secondary ?? primary
         case .higher:
-            switch (summary.primary?.utilization, summary.secondary?.utilization) {
-            case let (p?, s?): value = max(p, s)
-            case let (p?, nil): value = p
-            case let (nil, s?): value = s
-            case (nil, nil):    value = nil
-            }
+            value = [primary, secondary].compactMap { $0 }.max()
         }
         return MenuBarReading(utilization: value, tint: UsageLevel.tint(for: value))
     }

@@ -104,6 +104,66 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertNotNil(summary.payload as? CodexUsageSnapshot)
     }
 
+    func test_fetchUsage_currentShape_weeklyInPrimary_mapsToSecondary() async throws {
+        // 2026-07 live wham/usage: the weekly window sits in primary_window
+        // (limit_window_seconds 604800) and secondary_window is null. The
+        // provider must route it to summary.secondary (weekly), leaving the
+        // 5-hour summary.primary nil — otherwise weekly usage shows up as the
+        // "Current Session" 5-hour figure.
+        let body = """
+        {
+          "plan_type": "plus",
+          "rate_limit": {
+            "primary_window":   { "used_percent": 17, "limit_window_seconds": 604800, "reset_at": "2026-07-23T09:15:00Z" },
+            "secondary_window": null
+          }
+        }
+        """
+        let api = CodexAPIClient(transport: { req in
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (body.data(using: .utf8)!, resp)
+        })
+        let provider = makeProvider(
+            apiClient: api,
+            readerStub: StubCodexAuthReader(token: "acc")
+        )
+        let summary = try await provider.fetchUsage(
+            credential: makeCredential(),
+            profile: makeProfile()
+        )
+        XCTAssertNil(summary.primary?.utilization, "no 5-hour window → primary nil")
+        XCTAssertEqual(summary.secondary?.utilization, 17, "weekly window → secondary")
+        XCTAssertTrue(summary.hasBucketData, "a single weekly window must still count as data")
+    }
+
+    func test_fetchUsage_slotsSwapped_classifyByDuration() async throws {
+        // Defensive: weekly in primary, 5-hour in secondary. Duration
+        // classification keeps 5-hour → primary and weekly → secondary.
+        let body = """
+        {
+          "plan_type": "plus",
+          "rate_limit": {
+            "primary_window":   { "used_percent": 80, "limit_window_seconds": 604800 },
+            "secondary_window": { "used_percent": 12, "limit_window_seconds": 18000 }
+          }
+        }
+        """
+        let api = CodexAPIClient(transport: { req in
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (body.data(using: .utf8)!, resp)
+        })
+        let provider = makeProvider(
+            apiClient: api,
+            readerStub: StubCodexAuthReader(token: "acc")
+        )
+        let summary = try await provider.fetchUsage(
+            credential: makeCredential(),
+            profile: makeProfile()
+        )
+        XCTAssertEqual(summary.primary?.utilization, 12, "5-hour → primary regardless of slot")
+        XCTAssertEqual(summary.secondary?.utilization, 80, "weekly → secondary regardless of slot")
+    }
+
     func test_fetchUsage_401_thenForceRefreshRotation_retries() async throws {
         // First call 401; second call 200 (after the refresher rotates).
         var callCount = 0

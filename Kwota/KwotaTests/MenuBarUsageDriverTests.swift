@@ -37,6 +37,24 @@ final class MenuBarUsageDriverTests: XCTestCase {
         XCTAssertEqual(r.utilization, 70)
     }
 
+    func test_session_fallsBackToWeekly_whenNoSessionWindow() {
+        // Codex after OpenAI collapsed to a single weekly window: primary
+        // (5-hour) is nil. The icon must still color by the weekly load
+        // instead of reading as "no usage".
+        let r = MenuBarUsageDriver.read(summary: makeSummary(primary: nil, secondary: 55), source: .session)
+        XCTAssertEqual(r.utilization, 55)
+    }
+
+    func test_weekly_fallsBackToSession_whenNoWeeklyWindow() {
+        let r = MenuBarUsageDriver.read(summary: makeSummary(primary: 33, secondary: nil), source: .weekly)
+        XCTAssertEqual(r.utilization, 33)
+    }
+
+    func test_session_bothNil_returnsNil() {
+        let r = MenuBarUsageDriver.read(summary: makeSummary(primary: nil, secondary: nil), source: .session)
+        XCTAssertNil(r.utilization)
+    }
+
     func test_higher_returnsMaxOfBoth() {
         let r = MenuBarUsageDriver.read(summary: makeSummary(primary: 42, secondary: 70), source: .higher)
         XCTAssertEqual(r.utilization, 70)

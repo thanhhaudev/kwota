@@ -169,17 +169,23 @@ final class CodexProvider: AccountProvider {
             }
         }
 
+        // Classify by window duration, not slot position: OpenAI moved the
+        // weekly window into `primary_window` and nulled `secondary_window`
+        // (2026-07), so a positional read would show weekly usage as the
+        // 5-hour session. See CodexUsageSnapshot.classifiedWindows.
+        let windows = snapshot.classifiedWindows
+
         // UsageBucket.utilization is in 0-100 range across the app — the
         // chart's footnote formatter does `Int(u)` and the threshold compare
         // `u < UsageLevel.warningThreshold` both assume 0-100. Codex's
         // `used_percent` is already in that range, so pass it through verbatim.
-        let primary = snapshot.rateLimit?.primaryWindow.map { window in
+        let primary = windows.session.map { window in
             UsageBucket(
                 utilization: window.usedPercent,
                 resetsAt: window.resetAt
             )
         }
-        let secondary = snapshot.rateLimit?.secondaryWindow.map { window in
+        let secondary = windows.weekly.map { window in
             UsageBucket(
                 utilization: window.usedPercent,
                 resetsAt: window.resetAt
@@ -188,17 +194,18 @@ final class CodexProvider: AccountProvider {
 
         // Debug-level shape probe so future schema drift surfaces in
         // Console.app with full field shapes, without spamming .info on
-        // every poll tick. Pair with the fall-through error log in
-        // MenuBarViewModel.refresh, which captures decode failures at
+        // every poll tick. Logs BOTH the classified pair and the raw slot
+        // durations, so a future reshuffle of which window lands in which slot
+        // is diagnosable from the log alone. Pair with the fall-through error
+        // log in MenuBarViewModel.refresh, which captures decode failures at
         // .error level regardless of this setting.
-        let primaryPct = snapshot.rateLimit?.primaryWindow?.usedPercent
-        let secondaryPct = snapshot.rateLimit?.secondaryWindow?.usedPercent
-        let creditsBal = snapshot.credits?.balance
-        let primaryStr = primaryPct.map { String($0) } ?? "nil"
-        let secondaryStr = secondaryPct.map { String($0) } ?? "nil"
-        let creditsStr = creditsBal.map { String($0) } ?? "nil"
+        let sessionStr = windows.session?.usedPercent.map { String($0) } ?? "nil"
+        let weeklyStr = windows.weekly?.usedPercent.map { String($0) } ?? "nil"
+        let rawPrimarySecs = snapshot.rateLimit?.primaryWindow?.limitWindowSeconds.map { String($0) } ?? "nil"
+        let rawSecondarySecs = snapshot.rateLimit?.secondaryWindow?.limitWindowSeconds.map { String($0) } ?? "nil"
+        let creditsStr = snapshot.credits?.balance.map { String($0) } ?? "nil"
         AppLog.shared.log(
-            "CodexProvider: parsed snapshot — planType=\(snapshot.planType ?? "nil"), primaryUsedPct=\(primaryStr), secondaryUsedPct=\(secondaryStr), creditsBalance=\(creditsStr), codeReview=\(snapshot.codeReviewRateLimit != nil)",
+            "CodexProvider: parsed snapshot — planType=\(snapshot.planType ?? "nil"), sessionUsedPct=\(sessionStr), weeklyUsedPct=\(weeklyStr), rawPrimaryWindowSecs=\(rawPrimarySecs), rawSecondaryWindowSecs=\(rawSecondarySecs), creditsBalance=\(creditsStr), codeReview=\(snapshot.codeReviewRateLimit != nil)",
             level: .debug
         )
 

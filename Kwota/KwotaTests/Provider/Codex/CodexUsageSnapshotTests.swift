@@ -112,4 +112,89 @@ final class CodexUsageSnapshotTests: XCTestCase {
         XCTAssertNil(snap.codeReviewRateLimit)
         XCTAssertNil(snap.credits)
     }
+
+    // MARK: - classifiedWindows (duration-based, not slot-based)
+
+    private func snapshot(from json: String) throws -> CodexUsageSnapshot {
+        try CodexUsageSnapshot.decoder.decode(
+            CodexUsageSnapshot.self, from: Data(json.utf8))
+    }
+
+    func test_classifiedWindows_historicalBothWindows_mapsByDuration() throws {
+        // Historical shape: 5-hour in primary_window, weekly in secondary_window.
+        let snap = try snapshot(from: """
+        { "rate_limit": {
+            "primary_window":   { "used_percent": 27, "limit_window_seconds": 18000 },
+            "secondary_window": { "used_percent": 46, "limit_window_seconds": 604800 }
+        } }
+        """)
+        let w = snap.classifiedWindows
+        XCTAssertEqual(w.session?.usedPercent, 27)
+        XCTAssertEqual(w.weekly?.usedPercent, 46)
+    }
+
+    func test_classifiedWindows_currentShape_weeklyInPrimary_secondaryNull() throws {
+        // 2026-07 live shape: OpenAI moved the weekly window into
+        // primary_window (604800s) and nulled secondary_window. Positional
+        // reads mislabel this weekly usage as the 5-hour session; the classifier
+        // must land it on weekly and leave session empty.
+        let snap = try snapshot(from: """
+        { "rate_limit": {
+            "primary_window":   { "used_percent": 17, "limit_window_seconds": 604800 },
+            "secondary_window": null
+        } }
+        """)
+        let w = snap.classifiedWindows
+        XCTAssertNil(w.session, "no 5-hour window present → session must be nil")
+        XCTAssertEqual(w.weekly?.usedPercent, 17)
+    }
+
+    func test_classifiedWindows_sessionOnly_noWeekly() throws {
+        // e.g. a shape where only the 5-hour burst window is active.
+        let snap = try snapshot(from: """
+        { "rate_limit": {
+            "primary_window": { "used_percent": 5, "limit_window_seconds": 18000 }
+        } }
+        """)
+        let w = snap.classifiedWindows
+        XCTAssertEqual(w.session?.usedPercent, 5)
+        XCTAssertNil(w.weekly)
+    }
+
+    func test_classifiedWindows_slotsSwapped_stillClassifyByDuration() throws {
+        // Defensive: if OpenAI ever puts weekly in primary and 5-hour in
+        // secondary, duration classification keeps them in the right cards.
+        let snap = try snapshot(from: """
+        { "rate_limit": {
+            "primary_window":   { "used_percent": 80, "limit_window_seconds": 604800 },
+            "secondary_window": { "used_percent": 12, "limit_window_seconds": 18000 }
+        } }
+        """)
+        let w = snap.classifiedWindows
+        XCTAssertEqual(w.session?.usedPercent, 12, "5-hour window → session regardless of slot")
+        XCTAssertEqual(w.weekly?.usedPercent, 80, "weekly window → weekly regardless of slot")
+    }
+
+    func test_classifiedWindows_durationless_fallsBackToSlotOrder() throws {
+        // Some payloads omit limit_window_seconds entirely. With no duration
+        // signal, keep the historical slot meaning: primary → session,
+        // secondary → weekly. This is what the pre-classifier fetchUsage tests
+        // relied on, so the fallback preserves them.
+        let snap = try snapshot(from: """
+        { "rate_limit": {
+            "primary_window":   { "used_percent": 27 },
+            "secondary_window": { "used_percent": 46 }
+        } }
+        """)
+        let w = snap.classifiedWindows
+        XCTAssertEqual(w.session?.usedPercent, 27)
+        XCTAssertEqual(w.weekly?.usedPercent, 46)
+    }
+
+    func test_classifiedWindows_noRateLimit_bothNil() throws {
+        let snap = try snapshot(from: "{}")
+        let w = snap.classifiedWindows
+        XCTAssertNil(w.session)
+        XCTAssertNil(w.weekly)
+    }
 }

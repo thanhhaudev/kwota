@@ -2112,11 +2112,16 @@ final class MenuBarViewModel {
                         }
                     }
 
-                    if let primary = summary.primary, let secondary = summary.secondary {
+                    // Record whenever at least one bucket carries data — not
+                    // only when BOTH do. Codex now returns a single window
+                    // (weekly in `primary_window`, `secondary_window` null),
+                    // so a both-required guard silently dropped every Codex
+                    // sample. Mirrors LiveAccountRecorder's non-active path.
+                    if summary.hasBucketData {
                         let entry = UsageHistoryEntry(
                             at: summary.fetchedAt,
-                            fiveHour: primary.utilization,
-                            sevenDay: secondary.utilization
+                            fiveHour: summary.primary?.utilization,
+                            sevenDay: summary.secondary?.utilization
                         )
                         let storedEntry = (try? historyStore.append(entry)) ?? entry
                         self.history.append(storedEntry)

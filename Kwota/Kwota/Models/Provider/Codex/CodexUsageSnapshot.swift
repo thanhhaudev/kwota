@@ -27,6 +27,34 @@ struct CodexUsageSnapshot: Codable, Equatable, Sendable {
             case primaryWindow = "primary_window"
             case secondaryWindow = "secondary_window"
         }
+
+        /// Session-window duration ceiling. The 5-hour burst window (18_000s)
+        /// falls well under it; the weekly limit window (604_800s) well over.
+        /// One day is a deliberately loose boundary — it leaves headroom for
+        /// OpenAI to resize the burst window (e.g. to 12h) without the window
+        /// being misclassified as a weekly limit.
+        private static let sessionWindowCeiling: Double = 86_400
+
+        /// See `CodexUsageSnapshot.classifiedWindows`. Walks the two slots in
+        /// their historical order (primary first) so that windows lacking a
+        /// declared `limit_window_seconds` fall back to slot meaning: an
+        /// undated window fills the still-empty session slot before weekly,
+        /// matching how legacy payloads (5-hour in primary) decoded. When both
+        /// windows land on the same side of the ceiling, the tie-break keeps
+        /// the assignment deterministic instead of dropping data.
+        var classifiedWindows: (session: Window?, weekly: Window?) {
+            var session: Window?
+            var weekly: Window?
+            for window in [primaryWindow, secondaryWindow].compactMap({ $0 }) {
+                let isSession = (window.limitWindowSeconds ?? 0) < Self.sessionWindowCeiling
+                if isSession {
+                    if session == nil { session = window } else if weekly == nil { weekly = window }
+                } else {
+                    if weekly == nil { weekly = window } else if session == nil { session = window }
+                }
+            }
+            return (session, weekly)
+        }
     }
 
     struct Window: Codable, Equatable, Sendable {
@@ -81,6 +109,23 @@ struct CodexUsageSnapshot: Codable, Equatable, Sendable {
         case codeReviewRateLimit = "code_review_rate_limit"
         case credits
         case fetchedAt
+    }
+
+    /// The 5-hour "session" window and the 7-day "weekly" window, resolved by
+    /// each window's own `limit_window_seconds` rather than by which slot
+    /// (`primary_window` / `secondary_window`) it arrived in.
+    ///
+    /// OpenAI historically shipped the 5-hour window in `primary_window`
+    /// (`limit_window_seconds == 18_000`) and the weekly window in
+    /// `secondary_window` (`604_800`). As of 2026-07 they collapsed the model:
+    /// `primary_window` now carries the WEEKLY window and `secondary_window`
+    /// is `null`. Trusting slot position therefore rendered weekly usage in the
+    /// "Current Session" card (wrong 5-hour label, ~6-day countdown) and blanked
+    /// the Weekly card. Classifying by duration adapts to whichever shape the
+    /// server sends — one window or two, in either slot — and recovers
+    /// automatically if OpenAI restores the 5-hour window later.
+    var classifiedWindows: (session: Window?, weekly: Window?) {
+        rateLimit?.classifiedWindows ?? (session: nil, weekly: nil)
     }
 
     init(
