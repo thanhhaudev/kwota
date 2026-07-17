@@ -15,6 +15,7 @@ enum AppStorageKeys {
     static let displayTheme                = "display.theme"
     static let displayChartShowAvg         = "display.chart.showAvg"
     static let displayChartShowPaceHint    = "display.chart.showPaceHint"
+    static let displayUsageCompact         = "display.usage.compact"
     static let displayPopoverShowAwake     = "display.popover.showAwake"
     static let displayPopoverShowCache     = "display.popover.showCache"
     static let displayPopoverShowStats     = "display.popover.showStats"
