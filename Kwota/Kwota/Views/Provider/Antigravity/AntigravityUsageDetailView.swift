@@ -52,6 +52,7 @@ struct AntigravityUsageDetailView: View {
     // Persisted so the popover reopens on the group the user last viewed instead
     // of snapping back to the default every time the detail view is recreated.
     @AppStorage(AppStorageKeys.antigravityGroupSelection) private var selectedKey: String?
+    @AppStorage(AppStorageKeys.displayUsageCompact)      private var compact: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -78,19 +79,28 @@ struct AntigravityUsageDetailView: View {
                 }
             }
 
-        let charts = UsageTrendChart(
-            input: AntigravityUsageGroupLogic.chartInput(for: group, fetchedAt: quota.fetchedAt),
-            history: groupHistory[group.key] ?? [],
-            showAvg: showAvg,
-            showPaceHint: showPaceHint)
+        let input = AntigravityUsageGroupLogic.chartInput(for: group, fetchedAt: quota.fetchedAt)
+        let groupEntries = groupHistory[group.key] ?? []
 
-        VStack(alignment: .leading, spacing: 0) {
-            SectionHeader(title: "Current Session")
-            charts.card(for: .session)
-        }
-        VStack(alignment: .leading, spacing: 0) {
-            SectionHeader(title: "Weekly Limit")
-            charts.weeklyCard()
+        if compact {
+            // The picker stays: without it, compact would show one arbitrary
+            // group's quota with nothing saying which.
+            CompactUsageView(input: input, history: groupEntries)
+        } else {
+            let charts = UsageTrendChart(
+                input: input,
+                history: groupEntries,
+                showAvg: showAvg,
+                showPaceHint: showPaceHint)
+
+            VStack(alignment: .leading, spacing: 0) {
+                SectionHeader(title: "Current Session")
+                charts.card(for: .session)
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                SectionHeader(title: "Weekly Limit")
+                charts.weeklyCard()
+            }
         }
     }
 

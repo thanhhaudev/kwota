@@ -23,14 +23,9 @@ struct CodexUsageDetailView: View {
 
     @AppStorage(AppStorageKeys.displayChartShowAvg)      private var showAvg: Bool = true
     @AppStorage(AppStorageKeys.displayChartShowPaceHint) private var showPaceHint: Bool = true
+    @AppStorage(AppStorageKeys.displayUsageCompact)      private var compact: Bool = false
 
     var body: some View {
-        let charts = UsageTrendChart(
-            input: chartInput,
-            history: history,
-            showAvg: showAvg,
-            showPaceHint: showPaceHint
-        )
         let windows = snapshot.classifiedWindows
         let visibility = Self.cardVisibility(
             hasSession: windows.session != nil,
@@ -38,7 +33,46 @@ struct CodexUsageDetailView: View {
             isFreePlan: isFreePlan
         )
 
-        VStack(alignment: .leading, spacing: 10) {
+        if compact {
+            compactBody(visibility: visibility)
+        } else {
+            fullBody(visibility: visibility)
+        }
+    }
+
+    /// Compact renders a bar per non-nil bucket, so suppression happens here:
+    /// a free-plan weekly window exists on the wire but must not be shown.
+    private func compactBody(visibility: (showSession: Bool, showWeekly: Bool)) -> some View {
+        let base = chartInput
+        let filtered = UsageTrendChartInput(
+            fiveHour: visibility.showSession ? base.fiveHour : nil,
+            sevenDay: visibility.showWeekly ? base.sevenDay : nil,
+            hasRealData: base.hasRealData
+        )
+
+        return VStack(alignment: .leading, spacing: 10) {
+            CompactUsageView(input: filtered, history: history) {
+                if hasPerCategoryData {
+                    CodexPerCategoryCard(codeReviewWeekly: snapshot.codeReviewRateLimit)
+                        .padding(.bottom, 8)
+                }
+            }
+
+            if let credits = snapshot.credits, credits.hasCredits == true {
+                creditsRow(credits)
+            }
+        }
+    }
+
+    private func fullBody(visibility: (showSession: Bool, showWeekly: Bool)) -> some View {
+        let charts = UsageTrendChart(
+            input: chartInput,
+            history: history,
+            showAvg: showAvg,
+            showPaceHint: showPaceHint
+        )
+
+        return VStack(alignment: .leading, spacing: 10) {
             if visibility.showSession {
                 VStack(alignment: .leading, spacing: 0) {
                     SectionHeader(title: "Current Session")

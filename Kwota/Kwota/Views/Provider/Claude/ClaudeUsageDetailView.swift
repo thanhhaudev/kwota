@@ -17,8 +17,48 @@ struct ClaudeUsageDetailView: View {
 
     @AppStorage(AppStorageKeys.displayChartShowAvg)      private var showAvg: Bool = true
     @AppStorage(AppStorageKeys.displayChartShowPaceHint) private var showPaceHint: Bool = true
+    @AppStorage(AppStorageKeys.displayUsageCompact)      private var compact: Bool = false
 
     var body: some View {
+        if compact {
+            compactBody
+        } else {
+            fullBody
+        }
+    }
+
+    /// Same clamped buckets the full chart uses — `effective…()`, never the raw
+    /// `snapshot.fiveHour`, so both modes agree after a reset.
+    private var chartInput: UsageTrendChartInput {
+        UsageTrendChartInput(
+            fiveHour: snapshot.effectiveFiveHour(),
+            sevenDay: snapshot.effectiveSevenDay(),
+            hasRealData: snapshot.fetchedAt != .distantPast
+        )
+    }
+
+    private var compactBody: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            CompactUsageView(input: chartInput, history: history) {
+                if hasPerModelData {
+                    PerModelCard(
+                        opus: effectiveOpus,
+                        sonnet: effectiveSonnet,
+                        omelette: effectiveOmelette,
+                        fable: effectiveFable
+                    )
+                    .padding(.bottom, 8)
+                }
+            }
+            .overlay { if isFreePlan { freeOverlay } }
+
+            if let extra = snapshot.extra, extra.isEnabled {
+                ExtraUsageRow(extra: extra)
+            }
+        }
+    }
+
+    private var fullBody: some View {
         let charts = UsageTrendChart(
             snapshot: snapshot,
             history: history,
@@ -26,7 +66,7 @@ struct ClaudeUsageDetailView: View {
             showPaceHint: showPaceHint
         )
 
-        VStack(alignment: .leading, spacing: 10) {
+        return VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 0) {
                 SectionHeader(title: "Current Session")
                 charts.card(for: .session)
