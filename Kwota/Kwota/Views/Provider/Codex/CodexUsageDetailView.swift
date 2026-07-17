@@ -49,9 +49,18 @@ struct CodexUsageDetailView: View {
             sevenDay: visibility.showWeekly ? base.sevenDay : nil,
             hasRealData: base.hasRealData
         )
+        // history carries sevenDay unconditionally (both recording paths write
+        // it with no free-plan guard), so the bar-suppression above isn't
+        // enough on its own — CompactHistoryChart would still draw the weekly
+        // line straight from history. Strip it here too.
+        let filteredHistory = visibility.showWeekly
+            ? history
+            : history.map {
+                UsageHistoryEntry(id: $0.id, at: $0.at, fiveHour: $0.fiveHour, sevenDay: nil)
+            }
 
         return VStack(alignment: .leading, spacing: 10) {
-            CompactUsageView(input: filtered, history: history) {
+            CompactUsageView(input: filtered, history: filteredHistory) {
                 if hasPerCategoryData {
                     CodexPerCategoryCard(codeReviewWeekly: snapshot.codeReviewRateLimit)
                         .padding(.bottom, 8)

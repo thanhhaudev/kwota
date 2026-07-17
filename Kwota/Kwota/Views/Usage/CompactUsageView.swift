@@ -30,7 +30,7 @@ struct CompactUsageView<ExtraRows: View>: View {
                     .padding(.bottom, 12)
             }
             if let sevenDay = input.sevenDay {
-                CompactQuotaBar(label: "Weekly (all models)", bucket: sevenDay, now: now)
+                CompactQuotaBar(label: "Weekly", bucket: sevenDay, now: now)
                     .padding(.bottom, 12)
             }
             if input.fiveHour == nil && input.sevenDay == nil {
