@@ -4,8 +4,8 @@ import XCTest
 final class CompactUsageStatusTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_700_000_000)
 
-    private func point(pace: Double, burn: Double) -> CompactUsagePaceSeries.Point {
-        CompactUsagePaceSeries.Point(at: now, pace: pace, burnPerHour: burn, segment: 0)
+    private func point(pace: Double, burn: Double, at: Date? = nil) -> CompactUsagePaceSeries.Point {
+        CompactUsagePaceSeries.Point(at: at ?? now, pace: pace, burnPerHour: burn, segment: 0)
     }
 
     // MARK: pace words (reset in the future but burn too low to project)
@@ -77,6 +77,69 @@ final class CompactUsageStatusTests: XCTestCase {
             now: now
         )
         XCTAssertEqual(tag, .init(text: "burning fast", style: .watch))
+    }
+
+    // MARK: exhausted quota
+
+    func testExhaustedQuotaReturnsAtCapRegardlessOfPace() {
+        // Plateaued at the cap: burn/pace have decayed toward 0, which would
+        // otherwise read as "cooling" — the row must not imply calm at 0% left.
+        let tag = CompactUsageStatus.headlineTag(
+            utilization: 100,
+            resetsAt: now.addingTimeInterval(2 * 3600),
+            latest: point(pace: 0.05, burn: 0.01),
+            now: now
+        )
+        XCTAssertEqual(tag, .init(text: "at cap", style: .hot))
+    }
+
+    func testUtilizationAboveHundredClampsToAtCap() {
+        let tag = CompactUsageStatus.headlineTag(
+            utilization: 105,
+            resetsAt: now.addingTimeInterval(2 * 3600),
+            latest: point(pace: 2.0, burn: 20),
+            now: now
+        )
+        XCTAssertEqual(tag, .init(text: "at cap", style: .hot))
+    }
+
+    // MARK: staleness
+
+    func testStaleLatestSampleReturnsNil() {
+        // Last observed sample is older than the pace series' own "still
+        // describes a useful average" bound — a paused-polling gap, not a
+        // real burn rate to project from.
+        let staleAt = now.addingTimeInterval(-(CompactUsagePaceSeries.maximumAveragedGap + 1))
+        let tag = CompactUsageStatus.headlineTag(
+            utilization: 50,
+            resetsAt: now.addingTimeInterval(2 * 3600),
+            latest: point(pace: 2.0, burn: 20, at: staleAt),
+            now: now
+        )
+        XCTAssertNil(tag)
+    }
+
+    func testLatestSampleAtExactFreshnessBoundaryStillCounts() {
+        let boundaryAt = now.addingTimeInterval(-CompactUsagePaceSeries.maximumAveragedGap)
+        let tag = CompactUsageStatus.headlineTag(
+            utilization: 50,
+            resetsAt: nil,
+            latest: point(pace: 2.0, burn: 20, at: boundaryAt),
+            now: now
+        )
+        XCTAssertEqual(tag, .init(text: "burning fast", style: .watch))
+    }
+
+    func testResetsAtInThePastSuppressesVerdict() {
+        // A reset marker that has already passed describes a window this
+        // burn rate can no longer be compared against.
+        let tag = CompactUsageStatus.headlineTag(
+            utilization: 50,
+            resetsAt: now.addingTimeInterval(-1),
+            latest: point(pace: 2.0, burn: 20),
+            now: now
+        )
+        XCTAssertNil(tag)
     }
 
     // MARK: level-only rows

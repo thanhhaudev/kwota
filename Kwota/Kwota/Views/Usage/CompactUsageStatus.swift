@@ -45,13 +45,32 @@ enum CompactUsageStatus {
         guard let latest, let utilization else { return nil }
         let remaining = max(0, min(100, 100 - utilization))
 
-        if let resetsAt,
-           latest.burnPerHour > minBurnPerHour,
-           remaining > 0 {
-            let hoursToCap = remaining / latest.burnPerHour
-            let exhaustion = now.addingTimeInterval(hoursToCap * 3600)
-            if exhaustion < resetsAt {
-                return Tag(text: formatToCap(hoursToCap), style: .hot)
+        // Fresh (not history-derived) — trust it even if the pace sample below
+        // is stale, so an exhausted window never reads as "cooling".
+        if remaining <= 0 {
+            return Tag(text: "at cap", style: .hot)
+        }
+
+        // `latest` comes from history, which only grows on a successful
+        // fetch — a paused-polling gap (sleep, an outage, 429 backoff) can
+        // leave it far behind `now`. Beyond the pace series' own "still
+        // describes a useful average" bound, neither the burn rate nor the
+        // pace word can be trusted for the current moment.
+        guard now.timeIntervalSince(latest.at) <= CompactUsagePaceSeries.maximumAveragedGap else {
+            return nil
+        }
+
+        if let resetsAt {
+            // A reset marker already in the past belongs to a window this
+            // burn rate predates — comparing against it would be meaningless.
+            guard resetsAt > now else { return nil }
+
+            if latest.burnPerHour > minBurnPerHour {
+                let hoursToCap = remaining / latest.burnPerHour
+                let exhaustion = now.addingTimeInterval(hoursToCap * 3600)
+                if exhaustion < resetsAt {
+                    return Tag(text: formatToCap(hoursToCap), style: .hot)
+                }
             }
         }
 
