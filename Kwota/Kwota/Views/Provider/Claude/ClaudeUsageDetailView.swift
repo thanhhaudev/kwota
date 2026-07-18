@@ -45,9 +45,10 @@ struct ClaudeUsageDetailView: View {
                         opus: effectiveOpus,
                         sonnet: effectiveSonnet,
                         omelette: effectiveOmelette,
-                        fable: effectiveFable
+                        fable: effectiveFable,
+                        labelWidth: 130,
+                        isCompact: true
                     )
-                    .padding(.bottom, 8)
                 }
             }
             .overlay { if isFreePlan { freeOverlay } }

@@ -21,23 +21,34 @@ struct UsageBatteryRow: View {
     let utilization: Double?
     let color: Color
     var labelWidth: CGFloat = 90
+    var detail: String? = nil
+    var isCompact: Bool = false
 
     var body: some View {
         HStack(spacing: 8) {
             Circle()
                 .fill(color)
                 .frame(width: 8, height: 8)
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(width: labelWidth, alignment: .leading)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(isCompact ? .callout : .caption)
+                    .foregroundStyle(isCompact ? Color.primary : Color.secondary)
+                if let detail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .frame(width: labelWidth, alignment: .leading)
             bar
                 .frame(height: 8)
             Text(Self.remainingText(for: utilization))
-                .font(.caption.monospacedDigit())
+                .font(isCompact ? .callout.monospacedDigit() : .caption.monospacedDigit())
                 .foregroundStyle(utilization == nil ? .secondary : .primary)
                 .frame(width: 36, alignment: .trailing)
         }
+        .accessibilityElement(children: .combine)
     }
 
     /// Remaining quota as a 0-100 bar width. nil → 0 (dimmed empty track).
