@@ -26,6 +26,8 @@ struct PerModelCard: View {
     /// color in `StatsModelPalette` so the model reads consistently across
     /// the Usage and Stats tabs.
     let fable: UsageBucket?
+    var labelWidth: CGFloat = 90
+    var isCompact: Bool = false
 
     private let opusColor: Color = .blue
     private let sonnetColor: Color = .orange
@@ -34,18 +36,31 @@ struct PerModelCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let opus {
-                UsageBatteryRow(label: "Opus", utilization: opus.utilization, color: opusColor)
-            }
-            if let sonnet {
-                UsageBatteryRow(label: "Sonnet only", utilization: sonnet.utilization, color: sonnetColor)
-            }
-            if let fable {
-                UsageBatteryRow(label: "Fable only", utilization: fable.utilization, color: fableColor)
-            }
-            if let omelette {
-                UsageBatteryRow(label: "Claude Design", utilization: omelette.utilization, color: omeletteColor)
-            }
+            if isCompact { Divider() }
+            if let opus { row(label: "Opus", bucket: opus, color: opusColor) }
+            if let sonnet { row(label: "Sonnet only", bucket: sonnet, color: sonnetColor) }
+            if let fable { row(label: "Fable only", bucket: fable, color: fableColor) }
+            if let omelette { row(label: "Claude Design", bucket: omelette, color: omeletteColor) }
+        }
+    }
+
+    /// Compact mode paints the meter by urgency (CompactStatusRow); full view
+    /// keeps the category-colored UsageBatteryRow.
+    @ViewBuilder
+    private func row(label: String, bucket: UsageBucket, color: Color) -> some View {
+        if isCompact {
+            CompactStatusRow(
+                label: label,
+                utilization: bucket.utilization,
+                tag: CompactUsageStatus.levelTag(utilization: bucket.utilization)
+            )
+        } else {
+            UsageBatteryRow(
+                label: label,
+                utilization: bucket.utilization,
+                color: color,
+                labelWidth: labelWidth
+            )
         }
     }
 }
