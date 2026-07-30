@@ -133,6 +133,10 @@ final class AwakeSupervisor {
     /// Nil on Macs with no battery hardware (desktops).
     var currentBatteryPercent: Int? { battery.reading.percent }
 
+    /// Exposed so the view model can forward popover visibility to the poll
+    /// backstop without holding a second reference to the monitor.
+    var batteryMonitor: any BatteryMonitoring { battery }
+
     /// Read-only mirror of seconds since the user's last keyboard/mouse input,
     /// for status UI (the standby gate countdown). Computed on demand — not
     /// observable; callers poll it from a TimelineView tick.
@@ -396,6 +400,9 @@ final class AwakeSupervisor {
     /// in `.manualActive` or `.autoActive`, we transition to `.idle` and
     /// surface a notification.
     private func onCaffeineActiveChanged(_ active: Bool) {
+        // Demand signal for the battery poll backstop, forwarded on both
+        // edges — the early return below only concerns the stop-reason logic.
+        battery.setAssertionHeld(active)
         guard !active else { return }
         if suppressCaffeineExitReaction {
             suppressCaffeineExitReaction = false

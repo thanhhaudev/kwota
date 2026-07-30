@@ -205,6 +205,8 @@ private final class HostedTestBatteryMonitor: BatteryMonitoring {
         subject.eraseToAnyPublisher()
     }
     func start() {}
+    func setPopoverOpen(_ open: Bool) {}
+    func setAssertionHeld(_ held: Bool) {}
 }
 
 @MainActor

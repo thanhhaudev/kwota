@@ -21,5 +21,11 @@ final class FakeBatteryMonitor: BatteryMonitoring {
     }
     func start() {}
 
+    private(set) var popoverOpenCalls: [Bool] = []
+    private(set) var assertionHeldCalls: [Bool] = []
+
+    func setPopoverOpen(_ open: Bool) { popoverOpenCalls.append(open) }
+    func setAssertionHeld(_ held: Bool) { assertionHeldCalls.append(held) }
+
     func emit(_ next: BatteryReading) { subject.send(next) }
 }

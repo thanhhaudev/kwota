@@ -1145,6 +1145,7 @@ final class MenuBarViewModel {
     func popoverDidOpen() {
         isPopoverOpen = true
         refreshCoordinator?.popoverDidOpen()
+        awake.batteryMonitor.setPopoverOpen(true)
         // Out-of-band poke for the Antigravity watcher so a refresh fired
         // by the SWR gate doesn't race against a stale (or nil) identity
         // from the previous poll tick. Cheap (one ps/lsof spawn) and
@@ -1179,6 +1180,7 @@ final class MenuBarViewModel {
         isPopoverOpen = false
         refreshCoordinator?.popoverDidClose()
         antigravityProcessWatcher.popoverDidClose()
+        awake.batteryMonitor.setPopoverOpen(false)
     }
 
     // MARK: Agent process polling + kill
