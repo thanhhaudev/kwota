@@ -76,6 +76,13 @@ final class IOKitSleepAssertionHolder: SleepAssertionHolder {
         IOPMAssertionRelease(assertion.id)
     }
 
+    /// Release path usable from any thread. `AwakeWatchdog` calls this from its
+    /// own queue, so it deliberately bypasses the `SleepAssertionHolder`
+    /// protocol, whose conformances carry actor isolation.
+    nonisolated static func releaseRaw(_ assertion: SleepAssertion) -> Int32 {
+        IOPMAssertionRelease(assertion.id)
+    }
+
     func declareUserActivity(name: String) {
         var ignored: IOPMAssertionID = 0
         IOPMAssertionDeclareUserActivity(
