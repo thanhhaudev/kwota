@@ -15,12 +15,12 @@ import IOKit.pwr_mgt
 
 /// Opaque token returned by `acquire`, passed to `release`. Holds the raw
 /// `IOPMAssertionID` plus a tag for logging/debugging.
-struct SleepAssertion: Equatable {
+nonisolated struct SleepAssertion: Equatable, Sendable {
     let id: UInt32                  // IOPMAssertionID is UInt32
     let type: SleepAssertionType
 }
 
-enum SleepAssertionType: String, Equatable, CaseIterable {
+nonisolated enum SleepAssertionType: String, Equatable, Sendable, CaseIterable {
     case preventDisplaySleep
     case preventIdleSleep
     case preventSystemSleep
