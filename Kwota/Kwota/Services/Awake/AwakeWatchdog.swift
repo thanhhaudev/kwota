@@ -187,12 +187,14 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
             // The previous session's release never resolved within our
             // budget — most plausibly a wedged `powerd`. Proceed anyway
             // rather than hang this call (and whatever main-actor path
-            // invoked it) indefinitely: released empirically, a duplicate
+            // invoked it) indefinitely: verified empirically, a duplicate
             // `IOPMAssertionRelease` on an already-released or
             // concurrently-releasing valid ID returns `kIOReturnBadArgument`
             // to whichever caller loses the race, not a crash — so racing the
             // wedged call is the safer failure mode compared to freezing the
-            // caller forever.
+            // caller forever. The stale-cleanup release below runs off this
+            // thread precisely because it is a *second* call into the same
+            // mechanism we just proved unresponsive.
             AppLog.shared.log(
                 "AwakeWatchdog.arm timed out waiting for the previous session's in-flight release; proceeding anyway",
                 level: .error
@@ -222,7 +224,26 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
             // Reaching this is a caller lifecycle bug, but overwriting `armed`
             // while it still holds unreleased assertions leaks them to nobody.
             AppLog.shared.log("AwakeWatchdog.arm called while already armed", level: .warn)
-            for assertion in stale.assertions { _ = releaser(assertion) }
+            // Fire-and-forget on a background queue, never on the calling
+            // thread. `arm()` is synchronous and main-actor-called, and the
+            // wait above is bounded precisely so this method can't freeze;
+            // running the cleanup releases here would hand that freeze right
+            // back one statement later. The whole reason the wait can time out
+            // is that the release mechanism may be genuinely unresponsive, and
+            // a fresh call into an unresponsive `powerd` blocks on mach IPC
+            // rather than failing fast — so every `releaser()` call this path
+            // makes has to be off-thread for `arm()` to stay bounded by
+            // `releaseWaitTimeout`. Nothing waits on the outcome: `stale` is
+            // detached from `armed`, so no other code path tracks these IDs,
+            // and the only thing lost by not waiting is a status code that had
+            // no reader anyway. Raw GCD rather than `Task.detached` on purpose —
+            // this target builds with `SWIFT_DEFAULT_ACTOR_ISOLATION=MainActor`,
+            // so a detached task body would run right back on the main actor.
+            let release = releaser
+            let orphaned = stale.assertions
+            DispatchQueue.global().async {
+                for assertion in orphaned { _ = release(assertion) }
+            }
         }
     }
 

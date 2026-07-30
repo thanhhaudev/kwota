@@ -32,7 +32,36 @@ final class AwakeWatchdogTests: XCTestCase {
         func blockNextRelease(on gate: DispatchSemaphore) {
             lock.lock(); defer { lock.unlock() }; self.gate = gate
         }
+
+        /// A *durable* wedge: once set, **every** `release` call parks until
+        /// `unwedgeAllReleases()`. `blockNextRelease(on:)` cannot model this —
+        /// it clears after one call, so a second, redundant release sails
+        /// straight through and a caller that would hang in production against
+        /// an unresponsive `powerd` looks perfectly prompt in the test. Mach
+        /// IPC to a wedged daemon blocks; it does not fail fast, and it does
+        /// not start succeeding just because someone asked again.
+        private let wedge = NSCondition()
+        private var isWedged = false
+        private var _entered = 0
+
+        /// How many `release` calls have been *entered* (as opposed to
+        /// completed). The only observable for a call that never returns.
+        var enteredCount: Int {
+            wedge.lock(); defer { wedge.unlock() }; return _entered
+        }
+        func wedgeAllReleases() {
+            wedge.lock(); isWedged = true; wedge.unlock()
+        }
+        func unwedgeAllReleases() {
+            wedge.lock(); isWedged = false; wedge.broadcast(); wedge.unlock()
+        }
+
         func release(_ a: SleepAssertion) -> Int32 {
+            wedge.lock()
+            _entered += 1
+            while isWedged { wedge.wait() }
+            wedge.unlock()
+
             let parked: DispatchSemaphore? = {
                 lock.lock(); defer { lock.unlock() }
                 let g = gate
@@ -99,6 +128,19 @@ final class AwakeWatchdogTests: XCTestCase {
 
     private let a1 = SleepAssertion(id: 1, type: .preventIdleSleep)
     private let a2 = SleepAssertion(id: 2, type: .preventDisplaySleep)
+
+    /// Spins until `condition` holds, or `timeout` elapses. Polling rather than
+    /// a semaphore because what these tests need to observe is a thread
+    /// *entering* a call that never returns — there is nothing on the far side
+    /// left to signal completion.
+    private func waitUntil(_ timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        return condition()
+    }
 
     // MARK: deadline rule
 
@@ -503,5 +545,92 @@ final class AwakeWatchdogTests: XCTestCase {
         XCTAssertEqual(wd.disarm().map(\.id), [2], "the fresh session must have taken over despite the stale one's stuck release")
 
         gate.signal()   // let the permanently parked tick() finish, so nothing dangles past this test
+    }
+
+    // MARK: stale cleanup must not re-enter the wedge on the caller's thread
+
+    /// The timeout above only bounds the *wait*. Right after it expires, `arm()`
+    /// still has to deal with the stale session's assertions — and the premise
+    /// for the wait expiring at all is that the release mechanism is
+    /// unresponsive, so a fresh `releaser()` call from `arm()` blocks on mach
+    /// IPC just like the one it gave up waiting for. Run on the calling thread,
+    /// that hands the unbounded hang straight back one statement later, now
+    /// disguised as fixed.
+    ///
+    /// `wedgeAllReleases()` is load-bearing here: with the one-shot
+    /// `blockNextRelease(on:)` gate the other timeout tests use, `arm()`'s
+    /// redundant release returns instantly and this test passes against code
+    /// that would freeze the main thread in production.
+    func test_armAfterTimeout_doesNotBlockOnStaleCleanupWhenEveryReleaseIsWedged() {
+        let wd = makeWatchdog(releaseWaitTimeout: 0.2)
+        releaser.wedgeAllReleases()   // durable: the mechanism itself is unresponsive
+
+        wd.arm(assertions: [a1], mode: .auto, releaseAfter: 300)
+        uptime.advance(421)
+
+        DispatchQueue.global().async { wd.tick() }   // parks inside releaser(a1), forever
+        XCTAssertTrue(
+            waitUntil(1.0) { self.releaser.enteredCount >= 1 },
+            "tick() must actually be inside the wedged release before arm() races it"
+        )
+
+        let replacement = a2
+        let armCompleted = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            wd.arm(assertions: [replacement], mode: .manual, releaseAfter: nil)
+            armCompleted.signal()
+        }
+
+        // 0.2s of bounded wait plus a dispatch. Anything approaching this bound
+        // means arm() is sitting in a release call on its own thread.
+        XCTAssertEqual(
+            armCompleted.wait(timeout: .now() + 1.5), .success,
+            "arm() must stay bounded by releaseWaitTimeout even when its own stale-cleanup release is wedged too"
+        )
+
+        // Bounded, but not by skipping the work: the stale assertion's release
+        // is still attempted, just off the caller's thread.
+        XCTAssertTrue(
+            waitUntil(1.0) { self.releaser.enteredCount >= 2 },
+            "the stale assertion must still be released, on a background thread"
+        )
+        XCTAssertEqual(
+            wd.disarm().map(\.id), [2],
+            "the fresh session must be the one in effect despite the stale one's stuck release"
+        )
+
+        releaser.unwedgeAllReleases()   // let both parked threads unwind
+    }
+
+    /// The same hazard with no in-flight release at all, so the bounded wait
+    /// never even engages and the stale-cleanup release is the only unbounded
+    /// thing left. This is the general invariant: `arm()` never blocks on
+    /// `releaser()`, whatever else is going on.
+    func test_armStaleCleanupNeverBlocksTheCaller_withNoReleaseInFlight() {
+        let wd = makeWatchdog(releaseWaitTimeout: 0.2)
+        wd.arm(assertions: [a1], mode: .auto, releaseAfter: 300)
+
+        // No tick() running, so there is nothing to wait for — waitForInFlight
+        // Release() returns immediately and contributes no delay at all.
+        releaser.wedgeAllReleases()
+
+        let replacement = a2
+        let armCompleted = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            wd.arm(assertions: [replacement], mode: .manual, releaseAfter: nil)
+            armCompleted.signal()
+        }
+
+        XCTAssertEqual(
+            armCompleted.wait(timeout: .now() + 1.0), .success,
+            "arm() must not run the stale session's release on the calling thread"
+        )
+        XCTAssertTrue(
+            waitUntil(1.0) { self.releaser.enteredCount >= 1 },
+            "the stale assertion must still be released, on a background thread"
+        )
+        XCTAssertEqual(wd.disarm().map(\.id), [2])
+
+        releaser.unwedgeAllReleases()
     }
 }
