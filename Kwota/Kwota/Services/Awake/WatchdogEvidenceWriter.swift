@@ -45,9 +45,7 @@ nonisolated final class FileWatchdogEvidenceWriter: WatchdogEvidenceWriting {
         // fresh ring rather than propagating the decode failure.
         var records = (try? Self.load(from: url)) ?? []
         records.append(event)
-        if records.count > maxRecords {
-            records.removeFirst(records.count - maxRecords)
-        }
+        Self.evict(&records, downTo: maxRecords)
 
         do {
             let data = try Self.encoder().encode(Envelope(records: records))
@@ -63,6 +61,38 @@ nonisolated final class FileWatchdogEvidenceWriter: WatchdogEvidenceWriting {
                 level: .warn
             )
         }
+    }
+
+    /// Trims `records` to `limit`, sacrificing notify-only breadcrumbs before
+    /// ever touching a `.fired`.
+    ///
+    /// Plain FIFO over a single shared budget was safe while `.fired` was the
+    /// only writer, because a firing is rare by construction — a session either
+    /// releases cleanly or the app is already in the bad state this file exists
+    /// to document. `.stallObserved` broke that premise: it lands once per stall
+    /// *episode*, and an episode is only "main actor quiet past 180s", re-armable
+    /// by every heartbeat. A user who steps away repeatedly while an agent
+    /// session sits armed generates those all afternoon — no freeze required.
+    /// Under FIFO, enough of them evict the firing records outright, which would
+    /// mean this branch's own diagnostics destroying the F-003 forensics the
+    /// branch was written to capture.
+    ///
+    /// So the ring is prioritised rather than partitioned: no fixed reservation
+    /// to tune and get wrong, and a session that never stalls still gets all
+    /// `maxRecords` slots for firings. Within each class eviction stays
+    /// oldest-first. Firings can starve breadcrumbs completely, and that is the
+    /// intended ordering — `maxRecords` consecutive firings is a story that needs
+    /// no footnotes.
+    static func evict(_ records: inout [WatchdogEvent], downTo limit: Int) {
+        var overflow = records.count - limit
+        guard overflow > 0 else { return }
+        while overflow > 0, let oldestNotice = records.firstIndex(where: \.isNotifyOnly) {
+            records.remove(at: oldestNotice)
+            overflow -= 1
+        }
+        // Only reachable once every remaining record is a firing, at which point
+        // this is the original FIFO rule applied to firings alone.
+        if overflow > 0 { records.removeFirst(overflow) }
     }
 
     static func load(from url: URL) throws -> [WatchdogEvent] {

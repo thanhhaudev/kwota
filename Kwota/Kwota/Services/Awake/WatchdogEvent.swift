@@ -59,4 +59,19 @@ nonisolated enum WatchdogEvent: Codable, Equatable, Sendable {
     /// Notify-only. Never releases — an untimed manual session is a deliberate
     /// choice and overriding it would be wrong.
     case untimedOnBatteryNudge(hours: Int)
+
+    /// True for the events that released nothing. Not cosmetic: the bounded
+    /// evidence ring evicts on this, because the two classes of record have very
+    /// different arrival rates and very different worth. A `.fired` is the
+    /// forensics of an actual F-003 — rare, and the only reason the file exists.
+    /// The notify-only records are breadcrumbs that can arrive repeatedly within
+    /// a single session (any main-actor quiet past `stallThreshold`, re-armable
+    /// by every heartbeat), so under plain FIFO they would eventually push the
+    /// firing they were meant to give context to out of the ring.
+    var isNotifyOnly: Bool {
+        switch self {
+        case .fired: false
+        case .stallObserved, .untimedOnBatteryNudge: true
+        }
+    }
 }

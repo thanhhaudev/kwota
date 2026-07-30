@@ -891,6 +891,28 @@ final class AwakeWatchdogTests: XCTestCase {
         XCTAssertTrue(nudges(in: received).isEmpty, "defaults protect the user already")
     }
 
+    /// `hours` is the elapsed session length, not the two-hour trigger restated.
+    /// The nudge waits for the machine to actually be on battery, so a session
+    /// that runs plugged in for most of the day and is then unplugged nudges on
+    /// the next tick — and telling that user "2 hours" would be visibly false.
+    func test_nudgeReportsActualElapsedHoursNotTheThreshold() {
+        let wd = makeWatchdog()
+        var received: [WatchdogEvent] = []
+        wd.events.sink { received.append($0) }.store(in: &bag)
+
+        wd.setBatteryThreshold(nil)
+        wd.arm(assertions: [a1], mode: .manual, releaseAfter: nil)
+
+        battery = BatteryReading(isOnBattery: false, percent: 100)
+        uptime.advance(6 * 3600); wd.tick()   // six hours, but plugged in
+        XCTAssertTrue(nudges(in: received).isEmpty, "AC power is nothing to warn about")
+
+        battery = BatteryReading(isOnBattery: true, percent: 90)
+        uptime.advance(60); wd.tick()
+
+        XCTAssertEqual(nudges(in: received), [6], "six hours held awake, not the two-hour trigger")
+    }
+
     func test_noNudgeWhenADeadlineRuleExists() {
         let wd = makeWatchdog()
         var received: [WatchdogEvent] = []

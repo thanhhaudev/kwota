@@ -495,14 +495,24 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
             // anyway. So the `let sample` is unreachable as a bail-out, and
             // harmless if it ever were reached: `nudgeSent` stays false, so the
             // next tick's Pass 1 asks for the sample and nudges then.
+            let heldSoFar = seconds(now &- current.startedAtUptime)
             if let sample = reading,
                current.deadlineUptime == nil,
                batteryThreshold == nil,
                !current.nudgeSent,
-               seconds(now &- current.startedAtUptime) >= Self.nudgeAfter,
+               heldSoFar >= Self.nudgeAfter,
                sample.isOnBattery {
                 current.nudgeSent = true
-                notices.append(.untimedOnBatteryNudge(hours: Int(Self.nudgeAfter / 3600)))
+                // `hours` is the *elapsed* session length, floored, not
+                // `nudgeAfter` restated. Only `nudgeAfter` decides *whether* to
+                // nudge; how long the Mac has actually been held awake is a
+                // different number as soon as the two diverge, and they diverge
+                // in the ordinary case: this nudge waits for `isOnBattery`, so a
+                // session that spends all afternoon plugged in and is then
+                // unplugged nudges on the first tick after that — reporting "2
+                // hours" for a six-hour session would be telling the user
+                // something they can see is false.
+                notices.append(.untimedOnBatteryNudge(hours: Int(heldSoFar / 3600)))
             }
 
             // Stall observation. Recording only at firing time throws away the
