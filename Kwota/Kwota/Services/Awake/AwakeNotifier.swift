@@ -12,6 +12,7 @@ enum AwakeStopReason: Equatable {
     case batteryBelowThreshold(current: Int, threshold: Int)
     case forceTimeoutElapsed
     case unexpectedExit   // caffeinate ended outside our control
+    case watchdogStalled(heldMinutes: Int)
 }
 
 @MainActor
@@ -19,6 +20,10 @@ protocol AwakeNotifying: AnyObject {
     var isPermissionDenied: Bool { get }
     var isPermissionDeniedPublisher: AnyPublisher<Bool, Never> { get }
     func notifyStopped(_ reason: AwakeStopReason)
+
+    /// Not an `AwakeStopReason`: that enum means "keep-awake ended", and this
+    /// fires while the session is still running.
+    func notifyLongUntimedSession(hours: Int)
 }
 
 @MainActor
@@ -70,6 +75,27 @@ final class UNAwakeNotifier: AwakeNotifying {
         }
     }
 
+    func notifyLongUntimedSession(hours: Int) {
+        Task { @MainActor in
+            await ensureAuthorization()
+            await refreshPermissionStatus()
+            let content = UNMutableNotificationContent()
+            content.title = "Kwota is still keeping your Mac awake"
+            content.body = "Kwota has kept your Mac awake for \(hours) hours on battery, "
+                + "with no timeout or battery limit set."
+            let req = UNNotificationRequest(
+                identifier: "awake.untimed.\(UUID().uuidString)",
+                content: content,
+                trigger: nil
+            )
+            do {
+                try await center.add(req)
+            } catch {
+                AppLog.shared.log("AwakeNotifier untimed add failed: \(error)", level: .warn)
+            }
+        }
+    }
+
     private func ensureAuthorization() async {
         guard !didRequestAuthorization else { return }
         didRequestAuthorization = true
@@ -95,6 +121,8 @@ final class UNAwakeNotifier: AwakeNotifying {
             return "Force keep-awake timeout elapsed."
         case .unexpectedExit:
             return "Caffeinate stopped unexpectedly."
+        case .watchdogStalled(let minutes):
+            return "Release timer stalled — keep-awake was force-released after \(minutes) minute\(minutes == 1 ? "" : "s")."
         }
     }
 }

@@ -13,7 +13,9 @@ final class FakeAwakeNotifier: AwakeNotifying {
         $isPermissionDenied.eraseToAnyPublisher()
     }
     private(set) var calls: [AwakeStopReason] = []
+    private(set) var untimedCalls: [Int] = []
     func notifyStopped(_ reason: AwakeStopReason) {
         calls.append(reason)
     }
+    func notifyLongUntimedSession(hours: Int) { untimedCalls.append(hours) }
 }

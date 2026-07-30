@@ -6,6 +6,7 @@
 import AppKit
 import Foundation
 import Combine
+import IOKit
 import Observation
 
 enum AwakeState: Equatable {
@@ -57,6 +58,14 @@ final class AwakeSupervisor {
     @ObservationIgnored private let onWillSleep: ((Date, AwakeState) -> Void)?
     @ObservationIgnored private let onDidWakeFromSleep: ((Date, AwakeState) -> Void)?
     @ObservationIgnored private let clock: () -> Date
+    /// Off-main release backstop. Must be the same instance `caffeine` was
+    /// built with: the manager arms/disarms it, and this type bumps its
+    /// deadline, pushes the battery threshold, and reconciles its firings.
+    @ObservationIgnored private let watchdog: any AwakeWatchdogging
+    /// Closes the open `AwakeSession` when a release happens outside the
+    /// normal state transitions — a watchdog firing or app termination — so
+    /// the awake chart's tint ends at the real release moment.
+    @ObservationIgnored private let onForcedRelease: ((Date, AwakeState) -> Void)?
 
     init(
         caffeine: CaffeinateManager,
@@ -67,10 +76,12 @@ final class AwakeSupervisor {
         idleWindowOverride: TimeInterval? = nil,
         userInput: UserInputIdleProviding = SystemUserInputMonitor(),
         userReturnPollInterval: TimeInterval = 2.0,
+        watchdog: any AwakeWatchdogging = AwakeWatchdog(),
         clock: @escaping () -> Date = { Date() },
         notificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
         onWillSleep: ((Date, AwakeState) -> Void)? = nil,
-        onDidWakeFromSleep: ((Date, AwakeState) -> Void)? = nil
+        onDidWakeFromSleep: ((Date, AwakeState) -> Void)? = nil,
+        onForcedRelease: ((Date, AwakeState) -> Void)? = nil
     ) {
         self.caffeine = caffeine
         self.activity = activity
@@ -84,6 +95,8 @@ final class AwakeSupervisor {
         self.notificationCenter = notificationCenter
         self.onWillSleep = onWillSleep
         self.onDidWakeFromSleep = onDidWakeFromSleep
+        self.watchdog = watchdog
+        self.onForcedRelease = onForcedRelease
         battery.start()
         activity.activityPublisher
             .receive(on: RunLoop.main)
@@ -101,6 +114,15 @@ final class AwakeSupervisor {
             .receive(on: RunLoop.main)
             .sink { [weak self] reading in
                 self?.onBatteryChange(reading)
+            }
+            .store(in: &bag)
+        // The watchdog enforces the battery rule from its own queue, so it
+        // needs the user's threshold both now and on every later change.
+        watchdog.setBatteryThreshold(configStore.config.batteryThreshold.percent)
+        watchdog.events
+            .receive(on: RunLoop.main)
+            .sink { [weak self] event in
+                self?.onWatchdogEvent(event)
             }
             .store(in: &bag)
         wakeObserver = notificationCenter.addObserver(
@@ -169,7 +191,11 @@ final class AwakeSupervisor {
                 return
             }
             do {
-                try caffeine.enable(options: config.flags)
+                try caffeine.enable(
+                    options: config.flags,
+                    mode: .auto,
+                    releaseAfter: effectiveIdleWindow
+                )
                 state = .autoActive(since: date)
                 startUserReturnPoll()
             } catch {
@@ -182,6 +208,10 @@ final class AwakeSupervisor {
     }
 
     private func rescheduleIdleTimer() {
+        // Keep the off-main deadline in step with the in-process idle timer:
+        // every reason to push one out is a reason to push out the other, and
+        // a watchdog deadline left behind would release a live session early.
+        watchdog.bumpDeadline(releaseAfter: effectiveIdleWindow)
         idleTimerTask?.cancel()
         let window = effectiveIdleWindow
         idleTimerTask = Task { @MainActor [weak self] in
@@ -277,7 +307,7 @@ final class AwakeSupervisor {
             opts.timeoutSeconds = Int(timeout)
         }
         do {
-            try caffeine.enable(options: opts)
+            try caffeine.enable(options: opts, mode: .manual, releaseAfter: timeout)
             state = .manualActive(since: Date(), timeout: timeout)
             idleTimerTask?.cancel()
             idleTimerTask = nil
@@ -332,7 +362,11 @@ final class AwakeSupervisor {
             suppressCaffeineExitReaction = true
             caffeine.disable()
             do {
-                try caffeine.enable(options: flags)
+                try caffeine.enable(
+                    options: flags,
+                    mode: .auto,
+                    releaseAfter: effectiveIdleWindow
+                )
                 state = .autoActive(since: since)
             } catch {
                 state = .idle
@@ -362,6 +396,7 @@ final class AwakeSupervisor {
 
     func updateBatteryThreshold(_ threshold: BatteryThreshold) {
         configStore.mutate { $0.batteryThreshold = threshold }
+        watchdog.setBatteryThreshold(threshold.percent)
         onBatteryChange(battery.reading)   // re-evaluate immediately
     }
 
@@ -462,5 +497,115 @@ final class AwakeSupervisor {
                 // Auto re-engages on next JSONL append.
             }
         }
+    }
+
+    // MARK: Watchdog reconcile
+
+    private func onWatchdogEvent(_ event: WatchdogEvent) {
+        switch event {
+        case .stallObserved(let stall):
+            AppLog.shared.log(
+                "AwakeWatchdog observed a \(Int(stall.seconds))s \(stall.side.rawValue) stall",
+                level: .warn
+            )
+        case .untimedOnBatteryNudge(let hours):
+            notifier.notifyLongUntimedSession(hours: hours)
+        case .fired(let firing):
+            adoptWatchdogFiring(firing)
+        }
+    }
+
+    /// Brings app state back in line with a release the watchdog already
+    /// performed (or attempted) from its own queue.
+    private func adoptWatchdogFiring(_ firing: WatchdogFiring) {
+        let terminalState: AwakeState
+        let reason: AwakeStopReason
+        switch firing.reason {
+        case .batteryBelowThreshold:
+            terminalState = .batteryBlocked
+            reason = .batteryBelowThreshold(
+                current: firing.batteryPercent ?? 0,
+                threshold: config.batteryThreshold.percent ?? 0
+            )
+        case .stalled:
+            terminalState = .idle
+            reason = .watchdogStalled(heldMinutes: Int(firing.heldSeconds / 60))
+        }
+        // Only adopt when the kernel really did drop everything. On a partial
+        // failure the watchdog is still holding stragglers for retry, and
+        // adopting would empty the manager's array on a false premise — leaving
+        // a live assertion whose only owner is a watchdog whose next disarm()
+        // hands it to a manager that no longer tracks it. `disable()` instead
+        // routes those stragglers back through the holder.
+        let releasedCleanly = firing.releaseStatuses.allSatisfy { $0 == kIOReturnSuccess }
+        // Close the session at the real release moment. Using the current
+        // clock would stretch the awake tint across the whole stall.
+        let didRelease = forceRelease(to: terminalState, at: firing.firedAt) {
+            if releasedCleanly {
+                self.caffeine.adoptWatchdogRelease()
+            } else {
+                AppLog.shared.log(
+                    "AwakeWatchdog firing had failed releases \(firing.releaseStatuses) — "
+                    + "releasing through the holder instead of adopting",
+                    level: .error
+                )
+                self.caffeine.disable()
+            }
+        }
+        // Not released here means main recovered through some other path first.
+        // The evidence record already exists; notifying now would double-report
+        // a single stop.
+        guard didRelease else { return }
+        notifier.notifyStopped(reason)
+    }
+
+    /// Called from `applicationWillTerminate`. Releases through the supervisor
+    /// rather than letting the delegate call `caffeine.disable()` directly:
+    /// without the suppression flag that would flip `caffeine.$isActive` and
+    /// fire a spurious "stopped unexpectedly" notification on every quit that
+    /// happens mid-session. Deliberately silent otherwise — quitting is not a
+    /// stop reason worth a notification.
+    func prepareForTermination(at date: Date = Date()) {
+        // Always `disable()`: at quit time the manager still holds everything,
+        // so there is no watchdog release to adopt.
+        forceRelease(to: .idle, at: date) { self.caffeine.disable() }
+    }
+
+    /// Shared body of the two paths that end a session from outside the normal
+    /// state machine — a watchdog firing and app termination. Both bail when no
+    /// session is running, both transition *before* the release so the
+    /// `caffeine.$isActive` sink sees a non-active state and stays quiet (the
+    /// same ordering `onBatteryChange` uses), both cancel the release timers,
+    /// and both close the session at the moment of the real release.
+    ///
+    /// What they don't share is how the assertion goes away, which each caller
+    /// supplies as `release` — a firing may adopt a release the watchdog
+    /// already made, while quitting always releases through the manager. That
+    /// difference stays visible at the call site instead of being folded in here.
+    ///
+    /// - Returns: false when there was no live session, so the caller can skip
+    ///   whatever it would only do for a session it actually ended.
+    @discardableResult
+    private func forceRelease(
+        to terminalState: AwakeState,
+        at date: Date,
+        release: () -> Void
+    ) -> Bool {
+        switch state {
+        case .idle, .batteryBlocked:
+            return false
+        case .autoActive, .manualActive:
+            break
+        }
+        state = terminalState
+        lastActiveProvider = nil
+        suppressCaffeineExitReaction = true
+        release()
+        idleTimerTask?.cancel()
+        idleTimerTask = nil
+        userReturnPollTask?.cancel()
+        userReturnPollTask = nil
+        onForcedRelease?(date, state)
+        return true
     }
 }

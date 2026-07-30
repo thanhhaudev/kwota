@@ -216,4 +216,5 @@ private final class HostedTestNotifier: AwakeNotifying {
         $isPermissionDenied.eraseToAnyPublisher()
     }
     func notifyStopped(_ reason: AwakeStopReason) {}
+    func notifyLongUntimedSession(hours: Int) {}
 }

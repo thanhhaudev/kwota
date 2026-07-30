@@ -23,6 +23,7 @@ final class AwakeSupervisorTests: XCTestCase {
     /// MenuBarViewModels subscribed to `NSWorkspace.shared.notificationCenter`.
     var notificationCenter: NotificationCenter!
     var userInput: FakeUserInputMonitor!
+    var watchdog: FakeAwakeWatchdog!
 
     override func setUp() async throws {
         suite = "AwakeSupervisorTests-\(UUID().uuidString)"
@@ -30,7 +31,12 @@ final class AwakeSupervisorTests: XCTestCase {
         defaults.removePersistentDomain(forName: suite)
         configStore = AwakeConfigStore(defaults: defaults)
         holder = MockSleepAssertionHolder()
-        caffeine = CaffeinateManager(holder: holder)
+        // One watchdog shared by the manager and the supervisor: the manager
+        // arms/disarms it, the supervisor bumps its deadline and reacts to its
+        // events. Two instances would let `caffeine.disable()` disarm a
+        // watchdog nobody under test is asserting on.
+        watchdog = FakeAwakeWatchdog()
+        caffeine = CaffeinateManager(holder: holder, watchdog: watchdog)
         activity = AwakeActivityStub()
         battery = FakeBatteryMonitor()
         notifier = FakeAwakeNotifier()
@@ -536,14 +542,195 @@ final class AwakeSupervisorTests: XCTestCase {
         } else { XCTFail("gate off must stop user-return releases, got \(sup.state)") }
     }
 
+    // MARK: watchdog reconcile
+
+    func testWatchdogStallFiring_goesIdleWithOneNotification() async {
+        let sup = makeSupervisor()
+        activity.emit(at: Date())
+        await Task.yield(); await Task.yield()
+        XCTAssertTrue(caffeine.isActive)
+
+        watchdog.subject.send(.fired(WatchdogFiring(
+            firedAt: Date(timeIntervalSince1970: 500),
+            reason: .stalled, mode: .auto,
+            sessionStart: Date(timeIntervalSince1970: 0),
+            heldSeconds: 500, mainStallSeconds: 400,
+            batteryPercent: 90, isOnBattery: false,
+            assertionIDs: [1], releaseStatuses: [0]
+        )))
+        await Task.yield(); await Task.yield(); await Task.yield()
+
+        XCTAssertEqual(sup.state, .idle)
+        XCTAssertFalse(caffeine.isActive)
+        XCTAssertEqual(notifier.calls.count, 1, "the isActive sink must not add a second one")
+        guard case .watchdogStalled = notifier.calls.first else {
+            return XCTFail("expected watchdogStalled, got \(notifier.calls)")
+        }
+    }
+
+    func testWatchdogBatteryFiring_goesBatteryBlocked() async {
+        let sup = makeSupervisor()
+        activity.emit(at: Date())
+        await Task.yield(); await Task.yield()
+
+        watchdog.subject.send(.fired(WatchdogFiring(
+            firedAt: Date(timeIntervalSince1970: 500),
+            reason: .batteryBelowThreshold, mode: .auto,
+            sessionStart: Date(timeIntervalSince1970: 0),
+            heldSeconds: 500, mainStallSeconds: 0,
+            batteryPercent: 15, isOnBattery: true,
+            assertionIDs: [1], releaseStatuses: [0]
+        )))
+        await Task.yield(); await Task.yield(); await Task.yield()
+
+        XCTAssertEqual(sup.state, .batteryBlocked)
+        guard case .batteryBelowThreshold(let cur, _) = notifier.calls.first else {
+            return XCTFail("expected batteryBelowThreshold, got \(notifier.calls)")
+        }
+        XCTAssertEqual(cur, 15)
+    }
+
+    func testWatchdogFiring_closesSessionAtFiredAtNotNow() async {
+        var closedAt: Date?
+        let sup = makeSupervisor(onForcedRelease: { date, _ in closedAt = date })
+        activity.emit(at: Date())
+        await Task.yield(); await Task.yield()
+
+        let firedAt = Date(timeIntervalSince1970: 500)
+        watchdog.subject.send(.fired(WatchdogFiring(
+            firedAt: firedAt, reason: .stalled, mode: .auto,
+            sessionStart: Date(timeIntervalSince1970: 0),
+            heldSeconds: 500, mainStallSeconds: 400,
+            batteryPercent: nil, isOnBattery: false,
+            assertionIDs: [1], releaseStatuses: [0]
+        )))
+        await Task.yield(); await Task.yield(); await Task.yield()
+
+        XCTAssertEqual(closedAt, firedAt, "closing at recovery time would paint a phantom tint")
+        _ = sup
+    }
+
+    func testNudgeEventNotifiesAndChangesNothing() async {
+        let sup = makeSupervisor()
+        activity.emit(at: Date())
+        await Task.yield(); await Task.yield()
+        let before = sup.state
+
+        watchdog.subject.send(.untimedOnBatteryNudge(hours: 2))
+        await Task.yield(); await Task.yield()
+
+        XCTAssertEqual(notifier.untimedCalls, [2])
+        XCTAssertEqual(sup.state, before)
+        XCTAssertTrue(caffeine.isActive, "a nudge must never release")
+    }
+
+    func testStallObservedEventChangesNothing() async {
+        let sup = makeSupervisor()
+        activity.emit(at: Date())
+        await Task.yield(); await Task.yield()
+
+        watchdog.subject.send(.stallObserved(WatchdogStall(
+            observedAt: Date(), side: .mainActor, seconds: 240
+        )))
+        await Task.yield(); await Task.yield()
+
+        XCTAssertTrue(caffeine.isActive)
+        XCTAssertTrue(notifier.calls.isEmpty)
+        _ = sup
+    }
+
+    /// Main recovered through some other path before the firing was delivered.
+    /// The evidence record already exists; re-notifying would double-report a
+    /// single event.
+    func testFiringWhileAlreadyIdle_isANoOp() async {
+        let sup = makeSupervisor()
+        XCTAssertEqual(sup.state, .idle)
+
+        watchdog.subject.send(.fired(WatchdogFiring(
+            firedAt: Date(timeIntervalSince1970: 500),
+            reason: .stalled, mode: .auto,
+            sessionStart: Date(timeIntervalSince1970: 0),
+            heldSeconds: 500, mainStallSeconds: 400,
+            batteryPercent: nil, isOnBattery: false,
+            assertionIDs: [1], releaseStatuses: [0]
+        )))
+        await Task.yield(); await Task.yield()
+
+        XCTAssertEqual(sup.state, .idle)
+        XCTAssertTrue(notifier.calls.isEmpty)
+    }
+
+    // MARK: deadline bumps and threshold push
+
+    func testActivityBumpsTheWatchdogDeadline() async {
+        let sup = makeSupervisor()
+        activity.emit(at: Date())
+        await Task.yield(); await Task.yield()
+
+        XCTAssertEqual(watchdog.bumps.last, AwakeConfig.default.idleWindow.seconds)
+        _ = sup
+    }
+
+    func testThresholdIsPushedOnInitAndOnChange() {
+        let sup = makeSupervisor()
+        XCTAssertEqual(watchdog.thresholds.first, 20, "AwakeConfig.default is p20")
+
+        sup.updateBatteryThreshold(.p10)
+        XCTAssertEqual(watchdog.thresholds.last, 10)
+    }
+
+    /// A firing whose releases partly failed must not be adopted — the manager
+    /// has to release the straggler through its own holder. Adopting on a false
+    /// premise is the one path in this design that recreates F-003.
+    func testPartialFailureFiringReleasesThroughTheHolder() async {
+        let sup = makeSupervisor()
+        activity.emit(at: Date())
+        await Task.yield(); await Task.yield()
+        let heldBefore = holder.released.count
+
+        watchdog.subject.send(.fired(WatchdogFiring(
+            firedAt: Date(timeIntervalSince1970: 500),
+            reason: .stalled, mode: .auto,
+            sessionStart: Date(timeIntervalSince1970: 0),
+            heldSeconds: 500, mainStallSeconds: 400,
+            batteryPercent: nil, isOnBattery: false,
+            assertionIDs: [1], releaseStatuses: [-1]
+        )))
+        await Task.yield(); await Task.yield(); await Task.yield()
+
+        XCTAssertEqual(sup.state, .idle)
+        XCTAssertGreaterThan(holder.released.count, heldBefore,
+                             "a straggler must be released, not adopted away")
+    }
+
+    // MARK: termination
+
+    func testPrepareForTerminationReleasesSilently() async {
+        var closedAt: Date?
+        let sup = makeSupervisor(onForcedRelease: { date, _ in closedAt = date })
+        activity.emit(at: Date())
+        await Task.yield(); await Task.yield()
+        XCTAssertTrue(caffeine.isActive)
+
+        let quitAt = Date(timeIntervalSince1970: 900)
+        sup.prepareForTermination(at: quitAt)
+
+        XCTAssertEqual(sup.state, .idle)
+        XCTAssertFalse(caffeine.isActive)
+        XCTAssertEqual(closedAt, quitAt)
+        XCTAssertTrue(notifier.calls.isEmpty, "quitting is not an unexpected exit")
+    }
+
     // MARK: Helpers
 
     func makeSupervisor(
         config: AwakeConfig = .default,
         idleWindowOverride: TimeInterval? = nil,
         userReturnPollInterval: TimeInterval = 0.02,
+        watchdog: (any AwakeWatchdogging)? = nil,
         onWillSleep: ((Date, AwakeState) -> Void)? = nil,
-        onDidWakeFromSleep: ((Date, AwakeState) -> Void)? = nil
+        onDidWakeFromSleep: ((Date, AwakeState) -> Void)? = nil,
+        onForcedRelease: ((Date, AwakeState) -> Void)? = nil
     ) -> AwakeSupervisor {
         configStore.update(config)
         return AwakeSupervisor(
@@ -555,9 +742,15 @@ final class AwakeSupervisorTests: XCTestCase {
             idleWindowOverride: idleWindowOverride,
             userInput: userInput,
             userReturnPollInterval: userReturnPollInterval,
+            // Defaults to the suite's shared instance — the same one the
+            // manager was built with, so `caffeine.disable()` reaches it. A
+            // default *parameter* cannot reference an instance property, which
+            // is why this resolves in the body.
+            watchdog: watchdog ?? self.watchdog,
             notificationCenter: notificationCenter,
             onWillSleep: onWillSleep,
-            onDidWakeFromSleep: onDidWakeFromSleep
+            onDidWakeFromSleep: onDidWakeFromSleep,
+            onForcedRelease: onForcedRelease
         )
     }
 }
