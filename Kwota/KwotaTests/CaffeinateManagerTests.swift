@@ -199,6 +199,103 @@ final class CaffeinateManagerTests: XCTestCase {
         XCTAssertFalse(manager.isActive, "manager should auto-disable after timeout")
         XCTAssertEqual(mock.released.count, mock.acquired.count)
     }
+
+    // MARK: watchdog handoff
+
+    func testEnableArmsTheWatchdogWithTheAssertions() throws {
+        let mock = MockSleepAssertionHolder()
+        let wd = FakeAwakeWatchdog()
+        let manager = CaffeinateManager(holder: mock, watchdog: wd)
+
+        try manager.enable(options: allFlagsOptions(), mode: .auto, releaseAfter: 300)
+
+        XCTAssertEqual(wd.armCalls.count, 1)
+        XCTAssertEqual(wd.armCalls.first?.mode, .auto)
+        XCTAssertEqual(wd.armCalls.first?.releaseAfter, 300)
+        XCTAssertEqual(wd.armCalls.first?.assertions.count, 3)
+    }
+
+    /// A timed manual session has both a timeout and a releaseAfter, so any
+    /// inference inside the manager would mislabel it `.auto` and write the
+    /// wrong mode into the evidence file.
+    func testTimedManualSessionIsArmedAsManual() throws {
+        let mock = MockSleepAssertionHolder()
+        let wd = FakeAwakeWatchdog()
+        let manager = CaffeinateManager(holder: mock, watchdog: wd)
+
+        try manager.enable(options: allFlagsOptions(timeoutSeconds: 7200),
+                           mode: .manual, releaseAfter: 7200)
+
+        XCTAssertEqual(wd.armCalls.first?.mode, .manual)
+    }
+
+    func testDisableReleasesExactlyWhatDisarmHandsBack() throws {
+        let mock = MockSleepAssertionHolder()
+        let wd = FakeAwakeWatchdog()
+        let manager = CaffeinateManager(holder: mock, watchdog: wd)
+
+        try manager.enable(options: allFlagsOptions())
+        manager.disable()
+
+        XCTAssertEqual(wd.disarmCount, 1)
+        XCTAssertEqual(mock.released.count, 3, "nothing fired, so all three come back to us")
+    }
+
+    func testDisableSkipsReleaseAfterACleanFiring() throws {
+        let mock = MockSleepAssertionHolder()
+        let wd = FakeAwakeWatchdog()
+        let manager = CaffeinateManager(holder: mock, watchdog: wd)
+
+        try manager.enable(options: allFlagsOptions())
+        wd.disarmReturns = []           // watchdog released them all
+        manager.disable()
+
+        XCTAssertTrue(mock.released.isEmpty, "double-release would be a race, not a safety net")
+    }
+
+    /// The orphan guard at the manager level: a straggler the watchdog could not
+    /// release must be released here, not silently dropped.
+    func testDisableReleasesStragglersAfterAFailedWatchdogRelease() throws {
+        let mock = MockSleepAssertionHolder()
+        let wd = FakeAwakeWatchdog()
+        let manager = CaffeinateManager(holder: mock, watchdog: wd)
+
+        try manager.enable(options: allFlagsOptions())
+        let straggler = wd.armCalls.first!.assertions[1]
+        wd.disarmReturns = [straggler]
+        manager.disable()
+
+        XCTAssertEqual(mock.released, [straggler])
+    }
+
+    func testAdoptWatchdogReleaseClearsStateWithoutReleasing() throws {
+        let mock = MockSleepAssertionHolder()
+        let wd = FakeAwakeWatchdog()
+        let manager = CaffeinateManager(holder: mock, watchdog: wd)
+
+        try manager.enable(options: allFlagsOptions())
+        manager.adoptWatchdogRelease()
+
+        XCTAssertFalse(manager.isActive)
+        XCTAssertNil(manager.currentOptions)
+        XCTAssertNil(manager.startedAt)
+        XCTAssertTrue(mock.released.isEmpty, "the kernel already dropped them")
+    }
+
+    func testHeartbeatTicksWhileActive() async throws {
+        let mock = MockSleepAssertionHolder()
+        let wd = FakeAwakeWatchdog()
+        let manager = CaffeinateManager(holder: mock, watchdog: wd, heartbeatInterval: 0.02)
+
+        try manager.enable(options: allFlagsOptions())
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        let during = wd.heartbeats
+        manager.disable()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertGreaterThan(during, 0)
+        XCTAssertEqual(wd.heartbeats, during, "heartbeat must stop with the assertion")
+    }
 }
 
 // MARK: - Holder variant for the partial-rollback test
