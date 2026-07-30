@@ -83,6 +83,12 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
 
     private let lock = NSLock()
     private var armed: Armed?
+    /// Bumped on every `arm()`/`disarm()`. `tick()` snapshots this alongside
+    /// `armed` before doing unlocked IO, then checks it again before writing
+    /// its result back — if it changed in between, the session `tick()` was
+    /// releasing has already ended or been replaced, and committing stale
+    /// results would resurrect or clobber the wrong one.
+    private var armEpoch: UInt64 = 0
     private var batteryThreshold: Int?
     private var batteryBelowSinceUptime: UInt64?
     private var lastTickUptime: UInt64?
@@ -126,12 +132,7 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
     func arm(assertions: [SleepAssertion], mode: WatchdogMode, releaseAfter: TimeInterval?) {
         let now = uptime()
         lock.lock()
-        if let stale = armed {
-            // Reaching this is a caller lifecycle bug, but overwriting `armed`
-            // while it still holds unreleased assertions leaks them to nobody.
-            AppLog.shared.log("AwakeWatchdog.arm called while already armed", level: .warn)
-            for assertion in stale.assertions { _ = releaser(assertion) }
-        }
+        let stale = armed
         armed = Armed(
             assertions: assertions,
             deadlineUptime: releaseAfter.map { now &+ nanos($0 + deadlineGrace) },
@@ -143,15 +144,32 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
             nudgeSent: false,
             firingReported: false
         )
+        armEpoch &+= 1
         batteryBelowSinceUptime = nil
         lock.unlock()
+
+        // IO (log + release) happens unlocked: `stale` is already detached
+        // from `armed`, so there is nothing left for another thread to race
+        // against here, and a wedged `releaser` must not be able to block a
+        // concurrent `disarm()`/`mainHeartbeat()` behind this lock.
+        if let stale {
+            // Reaching this is a caller lifecycle bug, but overwriting `armed`
+            // while it still holds unreleased assertions leaks them to nobody.
+            AppLog.shared.log("AwakeWatchdog.arm called while already armed", level: .warn)
+            for assertion in stale.assertions { _ = releaser(assertion) }
+        }
     }
 
     func bumpDeadline(releaseAfter: TimeInterval) {
         let now = uptime()
         lock.lock()
         defer { lock.unlock() }
-        guard var current = armed, current.deadlineUptime != nil else { return }
+        // Once a firing has been reported, the deadline has already done its
+        // job and a straggler assertion may still be pending retry. Letting
+        // ordinary main-actor activity (agent replies, keystrokes) push the
+        // deadline back out here would silence that retry indefinitely —
+        // the exact multi-hour stuck assertion this watchdog exists to catch.
+        guard var current = armed, current.deadlineUptime != nil, !current.firingReported else { return }
         current.deadlineUptime = now &+ nanos(releaseAfter + deadlineGrace)
         armed = current
     }
@@ -190,6 +208,7 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         // with no owner at all.
         let stillHeld = armed?.assertions ?? []
         armed = nil
+        armEpoch &+= 1
         batteryBelowSinceUptime = nil
         return stillHeld
     }
@@ -197,68 +216,95 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
     // MARK: Tick
 
     /// Internal so tests drive it directly rather than waiting on a real timer.
+    ///
+    /// Structured in three passes — snapshot, unlocked IO, commit — so `lock`
+    /// is never held across `releaser()`, `sampler()`, or `AppLog` calls. Those
+    /// can block on `powerd`/IOKit or on the log's own queue; a main actor that
+    /// calls `disarm()`/`mainHeartbeat()`/`arm()` synchronously would otherwise
+    /// queue up behind whichever thread is doing that IO, turning the one
+    /// release path with no main-thread dependency into a new way to stall the
+    /// main thread — the exact failure class this type exists to catch.
     func tick() {
         let now = uptime()
-        var toEmit: [WatchdogEvent] = []
 
+        // Pass 1: snapshot under lock. No IO here, so this is always fast.
         lock.lock()
         lastTickUptime = now
-        guard var current = armed else { lock.unlock(); return }
+        guard let current = armed else { lock.unlock(); return }
+        let epoch = armEpoch
 
         // Deadline rule. Battery is evaluated in Task 5; the ordering there
         // puts battery first because it is the rule tied to real-world harm.
         let deadlineLapsed = current.deadlineUptime.map { now > $0 } ?? false
+        guard deadlineLapsed else { lock.unlock(); return }
 
-        if deadlineLapsed {
-            let stall = seconds(now &- current.lastMainHeartbeatUptime)
-            var statuses: [Int32] = []
-            var stillHeld: [SleepAssertion] = []
-            for assertion in current.assertions {
-                let status = releaser(assertion)
-                statuses.append(status)
-                // A failed release must stay armed and be retried. Clearing it
-                // would leave the record, the reconcile and `isActive` all
-                // claiming "released" while the kernel still holds it — a
-                // silent return to the exact F-003 symptom with nothing left
-                // to retry.
-                if status != kIOReturnSuccess { stillHeld.append(assertion) }
-            }
+        let assertionsToRelease = current.assertions
+        let wasFiringReported = current.firingReported
+        let mode = current.mode
+        let sessionStart = current.startedAtWall
+        let heldSeconds = seconds(now &- current.startedAtUptime)
+        let stallSeconds = seconds(now &- current.lastMainHeartbeatUptime)
+        lock.unlock()
 
-            if !current.firingReported {
-                let reading = sampler()
-                toEmit.append(.fired(WatchdogFiring(
-                    firedAt: wallClock(),
-                    reason: .stalled,
-                    mode: current.mode,
-                    sessionStart: current.startedAtWall,
-                    heldSeconds: seconds(now &- current.startedAtUptime),
-                    mainStallSeconds: stall,
-                    batteryPercent: reading.percent,
-                    isOnBattery: reading.isOnBattery,
-                    assertionIDs: current.assertions.map(\.id),
-                    releaseStatuses: statuses
-                )))
-                current.firingReported = true
-            } else {
-                AppLog.shared.log(
-                    "AwakeWatchdog: retrying \(stillHeld.count) failed assertion release(s)",
-                    level: .warn
-                )
-            }
+        // Pass 2: unlocked IO. This is the part that can genuinely block —
+        // real mach IPC to powerd, IOKit battery queries, log writes — and
+        // none of it needs the lock.
+        var statuses: [Int32] = []
+        var stillHeld: [SleepAssertion] = []
+        for assertion in assertionsToRelease {
+            let status = releaser(assertion)
+            statuses.append(status)
+            // A failed release must stay armed and be retried. Clearing it
+            // would leave the record, the reconcile and `isActive` all
+            // claiming "released" while the kernel still holds it — a
+            // silent return to the exact F-003 symptom with nothing left
+            // to retry.
+            if status != kIOReturnSuccess { stillHeld.append(assertion) }
+        }
 
+        var eventToEmit: WatchdogEvent?
+        if !wasFiringReported {
+            let reading = sampler()
+            eventToEmit = .fired(WatchdogFiring(
+                firedAt: wallClock(),
+                reason: .stalled,
+                mode: mode,
+                sessionStart: sessionStart,
+                heldSeconds: heldSeconds,
+                mainStallSeconds: stallSeconds,
+                batteryPercent: reading.percent,
+                isOnBattery: reading.isOnBattery,
+                assertionIDs: assertionsToRelease.map(\.id),
+                releaseStatuses: statuses
+            ))
+        } else {
+            AppLog.shared.log(
+                "AwakeWatchdog: retrying \(stillHeld.count) failed assertion release(s)",
+                level: .warn
+            )
+        }
+
+        // Pass 3: commit under lock, but only if the session we just acted on
+        // is still the one that's armed. `armEpoch` changes on every arm()/
+        // disarm(), so a mismatch here means the caller ended or replaced this
+        // session while the IO above was in flight — writing `stillHeld` back
+        // in that case would resurrect a session that was deliberately ended,
+        // or corrupt an unrelated new one. The release calls above already ran
+        // for real regardless; only the in-memory bookkeeping is skipped.
+        lock.lock()
+        if armEpoch == epoch, var latest = armed {
             if stillHeld.isEmpty {
                 armed = nil
                 batteryBelowSinceUptime = nil
             } else {
-                current.assertions = stillHeld
-                armed = current
+                latest.assertions = stillHeld
+                if !wasFiringReported { latest.firingReported = true }
+                armed = latest
             }
-        } else {
-            armed = current
         }
         lock.unlock()
 
-        for event in toEmit {
+        if let event = eventToEmit {
             evidence.append(event)   // disk first: main may never come back
             subject.send(event)
         }

@@ -14,6 +14,7 @@ final class AwakeWatchdogTests: XCTestCase {
         private let lock = NSLock()
         private var _released: [SleepAssertion] = []
         private var _failIDs: Set<UInt32> = []
+        private var gate: DispatchSemaphore?
 
         var released: [SleepAssertion] {
             lock.lock(); defer { lock.unlock() }; return _released
@@ -24,7 +25,21 @@ final class AwakeWatchdogTests: XCTestCase {
         func stopFailing() {
             lock.lock(); defer { lock.unlock() }; _failIDs = []
         }
+        /// Makes the *next* `release` call block on `gate` before doing
+        /// anything else — a stand-in for a wedged `IOPMAssertionRelease`, so
+        /// a test can park `tick()` mid-release and prove other watchdog
+        /// calls don't queue up behind it.
+        func blockNextRelease(on gate: DispatchSemaphore) {
+            lock.lock(); defer { lock.unlock() }; self.gate = gate
+        }
         func release(_ a: SleepAssertion) -> Int32 {
+            let parked: DispatchSemaphore? = {
+                lock.lock(); defer { lock.unlock() }
+                let g = gate
+                gate = nil
+                return g
+            }()
+            parked?.wait()
             lock.lock(); defer { lock.unlock() }
             _released.append(a)
             return _failIDs.contains(a.id) ? -1 : 0
@@ -238,5 +253,72 @@ final class AwakeWatchdogTests: XCTestCase {
         XCTAssertGreaterThan(releaser.released.count, 1, "retries must keep happening")
         XCTAssertEqual(received.filter { if case .fired = $0 { return true } else { return false } }.count, 1)
         XCTAssertEqual(evidence.events.filter { if case .fired = $0 { return true } else { return false } }.count, 1)
+    }
+
+    // MARK: lock scope
+
+    /// `tick()`'s release loop must not hold the internal lock while it calls
+    /// out to `releaser`/`sampler`/`AppLog`. If it did, a wedged release (a
+    /// plausible root cause of the very stall this watchdog exists to catch)
+    /// would leave the lock held indefinitely, and every synchronous call the
+    /// main actor makes on this type — `mainHeartbeat`, `disarm`, `arm` — would
+    /// queue up behind it, turning the one release path with no main-thread
+    /// dependency into a brand-new way to freeze the main thread.
+    func test_tickReleaseIO_doesNotBlockOtherCallsBehindTheLock() {
+        let wd = makeWatchdog()
+        wd.arm(assertions: [a1], mode: .auto, releaseAfter: 300)
+        uptime.advance(421)
+
+        let gate = DispatchSemaphore(value: 0)
+        releaser.blockNextRelease(on: gate)
+
+        let tickFinished = expectation(description: "tick finished")
+        DispatchQueue.global().async {
+            wd.tick()   // parks inside releaser() on `gate`
+            tickFinished.fulfill()
+        }
+
+        // Give the background tick a moment to actually reach the blocked
+        // release call before we probe the lock from here.
+        Thread.sleep(forTimeInterval: 0.2)
+
+        let heartbeatReturned = expectation(description: "mainHeartbeat returned promptly")
+        DispatchQueue.global().async {
+            wd.mainHeartbeat()
+            heartbeatReturned.fulfill()
+        }
+        // Bounded wait: if tick() held the lock across the parked release,
+        // this times out instead of hanging the whole test run.
+        wait(for: [heartbeatReturned], timeout: 1.0)
+
+        gate.signal()
+        wait(for: [tickFinished], timeout: 2.0)
+        XCTAssertEqual(releaser.released.map(\.id), [1])
+    }
+
+    // MARK: bumpDeadline after firing
+
+    /// Once a firing has been recorded, `bumpDeadline` must be a no-op even
+    /// though the watchdog is technically still "armed" while a straggler
+    /// assertion awaits retry. Letting ordinary auto-mode activity keep
+    /// pushing the deadline out here would silence that retry forever —
+    /// F-003 again, this time via the retry mechanism meant to prevent it.
+    func test_bumpDeadlineAfterFiring_doesNotSuppressThePendingRetry() {
+        let wd = makeWatchdog()
+        releaser.failFor([1])
+        wd.arm(assertions: [a1, a2], mode: .auto, releaseAfter: 300)
+        uptime.advance(421)
+        wd.tick()   // fires; a2 released cleanly, a1 is the straggler
+        XCTAssertEqual(releaser.released.map(\.id), [1, 2])
+
+        // Ordinary main-actor activity (an agent reply, in auto mode) tries
+        // to push the deadline out, as it would for a session that never fired.
+        wd.bumpDeadline(releaseAfter: 300)
+        releaser.stopFailing()
+        uptime.advance(60)
+        wd.tick()   // must still retry — the bump above must have been ignored
+
+        XCTAssertEqual(releaser.released.map(\.id), [1, 2, 1], "retry must not be suppressed by the bump")
+        XCTAssertTrue(wd.disarm().isEmpty, "straggler released on retry; nothing left to hand back")
     }
 }
