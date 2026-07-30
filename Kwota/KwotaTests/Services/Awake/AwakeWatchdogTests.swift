@@ -737,4 +737,62 @@ final class AwakeWatchdogTests: XCTestCase {
         XCTAssertEqual(f.reason, .batteryBelowThreshold,
                        "battery is the more actionable message for the user")
     }
+
+    // MARK: battery firing + failed release must still retry
+
+    /// The deadline rule's condition is monotonic, so a failed release under it
+    /// is retried by every later tick for free — that is what
+    /// `test_failedReleaseStaysArmedAndRetriesOnNextTick` covers. The battery
+    /// rule's condition is not monotonic: it un-trips the moment the user plugs
+    /// in, which is the single most likely thing to happen right after a
+    /// low-battery release fires. On an untimed manual session there is no
+    /// deadline to fall back on, so if the firing rule's own condition is what
+    /// gates the retry, the straggler is abandoned with the kernel still holding
+    /// it and nothing left to retry — F-003, reached through the rule added to
+    /// prevent it.
+    func test_batteryFiringWithFailedRelease_stillRetriesAfterThePowerIsPluggedIn() {
+        let wd = makeWatchdog()
+        releaser.failFor([1])
+        wd.setBatteryThreshold(20)
+        wd.arm(assertions: [a1], mode: .manual, releaseAfter: nil)   // battery rule only
+        battery = BatteryReading(isOnBattery: true, percent: 15)
+
+        uptime.advance(30); wd.tick()    // starts the grace
+        uptime.advance(130); wd.tick()   // fires; the release fails, so a1 stays armed
+        XCTAssertEqual(releaser.released.map(\.id), [1])
+
+        // The user plugs in: the battery rule stops holding entirely.
+        battery = BatteryReading(isOnBattery: false, percent: 40)
+        releaser.stopFailing()
+        uptime.advance(30); wd.tick()
+
+        XCTAssertEqual(releaser.released.map(\.id), [1, 1],
+                       "the straggler must still be retried once the battery recovers")
+        XCTAssertTrue(wd.disarm().isEmpty, "the retry succeeded; nothing left to hand back")
+        XCTAssertEqual(evidence.events.count, 1, "a retry must not record a second firing")
+    }
+
+    /// Same abandonment, via the other door: turning the threshold off makes
+    /// Pass 1 itself bail before the retry, since an untimed manual session with
+    /// no threshold has no rule left to evaluate at all. The pending retry must
+    /// survive a config change it has nothing to do with.
+    func test_batteryFiringWithFailedRelease_stillRetriesAfterTheThresholdIsCleared() {
+        let wd = makeWatchdog()
+        releaser.failFor([1])
+        wd.setBatteryThreshold(20)
+        wd.arm(assertions: [a1], mode: .manual, releaseAfter: nil)
+        battery = BatteryReading(isOnBattery: true, percent: 15)
+
+        uptime.advance(30); wd.tick()
+        uptime.advance(130); wd.tick()   // fires; release fails
+        XCTAssertEqual(releaser.released.map(\.id), [1])
+
+        wd.setBatteryThreshold(nil)
+        releaser.stopFailing()
+        uptime.advance(30); wd.tick()
+
+        XCTAssertEqual(releaser.released.map(\.id), [1, 1],
+                       "the straggler must still be retried once the threshold is off")
+        XCTAssertTrue(wd.disarm().isEmpty, "the retry succeeded; nothing left to hand back")
+    }
 }

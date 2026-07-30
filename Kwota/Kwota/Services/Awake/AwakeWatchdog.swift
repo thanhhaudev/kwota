@@ -371,8 +371,16 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         // crosses, not on the tick something finally fires. Without a
         // threshold and without a lapsed deadline there is nothing to learn,
         // so an idle session costs no IOKit query at all.
+        //
+        // `firingReported` is the third way in, and it is not an optimisation:
+        // a session still armed after a firing is one whose release *failed*,
+        // and the kernel is still holding that assertion. Its retry has to keep
+        // running whether or not the rule that fired still holds — see the
+        // matching guard in Pass 3.
         let deadlineMayHaveLapsed = snapshot.deadlineUptime.map { now > $0 } ?? false
-        guard deadlineMayHaveLapsed || threshold != nil else { lock.unlock(); return }
+        guard deadlineMayHaveLapsed || threshold != nil || snapshot.firingReported else {
+            lock.unlock(); return
+        }
         lock.unlock()
 
         // Pass 2: unlocked sample. `sampler()` is an IOKit power-source query,
@@ -416,7 +424,22 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         }
 
         let deadlineLapsed = current.deadlineUptime.map { now > $0 } ?? false
-        guard batteryLapsed || deadlineLapsed else { lock.unlock(); return }
+        // `firingReported` keeps a failed release retrying even when neither
+        // rule currently holds. The deadline rule never needed this: `now >
+        // deadlineUptime` is monotonic and `bumpDeadline()` refuses to move it
+        // after a firing, so its condition stays true forever and every
+        // subsequent tick naturally retried. The battery rule is the opposite —
+        // it un-trips the instant the sample recovers, AC is plugged in, or the
+        // threshold is turned off, and plugging in is the single most likely
+        // thing to happen right after a low-battery release fires. Without this
+        // clause, a battery firing whose `releaser()` call failed on an untimed
+        // manual session (battery rule only, so no deadline to fall back on)
+        // would abandon its own straggler here on the very next tick, leaving a
+        // live kernel assertion nobody retries until `disarm()` — F-003 again,
+        // reached through the rule meant to prevent it.
+        guard batteryLapsed || deadlineLapsed || current.firingReported else {
+            lock.unlock(); return
+        }
 
         let assertionsToRelease = current.assertions
         let wasFiringReported = current.firingReported
@@ -450,6 +473,13 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         }
 
         var eventToEmit: WatchdogEvent?
+        // The retry-only tick (neither rule currently tripped, reached solely
+        // because `firingReported` is set) always lands in the `else` branch,
+        // which is what keeps `reason` honest: the ternary below can only ever
+        // evaluate on a tick where a rule genuinely tripped, since
+        // `!wasFiringReported` means Pass 3's guard was satisfied by
+        // `batteryLapsed || deadlineLapsed` and nothing else. A retry never
+        // relabels the original firing, and never emits a second one.
         if !wasFiringReported {
             // Reuse Pass 2's sample when there was one, so the record shows the
             // very reading the battery rule fired on rather than a second,
