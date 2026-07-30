@@ -633,4 +633,108 @@ final class AwakeWatchdogTests: XCTestCase {
 
         releaser.unwedgeAllReleases()
     }
+
+    // MARK: battery rule
+
+    func test_belowThresholdWithinGrace_doesNotFire() {
+        let wd = makeWatchdog()
+        wd.setBatteryThreshold(20)
+        wd.arm(assertions: [a1], mode: .manual, releaseAfter: nil)
+        battery = BatteryReading(isOnBattery: true, percent: 15)
+
+        uptime.advance(30); wd.tick()
+        uptime.advance(30); wd.tick()   // 60s below, grace is 120
+
+        XCTAssertTrue(releaser.released.isEmpty, "main gets two minutes to stop gracefully first")
+    }
+
+    func test_belowThresholdPastGrace_fires() {
+        let wd = makeWatchdog()
+        var received: [WatchdogEvent] = []
+        wd.events.sink { received.append($0) }.store(in: &bag)
+
+        wd.setBatteryThreshold(20)
+        wd.arm(assertions: [a1], mode: .manual, releaseAfter: nil)
+        battery = BatteryReading(isOnBattery: true, percent: 15)
+
+        uptime.advance(30); wd.tick()
+        uptime.advance(130); wd.tick()
+
+        XCTAssertEqual(releaser.released.map(\.id), [1])
+        guard case .fired(let f)? = received.first else {
+            return XCTFail("expected fired, got \(received)")
+        }
+        XCTAssertEqual(f.reason, .batteryBelowThreshold)
+        XCTAssertEqual(f.batteryPercent, 15)
+        XCTAssertTrue(f.isOnBattery)
+    }
+
+    func test_recoveringMidGraceResetsTheClock() {
+        let wd = makeWatchdog()
+        wd.setBatteryThreshold(20)
+        wd.arm(assertions: [a1], mode: .manual, releaseAfter: nil)
+
+        battery = BatteryReading(isOnBattery: true, percent: 15)
+        uptime.advance(30); wd.tick()
+        battery = BatteryReading(isOnBattery: true, percent: 25)
+        uptime.advance(30); wd.tick()
+        battery = BatteryReading(isOnBattery: true, percent: 15)
+        uptime.advance(100); wd.tick()
+
+        XCTAssertTrue(releaser.released.isEmpty, "grace restarts after a recovery")
+    }
+
+    func test_thresholdOff_neverFiresOnBattery() {
+        let wd = makeWatchdog()
+        wd.setBatteryThreshold(nil)
+        wd.arm(assertions: [a1], mode: .manual, releaseAfter: nil)
+        battery = BatteryReading(isOnBattery: true, percent: 1)
+
+        uptime.advance(30); wd.tick()
+        uptime.advance(600); wd.tick()
+
+        XCTAssertTrue(releaser.released.isEmpty)
+    }
+
+    func test_onACPowerNeverFires_evenBelowThreshold() {
+        let wd = makeWatchdog()
+        wd.setBatteryThreshold(20)
+        wd.arm(assertions: [a1], mode: .manual, releaseAfter: nil)
+        battery = BatteryReading(isOnBattery: false, percent: 5)
+
+        uptime.advance(30); wd.tick()
+        uptime.advance(600); wd.tick()
+
+        XCTAssertTrue(releaser.released.isEmpty, "plugged in means nothing to protect")
+    }
+
+    func test_desktopWithNoBattery_neverFires() {
+        let wd = makeWatchdog()
+        wd.setBatteryThreshold(20)
+        wd.arm(assertions: [a1], mode: .manual, releaseAfter: nil)
+        battery = BatteryReading(isOnBattery: false, percent: nil)
+
+        uptime.advance(600); wd.tick()
+
+        XCTAssertTrue(releaser.released.isEmpty)
+    }
+
+    func test_bothRulesTrip_reasonIsBattery() {
+        let wd = makeWatchdog()
+        var received: [WatchdogEvent] = []
+        wd.events.sink { received.append($0) }.store(in: &bag)
+
+        wd.setBatteryThreshold(20)
+        wd.arm(assertions: [a1], mode: .auto, releaseAfter: 300)
+        battery = BatteryReading(isOnBattery: true, percent: 15)
+
+        uptime.advance(30); wd.tick()      // starts the battery grace
+        uptime.advance(500); wd.tick()     // both deadline and battery grace lapsed
+
+        guard case .fired(let f)? = received.first else {
+            return XCTFail("expected fired, got \(received)")
+        }
+        XCTAssertEqual(f.reason, .batteryBelowThreshold,
+                       "battery is the more actionable message for the user")
+    }
 }

@@ -104,8 +104,9 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
     /// results would resurrect or clobber the wrong one.
     private var armEpoch: UInt64 = 0
     /// Set to the epoch of the session `tick()` is currently releasing,
-    /// exactly for the unlocked window between its snapshot and commit
-    /// passes; nil the rest of the time. `arm()`/`disarm()` wait on this
+    /// exactly for the unlocked window between its decision and commit
+    /// passes; nil the rest of the time — including across the earlier,
+    /// unlocked battery sample, which releases nothing. `arm()`/`disarm()` wait on this
     /// rather than proceeding, so neither ever calls `releaser()` on an
     /// assertion ID `tick()` is concurrently releasing — the double-release
     /// race a Bool-only lock-scope fix would otherwise still allow.
@@ -328,30 +329,94 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
 
     /// Internal so tests drive it directly rather than waiting on a real timer.
     ///
-    /// Structured in three passes — snapshot, unlocked IO, commit — so `lock`
-    /// is never held across `releaser()`, `sampler()`, or `AppLog` calls. Those
-    /// can block on `powerd`/IOKit or on the log's own queue; a main actor that
-    /// calls `mainHeartbeat()`/`lastTickAgeSeconds()`/`bumpDeadline()`/
-    /// `setBatteryThreshold()` synchronously would otherwise queue up behind
-    /// whichever thread is doing that IO, turning the one release path with no
-    /// main-thread dependency into a new way to stall the main thread — the
-    /// exact failure class this type exists to catch. `arm()`/`disarm()` are
-    /// the two calls that *do* need to coordinate with this window (see
-    /// `releasingEpoch`), because they touch the very assertions this method
-    /// is releasing.
+    /// Structured so `lock` is never held across `releaser()`, `sampler()`, or
+    /// `AppLog` calls. Those can block on `powerd`/IOKit or on the log's own
+    /// queue; a main actor that calls `mainHeartbeat()`/`lastTickAgeSeconds()`/
+    /// `bumpDeadline()`/`setBatteryThreshold()` synchronously would otherwise
+    /// queue up behind whichever thread is doing that IO, turning the one
+    /// release path with no main-thread dependency into a new way to stall the
+    /// main thread — the exact failure class this type exists to catch.
+    /// `arm()`/`disarm()` are the two calls that *do* need to coordinate with
+    /// the release window (see `releasingEpoch`), because they touch the very
+    /// assertions this method is releasing.
+    ///
+    /// The passes, in order:
+    ///
+    /// 1. locked, no IO — snapshot, and bail early when this tick cannot
+    ///    possibly need to do anything.
+    /// 2. unlocked — take the battery sample, the one piece of IO the firing
+    ///    decision itself depends on.
+    /// 3. locked, no IO — evaluate both rules against that sample, advance the
+    ///    below-threshold window, and claim the release window.
+    /// 4. unlocked — the releases, the log, and any late sample.
+    /// 5. locked, no IO — commit the outcome.
+    ///
+    /// The battery rule is why this has five passes rather than three: unlike
+    /// the deadline rule (pure arithmetic on already-snapshotted state), its
+    /// condition needs a live IOKit sample, so the decision cannot be made in
+    /// one locked pass without holding `lock` across that sample.
     func tick() {
         let now = uptime()
 
         // Pass 1: snapshot under lock. No IO here, so this is always fast.
         lock.lock()
         lastTickUptime = now
-        guard let current = armed else { lock.unlock(); return }
+        guard let snapshot = armed else { lock.unlock(); return }
         let epoch = armEpoch
+        let threshold = batteryThreshold
+        // Cheap pre-check purely to decide whether Pass 2's sample is worth
+        // taking. A configured threshold means this tick has to sample even
+        // when nothing is close to firing, because the below-threshold window
+        // has to start counting (and stop counting) on the tick the reading
+        // crosses, not on the tick something finally fires. Without a
+        // threshold and without a lapsed deadline there is nothing to learn,
+        // so an idle session costs no IOKit query at all.
+        let deadlineMayHaveLapsed = snapshot.deadlineUptime.map { now > $0 } ?? false
+        guard deadlineMayHaveLapsed || threshold != nil else { lock.unlock(); return }
+        lock.unlock()
 
-        // Deadline rule. Battery is evaluated in Task 5; the ordering there
-        // puts battery first because it is the rule tied to real-world harm.
+        // Pass 2: unlocked sample. `sampler()` is an IOKit power-source query,
+        // so it belongs outside the lock for the same reason `releaser()` does.
+        let reading: BatteryReading? = threshold != nil ? sampler() : nil
+
+        // Pass 3: back under the lock to decide, with no IO of any kind. Pass 1's
+        // snapshot is deliberately not trusted here — the unlocked sample above
+        // is a window in which `arm()`/`disarm()`/`bumpDeadline()`/
+        // `mainHeartbeat()` may all have run — so the session is re-read and the
+        // deadline re-evaluated against whatever is armed *now*.
+        lock.lock()
+        guard armEpoch == epoch, let current = armed else { lock.unlock(); return }
+
+        // Battery first: it is the rule tied to real-world harm and produces the
+        // more actionable message when both trip on the same tick.
+        var batteryLapsed = false
+        // `batteryThreshold == threshold` is the same guard for config that
+        // `armEpoch == epoch` is for the session: `setBatteryThreshold(nil)`
+        // clears `batteryBelowSinceUptime`, and writing a window start back on
+        // top of that clear would leave a stale start behind a disabled
+        // threshold, ready to fire instantly whenever it was re-enabled. A
+        // value that changed and changed back is treated as unchanged on
+        // purpose — the sample was taken against that same number, and the only
+        // cost is a window that restarts slightly late, which delays a firing
+        // rather than causing an early one.
+        if let threshold, let sample = reading, batteryThreshold == threshold {
+            let below = sample.isOnBattery && (sample.percent ?? Int.max) < threshold
+            if below {
+                if let since = batteryBelowSinceUptime {
+                    batteryLapsed = seconds(now &- since) > batteryGrace
+                } else {
+                    // First tick below the line only starts the clock. The main
+                    // actor gets the full grace to notice and stop gracefully
+                    // first; this is a backstop, not a competitor.
+                    batteryBelowSinceUptime = now
+                }
+            } else {
+                batteryBelowSinceUptime = nil
+            }
+        }
+
         let deadlineLapsed = current.deadlineUptime.map { now > $0 } ?? false
-        guard deadlineLapsed else { lock.unlock(); return }
+        guard batteryLapsed || deadlineLapsed else { lock.unlock(); return }
 
         let assertionsToRelease = current.assertions
         let wasFiringReported = current.firingReported
@@ -361,11 +426,14 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         let stallSeconds = seconds(now &- current.lastMainHeartbeatUptime)
         // Mark this epoch as "releasing" before giving up the lock, so a
         // concurrent `arm()`/`disarm()` sees it and waits instead of also
-        // calling `releaser()` on these same assertions.
+        // calling `releaser()` on these same assertions. Deliberately not set
+        // before Pass 2: most ticks that sample never release, and parking a
+        // main-actor `arm()`/`disarm()` behind every routine battery sample
+        // would spend the very budget those waits exist to protect.
         releasingEpoch = epoch
         lock.unlock()
 
-        // Pass 2: unlocked IO. This is the part that can genuinely block —
+        // Pass 4: unlocked IO. This is the part that can genuinely block —
         // real mach IPC to powerd, IOKit battery queries, log writes — and
         // none of it needs the lock.
         var statuses: [Int32] = []
@@ -383,16 +451,20 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
 
         var eventToEmit: WatchdogEvent?
         if !wasFiringReported {
-            let reading = sampler()
+            // Reuse Pass 2's sample when there was one, so the record shows the
+            // very reading the battery rule fired on rather than a second,
+            // slightly later query that may already read differently. Only the
+            // no-threshold deadline path pays for a sample here.
+            let sample = reading ?? sampler()
             eventToEmit = .fired(WatchdogFiring(
                 firedAt: wallClock(),
-                reason: .stalled,
+                reason: batteryLapsed ? .batteryBelowThreshold : .stalled,
                 mode: mode,
                 sessionStart: sessionStart,
                 heldSeconds: heldSeconds,
                 mainStallSeconds: stallSeconds,
-                batteryPercent: reading.percent,
-                isOnBattery: reading.isOnBattery,
+                batteryPercent: sample.percent,
+                isOnBattery: sample.isOnBattery,
                 assertionIDs: assertionsToRelease.map(\.id),
                 releaseStatuses: statuses
             ))
@@ -403,7 +475,7 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
             )
         }
 
-        // Pass 3: commit under lock, but only if the session we just acted on
+        // Pass 5: commit under lock, but only if the session we just acted on
         // is still the one that's armed. `armEpoch` changes on every arm()/
         // disarm(), so a mismatch here means the caller ended or replaced this
         // session while the IO above was in flight — writing `stillHeld` back
