@@ -342,12 +342,14 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
     ///
     /// The passes, in order:
     ///
-    /// 1. locked, no IO — snapshot, and bail early when this tick cannot
-    ///    possibly need to do anything.
-    /// 2. unlocked — take the battery sample, the one piece of IO the firing
-    ///    decision itself depends on.
+    /// 1. locked, no IO — snapshot, and decide whether Pass 2's sample is
+    ///    worth taking.
+    /// 2. unlocked — take the battery sample, when either the battery rule or
+    ///    the untimed-on-battery nudge needs one.
     /// 3. locked, no IO — evaluate both rules against that sample, advance the
-    ///    below-threshold window, and claim the release window.
+    ///    below-threshold window, and then either claim the release window or,
+    ///    on a tick that releases nothing, record the two notify-only
+    ///    observations (stall, nudge) and return.
     /// 4. unlocked — the releases, the log, and any late sample.
     /// 5. locked, no IO — commit the outcome.
     ///
@@ -355,6 +357,14 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
     /// the deadline rule (pure arithmetic on already-snapshotted state), its
     /// condition needs a live IOKit sample, so the decision cannot be made in
     /// one locked pass without holding `lock` across that sample.
+    ///
+    /// Pass 1 deliberately does *not* bail out for a session that is armed,
+    /// even though an earlier version did. Stall observation has to run on the
+    /// ticks where nothing is anywhere near firing, because a self-recovering
+    /// freeze happens on exactly those ticks and leaves no other trace. What
+    /// used to be an early return survives as `needsSample`, so the IOKit cost
+    /// the bail existed to avoid is still avoided; all an idle session pays now
+    /// is one more uncontended lock acquisition and some arithmetic.
     func tick() {
         let now = uptime()
 
@@ -365,27 +375,32 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         let epoch = armEpoch
         let threshold = batteryThreshold
         // Cheap pre-check purely to decide whether Pass 2's sample is worth
-        // taking. A configured threshold means this tick has to sample even
-        // when nothing is close to firing, because the below-threshold window
-        // has to start counting (and stop counting) on the tick the reading
-        // crosses, not on the tick something finally fires. Without a
-        // threshold and without a lapsed deadline there is nothing to learn,
-        // so an idle session costs no IOKit query at all.
+        // taking; it no longer decides whether the rest of the tick runs at all.
+        // A configured threshold means this tick has to sample even when nothing
+        // is close to firing, because the below-threshold window has to start
+        // counting (and stop counting) on the tick the reading crosses, not on
+        // the tick something finally fires.
         //
-        // `firingReported` is the third way in, and it is not an optimisation:
-        // a session still armed after a firing is one whose release *failed*,
-        // and the kernel is still holding that assertion. Its retry has to keep
-        // running whether or not the rule that fired still holds — see the
-        // matching guard in Pass 3.
-        let deadlineMayHaveLapsed = snapshot.deadlineUptime.map { now > $0 } ?? false
-        guard deadlineMayHaveLapsed || threshold != nil || snapshot.firingReported else {
-            lock.unlock(); return
-        }
+        // The nudge is the other reason to sample, and it wants a reading in
+        // precisely the case the threshold clause skips: no deadline rule and no
+        // threshold, so nothing else in this method would ever look at the power
+        // source. Gated on `nudgeSent` as well as on elapsed time, so a session
+        // that has already been nudged stops paying for the query for the rest
+        // of its life — an untimed session can easily run all day.
+        //
+        // Everything else this tick might do — both rules, the failed-release
+        // retry, and stall observation — is pure arithmetic on state the lock
+        // already protects, so Pass 3 can decide all of it without sampling.
+        let nudgeMayBeDue = snapshot.deadlineUptime == nil
+            && threshold == nil
+            && !snapshot.nudgeSent
+            && seconds(now &- snapshot.startedAtUptime) >= Self.nudgeAfter
+        let needsSample = threshold != nil || nudgeMayBeDue
         lock.unlock()
 
         // Pass 2: unlocked sample. `sampler()` is an IOKit power-source query,
         // so it belongs outside the lock for the same reason `releaser()` does.
-        let reading: BatteryReading? = threshold != nil ? sampler() : nil
+        let reading: BatteryReading? = needsSample ? sampler() : nil
 
         // Pass 3: back under the lock to decide, with no IO of any kind. Pass 1's
         // snapshot is deliberately not trusted here — the unlocked sample above
@@ -393,7 +408,7 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         // `mainHeartbeat()` may all have run — so the session is re-read and the
         // deadline re-evaluated against whatever is armed *now*.
         lock.lock()
-        guard armEpoch == epoch, let current = armed else { lock.unlock(); return }
+        guard armEpoch == epoch, var current = armed else { lock.unlock(); return }
 
         // Battery first: it is the rule tied to real-world harm and produces the
         // more actionable message when both trip on the same tick.
@@ -437,8 +452,97 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         // would abandon its own straggler here on the very next tick, leaving a
         // live kernel assertion nobody retries until `disarm()` — F-003 again,
         // reached through the rule meant to prevent it.
-        guard batteryLapsed || deadlineLapsed || current.firingReported else {
-            lock.unlock(); return
+        if !batteryLapsed && !deadlineLapsed && !current.firingReported {
+            // Nothing to release on this tick: both rules are quiet and no
+            // straggler is pending. That makes this the only tick shape the two
+            // notify-only observations belong on, and it is why they live here
+            // rather than above the release decision. A `.stallObserved`
+            // alongside a `.fired` would be pure duplication — the firing record
+            // already carries `mainStallSeconds` — and it would also put a
+            // second event ahead of `.fired`, which every earlier test that
+            // reads the first received event or counts total evidence records
+            // depends on not happening. A lapsed deadline is a stall by
+            // construction, so that collision would be the common case rather
+            // than a rare one. Reaching this branch is the proof that no firing
+            // happens this tick; no separate flag is needed to say so.
+            //
+            // The retry-only tick (`firingReported`, release still pending) is
+            // excluded here too, and that is right rather than merely
+            // convenient: a session with a straggler is one the watchdog is
+            // actively trying to release, so neither "your main actor is quiet"
+            // nor "you might want to end this session" is news the user can act
+            // on, and both would land on top of the firing record that already
+            // says something louder.
+            var notices: [WatchdogEvent] = []
+
+            // Untimed manual on battery with no threshold configured is the only
+            // remaining path to a drained machine. Nudge rather than release: an
+            // untimed session is a deliberate choice, and the complaint behind
+            // F-003 was that the Mac stayed awake *unexplained*, not that it
+            // stayed awake at all.
+            //
+            // The reading is Pass 2's, never a fresh one — `sampler()` is IOKit
+            // and this is a locked pass. It is also never actually missing when
+            // the rest of these conditions hold. Pass 1 evaluated the same
+            // eligibility against the same `now`, and within one `armEpoch` none
+            // of these inputs can turn *on* mid-tick: a nil `deadlineUptime`
+            // stays nil because `bumpDeadline` refuses a session without a
+            // deadline rule, `startedAtUptime` is immutable, and `nudgeSent` is
+            // written by nothing but this branch. The one input that can move,
+            // `batteryThreshold`, can only make the nudge newly eligible by
+            // being *cleared* — and a threshold that was set at Pass 1 means
+            // Pass 1 sampled for the battery rule and left a reading here
+            // anyway. So the `let sample` is unreachable as a bail-out, and
+            // harmless if it ever were reached: `nudgeSent` stays false, so the
+            // next tick's Pass 1 asks for the sample and nudges then.
+            if let sample = reading,
+               current.deadlineUptime == nil,
+               batteryThreshold == nil,
+               !current.nudgeSent,
+               seconds(now &- current.startedAtUptime) >= Self.nudgeAfter,
+               sample.isOnBattery {
+                current.nudgeSent = true
+                notices.append(.untimedOnBatteryNudge(hours: Int(Self.nudgeAfter / 3600)))
+            }
+
+            // Stall observation. Recording only at firing time throws away the
+            // early warning: a freeze that recovers on its own releases nothing
+            // and leaves no trace, yet it is the same defect as the one that
+            // later freezes for hours. Latched so one episode produces one
+            // record instead of one per tick for as long as it lasts — and
+            // `mainHeartbeat()` clears that latch, so a main actor that comes
+            // back and later goes quiet again is a second episode and earns a
+            // second record.
+            let stallNow = seconds(now &- current.lastMainHeartbeatUptime)
+            if stallNow > Self.stallThreshold, !current.stallLatched {
+                current.stallLatched = true
+                notices.append(.stallObserved(WatchdogStall(
+                    observedAt: wallClock(), side: .mainActor, seconds: stallNow
+                )))
+            }
+
+            // Commit before unlocking. Unlike Pass 5, this needs no `armEpoch`
+            // re-check: `current` was read from `armed` in this same critical
+            // section with no unlocked window in between, so there is no
+            // opportunity for the session to have been ended or replaced
+            // underneath it. Committing here rather than after the emit loop is
+            // what makes both latches stick — a `current` that is mutated and
+            // then dropped would re-send the same nudge and re-record the same
+            // stall episode on every tick, forever.
+            armed = current
+            lock.unlock()
+
+            // Emitting is IO (a disk append plus arbitrary subscriber work), so
+            // it happens unlocked, exactly like the firing record at the bottom
+            // of this method. Neither of these events releases anything, so
+            // `releaser()` and the `releasingEpoch` handshake are not involved
+            // at all: there is no assertion in flight for `arm()`/`disarm()` to
+            // have to wait on.
+            for notice in notices {
+                evidence.append(notice)   // disk first: main may never come back
+                subject.send(notice)
+            }
+            return
         }
 
         let assertionsToRelease = current.assertions

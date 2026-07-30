@@ -795,4 +795,113 @@ final class AwakeWatchdogTests: XCTestCase {
                        "the straggler must still be retried once the threshold is off")
         XCTAssertTrue(wd.disarm().isEmpty, "the retry succeeded; nothing left to hand back")
     }
+
+    // MARK: stall observation
+
+    private func stalls(in events: [WatchdogEvent]) -> [WatchdogStall] {
+        events.compactMap { if case .stallObserved(let s) = $0 { return s } else { return nil } }
+    }
+
+    func test_shortStall_recordsNothing() {
+        let wd = makeWatchdog()
+        var received: [WatchdogEvent] = []
+        wd.events.sink { received.append($0) }.store(in: &bag)
+
+        wd.arm(assertions: [a1], mode: .auto, releaseAfter: 3600)
+        uptime.advance(100)   // under the 180s threshold
+        wd.tick()
+
+        XCTAssertTrue(stalls(in: received).isEmpty)
+    }
+
+    func test_longStall_recordsOncePerEpisode() {
+        let wd = makeWatchdog()
+        var received: [WatchdogEvent] = []
+        wd.events.sink { received.append($0) }.store(in: &bag)
+
+        wd.arm(assertions: [a1], mode: .auto, releaseAfter: 3600)
+        uptime.advance(200); wd.tick()
+        uptime.advance(30);  wd.tick()
+        uptime.advance(30);  wd.tick()
+
+        XCTAssertEqual(stalls(in: received).count, 1, "latched: one record per episode")
+        XCTAssertEqual(stalls(in: received).first?.side, .mainActor)
+    }
+
+    func test_heartbeatResumingClearsTheLatch() {
+        let wd = makeWatchdog()
+        var received: [WatchdogEvent] = []
+        wd.events.sink { received.append($0) }.store(in: &bag)
+
+        wd.arm(assertions: [a1], mode: .auto, releaseAfter: 3600)
+        uptime.advance(200); wd.tick()
+        wd.mainHeartbeat()
+        uptime.advance(200); wd.tick()
+
+        XCTAssertEqual(stalls(in: received).count, 2, "a second episode is a second record")
+    }
+
+    // MARK: untimed-on-battery nudge
+
+    private func nudges(in events: [WatchdogEvent]) -> [Int] {
+        events.compactMap { if case .untimedOnBatteryNudge(let h) = $0 { return h } else { return nil } }
+    }
+
+    func test_untimedManualOnBattery_nudgesOnceAtTwoHours() {
+        let wd = makeWatchdog()
+        var received: [WatchdogEvent] = []
+        wd.events.sink { received.append($0) }.store(in: &bag)
+
+        wd.setBatteryThreshold(nil)
+        wd.arm(assertions: [a1], mode: .manual, releaseAfter: nil)
+        battery = BatteryReading(isOnBattery: true, percent: 80)
+
+        uptime.advance(7300); wd.tick()
+        uptime.advance(60);   wd.tick()
+
+        XCTAssertEqual(nudges(in: received), [2])
+        XCTAssertTrue(releaser.released.isEmpty, "a nudge must never release")
+    }
+
+    func test_noNudgeOnACPower() {
+        let wd = makeWatchdog()
+        var received: [WatchdogEvent] = []
+        wd.events.sink { received.append($0) }.store(in: &bag)
+
+        wd.setBatteryThreshold(nil)
+        wd.arm(assertions: [a1], mode: .manual, releaseAfter: nil)
+        battery = BatteryReading(isOnBattery: false, percent: 80)
+
+        uptime.advance(7300); wd.tick()
+
+        XCTAssertTrue(nudges(in: received).isEmpty)
+    }
+
+    func test_noNudgeWhenABatteryThresholdIsConfigured() {
+        let wd = makeWatchdog()
+        var received: [WatchdogEvent] = []
+        wd.events.sink { received.append($0) }.store(in: &bag)
+
+        wd.setBatteryThreshold(20)
+        wd.arm(assertions: [a1], mode: .manual, releaseAfter: nil)
+        battery = BatteryReading(isOnBattery: true, percent: 80)
+
+        uptime.advance(7300); wd.tick()
+
+        XCTAssertTrue(nudges(in: received).isEmpty, "defaults protect the user already")
+    }
+
+    func test_noNudgeWhenADeadlineRuleExists() {
+        let wd = makeWatchdog()
+        var received: [WatchdogEvent] = []
+        wd.events.sink { received.append($0) }.store(in: &bag)
+
+        wd.setBatteryThreshold(nil)
+        wd.arm(assertions: [a1], mode: .manual, releaseAfter: 8 * 3600)
+        battery = BatteryReading(isOnBattery: true, percent: 80)
+
+        uptime.advance(7300); wd.tick()
+
+        XCTAssertTrue(nudges(in: received).isEmpty)
+    }
 }
