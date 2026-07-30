@@ -55,6 +55,10 @@ enum AppPaths {
         applicationSupportDirectory.appendingPathComponent("notification-settings.json")
     }
 
+    static var watchdogEventsFile: URL {
+        applicationSupportDirectory.appendingPathComponent("awake-watchdog-events.json")
+    }
+
     static func profileDirectory(id: UUID) -> URL {
         applicationSupportDirectory
             .appendingPathComponent("profiles", isDirectory: true)
