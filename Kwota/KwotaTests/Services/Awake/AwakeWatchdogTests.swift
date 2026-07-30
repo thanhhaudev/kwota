@@ -82,11 +82,12 @@ final class AwakeWatchdogTests: XCTestCase {
         bag = []
     }
 
-    private func makeWatchdog() -> AwakeWatchdog {
+    private func makeWatchdog(releaseWaitTimeout: TimeInterval = AwakeWatchdog.defaultReleaseWaitTimeout) -> AwakeWatchdog {
         let up = uptime!
         let rel = releaser!
         let batteryBox = { [weak self] in self?.battery ?? BatteryReading(isOnBattery: false, percent: 100) }
         return AwakeWatchdog(
+            releaseWaitTimeout: releaseWaitTimeout,
             uptime: { up.now() },
             wallClock: { Date(timeIntervalSince1970: 0) },
             releaser: { rel.release($0) },
@@ -423,5 +424,84 @@ final class AwakeWatchdogTests: XCTestCase {
         // a1 was released exactly once (by tick()), never by arm()'s
         // stale-cleanup loop.
         XCTAssertEqual(releaser.released.map(\.id), [1])
+    }
+
+    // MARK: bounded wait timeout fallback
+
+    /// If the in-flight release genuinely never resolves — a truly wedged
+    /// `powerd`, not just a slow one — `disarm()` must not wait forever: that
+    /// would freeze whatever main-actor recovery path called it, the exact
+    /// failure class this type exists to prevent. Inject a short
+    /// `releaseWaitTimeout` and deliberately never signal the gate, so the
+    /// wait genuinely expires and the documented fallback (hand the
+    /// assertion back anyway, favoring "maybe a harmless duplicate release"
+    /// over "silently orphaned forever") runs for real.
+    func test_disarmTimesOutWhenReleaseNeverResolves_handsAssertionBackAnyway() {
+        let wd = makeWatchdog(releaseWaitTimeout: 0.2)
+        wd.arm(assertions: [a1], mode: .auto, releaseAfter: 300)
+        uptime.advance(421)
+
+        let gate = DispatchSemaphore(value: 0)   // deliberately never signaled
+        releaser.blockNextRelease(on: gate)
+
+        DispatchQueue.global().async {
+            wd.tick()   // parks inside releaser() and never returns
+        }
+        Thread.sleep(forTimeInterval: 0.1)   // let tick() reach the parked release
+
+        var result: [SleepAssertion] = []
+        let disarmCompleted = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            result = wd.disarm()
+            disarmCompleted.signal()
+        }
+
+        // Must give up and return within a bounded time even though the
+        // release it was waiting on never resolves — proving this is the
+        // timeout path, not a lucky fast wait.
+        XCTAssertEqual(
+            disarmCompleted.wait(timeout: .now() + 1.5), .success,
+            "disarm() must time out rather than wait forever for a release that never resolves"
+        )
+        XCTAssertEqual(result.map(\.id), [1], "must hand the still in-flight assertion back rather than silently drop it")
+
+        gate.signal()   // let the permanently parked tick() finish, so nothing dangles past this test
+    }
+
+    /// Same fallback, from `arm()`'s side: a stale session whose release never
+    /// resolves must not block a fresh `arm()` forever either. The documented
+    /// tradeoff is that `arm()` proceeds anyway, accepting that its
+    /// stale-cleanup loop may call `releaser()` a second time on an assertion
+    /// the old `tick()` is still (fruitlessly) working on — empirically just
+    /// a duplicate error return, not a crash.
+    func test_armTimesOutWhenPreviousReleaseNeverResolves_proceedsAnyway() {
+        let wd = makeWatchdog(releaseWaitTimeout: 0.2)
+        wd.arm(assertions: [a1], mode: .auto, releaseAfter: 300)
+        uptime.advance(421)
+
+        let gate = DispatchSemaphore(value: 0)   // deliberately never signaled
+        releaser.blockNextRelease(on: gate)
+
+        DispatchQueue.global().async {
+            wd.tick()   // parks inside releaser() and never returns
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+
+        let replacement = a2
+        let armCompleted = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            wd.arm(assertions: [replacement], mode: .manual, releaseAfter: nil)
+            armCompleted.signal()
+        }
+
+        XCTAssertEqual(
+            armCompleted.wait(timeout: .now() + 1.5), .success,
+            "arm() must time out and proceed rather than wait forever for the previous session's release"
+        )
+
+        // The new session must actually be the one in effect afterward.
+        XCTAssertEqual(wd.disarm().map(\.id), [2], "the fresh session must have taken over despite the stale one's stuck release")
+
+        gate.signal()   // let the permanently parked tick() finish, so nothing dangles past this test
     }
 }

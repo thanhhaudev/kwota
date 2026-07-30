@@ -60,12 +60,22 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
     static let stallThreshold: TimeInterval = 180
     static let watchdogSilentThreshold: TimeInterval = 90
     static let nudgeAfter: TimeInterval = 2 * 3600
+    /// How long `arm()`/`disarm()` will wait for an in-flight `tick()` release
+    /// to resolve before giving up and proceeding anyway (see
+    /// `waitForInFlightRelease`). A real `IOPMAssertionRelease` call is local
+    /// mach IPC and normally resolves in well under a millisecond, so this is
+    /// generous slack for a slow-but-healthy release, not a budget anyone
+    /// should expect to actually spend — while still being short enough that
+    /// a genuinely wedged `powerd` can't freeze whatever main-actor recovery
+    /// path called in for anywhere near as long as F-003's multi-hour stalls.
+    static let defaultReleaseWaitTimeout: TimeInterval = 3
 
     /// Instance properties, not constants, purely so tests can drive a real
     /// `DispatchSourceTimer` without waiting out a two-minute grace. Production
     /// always takes the defaults above.
     private let deadlineGrace: TimeInterval
     private let batteryGrace: TimeInterval
+    private let releaseWaitTimeout: TimeInterval
 
     private struct Armed {
         var assertions: [SleepAssertion]
@@ -116,6 +126,7 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         tickInterval: TimeInterval = 30,
         deadlineGrace: TimeInterval = AwakeWatchdog.defaultDeadlineGrace,
         batteryGrace: TimeInterval = AwakeWatchdog.defaultBatteryGrace,
+        releaseWaitTimeout: TimeInterval = AwakeWatchdog.defaultReleaseWaitTimeout,
         uptime: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
         wallClock: @escaping @Sendable () -> Date = Date.init,
         releaser: @escaping @Sendable (SleepAssertion) -> Int32 = { IOKitSleepAssertionHolder.releaseRaw($0) },
@@ -125,6 +136,7 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
     ) {
         self.deadlineGrace = deadlineGrace
         self.batteryGrace = batteryGrace
+        self.releaseWaitTimeout = releaseWaitTimeout
         self.tickInterval = tickInterval
         self.uptime = uptime
         self.wallClock = wallClock
@@ -140,6 +152,29 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
 
     // MARK: Arming
 
+    /// Waits for an in-flight `tick()` release of the currently-armed session
+    /// to resolve, bounded by `releaseWaitTimeout`. Must be called with `lock`
+    /// already held. Returns `true` if the deadline was reached before the
+    /// release resolved (i.e. `tick()` — most plausibly `releaser()` itself —
+    /// is still stuck), `false` if there was nothing to wait for or the wait
+    /// resolved normally.
+    ///
+    /// Unbounded here would mean a wedged `IOPMAssertionRelease` inside
+    /// `tick()` freezes whichever synchronous, main-actor-called method
+    /// (`arm()`/`disarm()`) happens to race it — the exact failure class this
+    /// type exists to prevent, arriving via its own concurrency fix instead of
+    /// via the app's original release paths.
+    private func waitForInFlightRelease() -> Bool {
+        guard armed != nil, releasingEpoch == armEpoch else { return false }
+        let deadline = Date().addingTimeInterval(releaseWaitTimeout)
+        while armed != nil && releasingEpoch == armEpoch {
+            if !lock.wait(until: deadline) {
+                return true
+            }
+        }
+        return false
+    }
+
     func arm(assertions: [SleepAssertion], mode: WatchdogMode, releaseAfter: TimeInterval?) {
         let now = uptime()
         lock.lock()
@@ -148,8 +183,20 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         // loop below could call `releaser()` on the exact same assertion IDs
         // `tick()` is independently releasing right now — a double release of
         // real IOPMAssertionRelease calls, not just a bookkeeping race.
-        while armed != nil && releasingEpoch == armEpoch {
-            lock.wait()
+        if waitForInFlightRelease() {
+            // The previous session's release never resolved within our
+            // budget — most plausibly a wedged `powerd`. Proceed anyway
+            // rather than hang this call (and whatever main-actor path
+            // invoked it) indefinitely: released empirically, a duplicate
+            // `IOPMAssertionRelease` on an already-released or
+            // concurrently-releasing valid ID returns `kIOReturnBadArgument`
+            // to whichever caller loses the race, not a crash — so racing the
+            // wedged call is the safer failure mode compared to freezing the
+            // caller forever.
+            AppLog.shared.log(
+                "AwakeWatchdog.arm timed out waiting for the previous session's in-flight release; proceeding anyway",
+                level: .error
+            )
         }
         let stale = armed
         armed = Armed(
@@ -228,8 +275,22 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         // `IOPMAssertionRelease` calls for the same ID — wait for that release
         // to finish and land its outcome (success clears `armed`; failure
         // leaves the true straggler) before answering.
-        while armed != nil && releasingEpoch == armEpoch {
-            lock.wait()
+        if waitForInFlightRelease() {
+            // The in-flight release never resolved within our budget. Hand
+            // the assertions back anyway rather than returning empty: if this
+            // call returned empty here, the caller believes the session ended
+            // cleanly and stops tracking it, and if the wedged release truly
+            // never returns, that assertion is now orphaned with no owner at
+            // all — the exact F-003 failure this type exists to close.
+            // Handing it back risks, at worst, a second concurrent
+            // `IOPMAssertionRelease` on the same ID once the wedged call
+            // eventually resolves — empirically confirmed to return
+            // `kIOReturnBadArgument` to the loser, not a crash — which is a
+            // strictly safer outcome than a silent, permanent orphan.
+            AppLog.shared.log(
+                "AwakeWatchdog.disarm timed out waiting for an in-flight release; handing back assertions that may still be mid-release rather than risk orphaning them",
+                level: .error
+            )
         }
         // Whatever is still in `armed` is still held by the kernel — either we
         // never fired, or we fired and some releases failed. Either way the
