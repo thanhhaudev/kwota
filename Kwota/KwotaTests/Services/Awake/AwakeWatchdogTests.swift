@@ -926,4 +926,60 @@ final class AwakeWatchdogTests: XCTestCase {
 
         XCTAssertTrue(nudges(in: received).isEmpty)
     }
+
+    // MARK: real timer lifecycle
+
+    /// Real `DispatchSourceTimer` and real uptime, so the graces must be
+    /// injected down to zero — otherwise `arm(releaseAfter: 0)` still means a
+    /// deadline 120 seconds away and no unit test could ever observe a firing.
+    private func makeTimerWatchdog(tickInterval: TimeInterval) -> AwakeWatchdog {
+        let rel = releaser!
+        return AwakeWatchdog(
+            tickInterval: tickInterval,
+            deadlineGrace: 0,
+            batteryGrace: 0,
+            uptime: { DispatchTime.now().uptimeNanoseconds },
+            wallClock: { Date(timeIntervalSince1970: 0) },
+            releaser: { rel.release($0) },
+            sampler: { BatteryReading(isOnBattery: false, percent: 100) },
+            evidence: evidence,
+            autoStartTimer: true
+        )
+    }
+
+    func test_realTimerFiresAfterArming() async {
+        let wd = makeTimerWatchdog(tickInterval: 0.02)
+        wd.arm(assertions: [a1], mode: .auto, releaseAfter: 0.0)
+
+        try? await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertEqual(releaser.released.map(\.id), [1])
+    }
+
+    func test_realTimerAdvancesLastTickAge() async {
+        let wd = makeTimerWatchdog(tickInterval: 0.02)
+        wd.arm(assertions: [a1], mode: .manual, releaseAfter: nil)
+
+        try? await Task.sleep(nanoseconds: 200_000_000)
+
+        let age = wd.lastTickAgeSeconds()
+        XCTAssertNotNil(age)
+        XCTAssertLessThan(age ?? .infinity, 1.0)
+    }
+
+    func test_neverArmedWatchdogsDeallocateCleanly() {
+        // The suspended-timer trap: these are created with a real timer that
+        // is never resumed, then released.
+        for _ in 0..<100 { _ = makeTimerWatchdog(tickInterval: 30) }
+    }
+
+    func test_armDisarmArmCyclesDeallocateCleanly() {
+        for _ in 0..<50 {
+            let wd = makeTimerWatchdog(tickInterval: 30)
+            wd.arm(assertions: [a1], mode: .auto, releaseAfter: 300)
+            _ = wd.disarm()
+            wd.arm(assertions: [a1], mode: .auto, releaseAfter: 300)
+            _ = wd.disarm()
+        }
+    }
 }

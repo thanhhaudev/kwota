@@ -115,6 +115,28 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
     private var batteryBelowSinceUptime: UInt64?
     private var lastTickUptime: UInt64?
 
+    /// `qos: .default`, deliberately not the `.utility` used elsewhere in this
+    /// repo for background polling. `.utility` and `.background` are
+    /// discretionary tiers that macOS defers hardest under Low Power Mode —
+    /// which engages exactly when the battery is low, which is exactly when
+    /// the battery rule must fire. `.default` is the cheapest non-discretionary
+    /// tier; `.userInitiated` would bias toward performance cores for work
+    /// that is one lock plus an integer compare.
+    ///
+    /// Serial (no `.concurrent` attribute), and that is load-bearing rather
+    /// than incidental — see `tick()`'s note on why ticks cannot overlap.
+    private let queue = DispatchQueue(label: "com.thanhhaudev.Kwota.awake-watchdog", qos: .default)
+    private var timer: DispatchSourceTimer?
+    /// Mirrors the timer's suspend count so `resume()`/`suspend()` stay
+    /// balanced — an unbalanced pair on a dispatch source is undefined
+    /// behaviour, not a mere leak. Written from three places (`arm()`,
+    /// `disarm()`, and `tick()`'s firing commit) and read from `deinit`; every
+    /// one of those writes happens under `lock`, which is what keeps the
+    /// bookkeeping and the source's real count from diverging. GCD does not
+    /// require suspend/resume to run on any particular queue, so holding an
+    /// app-level lock across them is safe.
+    private var isTimerSuspended = true
+
     private let tickInterval: TimeInterval
     private let uptime: @Sendable () -> UInt64
     private let wallClock: @Sendable () -> Date
@@ -144,9 +166,35 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         self.releaser = releaser
         self.sampler = sampler
         self.evidence = evidence
-        // Timer wiring lands in Task 7; `autoStartTimer` is threaded through
-        // now so call sites and tests do not change shape later.
-        _ = autoStartTimer
+        if autoStartTimer {
+            let t = DispatchSource.makeTimerSource(queue: queue)
+            t.schedule(
+                deadline: .now() + tickInterval,
+                repeating: tickInterval,
+                leeway: .seconds(5)
+            )
+            t.setEventHandler { [weak self] in self?.tick() }
+            timer = t   // created suspended; resumed on arm
+        }
+    }
+
+    deinit {
+        // Releasing a suspended dispatch source traps immediately. Every
+        // watchdog that was never armed is suspended, which is most of them in
+        // a test suite, so resume before cancelling.
+        //
+        // No lock here, and none needed: `deinit` runs only once the last
+        // strong reference is gone, and the event handler's `[weak self]`
+        // becomes a strong reference for the duration of a tick — so no tick
+        // can be in flight to race this, and nothing else can still be holding
+        // `self` to call `arm()`/`disarm()`.
+        if let timer {
+            if isTimerSuspended {
+                isTimerSuspended = false
+                timer.resume()
+            }
+            timer.cancel()
+        }
     }
 
     var events: AnyPublisher<WatchdogEvent, Never> { subject.eraseToAnyPublisher() }
@@ -215,6 +263,10 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         )
         armEpoch &+= 1
         batteryBelowSinceUptime = nil
+        // Resume inside the same critical section that just published `armed`,
+        // so the first tick can never observe a half-armed session, and so this
+        // write to `isTimerSuspended` is serialised against the other two.
+        resumeTimerLocked()
         lock.unlock()
 
         // IO (log + release) happens unlocked: `stale` is already detached
@@ -322,7 +374,32 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         armed = nil
         armEpoch &+= 1
         batteryBelowSinceUptime = nil
+        // Nothing left to watch: stop ticking so an idle Kwota schedules no
+        // wakeups at all. A tick that slipped through anyway is harmless — Pass
+        // 1 bails on `armed == nil`.
+        suspendTimerLocked()
         return stillHeld
+    }
+
+    // MARK: Timer suspension
+
+    /// Both of these must be called with `lock` held. The guards are what keep
+    /// the source's suspend count balanced when `arm()`, `disarm()` and
+    /// `tick()`'s firing commit interleave: each site only flips the state it
+    /// finds, so two suspends or two resumes in a row are impossible however
+    /// the three are ordered.
+    private func resumeTimerLocked() {
+        if let timer, isTimerSuspended {
+            isTimerSuspended = false
+            timer.resume()
+        }
+    }
+
+    private func suspendTimerLocked() {
+        if let timer, !isTimerSuspended {
+            isTimerSuspended = true
+            timer.suspend()
+        }
     }
 
     // MARK: Tick
@@ -357,6 +434,33 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
     /// the deadline rule (pure arithmetic on already-snapshotted state), its
     /// condition needs a live IOKit sample, so the decision cannot be made in
     /// one locked pass without holding `lock` across that sample.
+    ///
+    /// **Ticks never overlap, so there is no `releasingEpoch` check in Pass 3.**
+    /// Pass 3 claims the release window by checking `armEpoch == epoch` and
+    /// nothing else, which would be a double-release hazard if two `tick()`
+    /// calls could run against the same session at once: both would pass that
+    /// guard and both would call `releaser()` on the same assertion IDs. They
+    /// cannot. Every production tick is delivered by this instance's own timer
+    /// event handler, and that handler is scheduled on `queue`, which is serial
+    /// — a serial queue runs its work items strictly one at a time, so the
+    /// second tick cannot start until the first has returned. There is no other
+    /// production caller: `arm()`, `disarm()`, `bumpDeadline()`,
+    /// `setBatteryThreshold()` and `mainHeartbeat()` all coordinate with a tick
+    /// via `lock`/`releasingEpoch` instead of invoking one, and the only direct
+    /// callers of `tick()` are tests, which drive it synchronously from a single
+    /// thread precisely to control its timing. That is what closes the concern
+    /// carried forward from the passes' original single-flight review:
+    /// `armEpoch` alone is a sufficient single-flight check *because* ticks are
+    /// serialised by construction.
+    ///
+    /// The invariant that has to survive future changes is therefore: **nothing
+    /// may call `tick()` from anywhere but `queue`.** A wake-from-sleep or
+    /// stalled-watchdog recovery path that wants an immediate tick must
+    /// `queue.async { self.tick() }` rather than call it inline — that keeps the
+    /// serialisation and costs nothing, since a tick's caller never waits on its
+    /// result. Calling it inline from the main actor would break the guarantee
+    /// above *and* put `releaser()`'s mach IPC back on the main thread, which is
+    /// the failure this whole type exists to remove.
     ///
     /// Pass 1 deliberately does *not* bail out for a session that is armed,
     /// even though an earlier version did. Stall observation has to run on the
@@ -631,6 +735,20 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
             if stillHeld.isEmpty {
                 armed = nil
                 batteryBelowSinceUptime = nil
+                // The firing resolved the whole session, so this watchdog has
+                // nothing left to watch until someone arms it again: stop
+                // ticking. Deliberately only on this branch — the `else` below
+                // still has a straggler to retry, and a mismatched `armEpoch`
+                // (checked above) means some *other* session is armed now and
+                // its `arm()` already resumed the timer for itself.
+                //
+                // Safe under this lock for the same reason `arm()`/`disarm()`
+                // are: `lock` is the single serialisation point for all three
+                // writers of `isTimerSuspended`, and suspending the source that
+                // is currently running this very handler is legal — GCD lets a
+                // handler suspend its own source; the suspension takes effect
+                // for subsequent events, not this one.
+                suspendTimerLocked()
             } else {
                 latest.assertions = stillHeld
                 if !wasFiringReported { latest.firingReported = true }
