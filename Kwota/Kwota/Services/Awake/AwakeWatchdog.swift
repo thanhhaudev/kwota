@@ -81,7 +81,11 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         var firingReported: Bool
     }
 
-    private let lock = NSLock()
+    /// `NSCondition` rather than `NSLock`: `arm()`/`disarm()` need to wait for
+    /// an in-flight `tick()` release to finish (see `releasingEpoch` below)
+    /// without polling, and `NSCondition` gives that for free while still
+    /// supporting plain `lock()`/`unlock()` everywhere else in this file.
+    private let lock = NSCondition()
     private var armed: Armed?
     /// Bumped on every `arm()`/`disarm()`. `tick()` snapshots this alongside
     /// `armed` before doing unlocked IO, then checks it again before writing
@@ -89,6 +93,13 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
     /// releasing has already ended or been replaced, and committing stale
     /// results would resurrect or clobber the wrong one.
     private var armEpoch: UInt64 = 0
+    /// Set to the epoch of the session `tick()` is currently releasing,
+    /// exactly for the unlocked window between its snapshot and commit
+    /// passes; nil the rest of the time. `arm()`/`disarm()` wait on this
+    /// rather than proceeding, so neither ever calls `releaser()` on an
+    /// assertion ID `tick()` is concurrently releasing — the double-release
+    /// race a Bool-only lock-scope fix would otherwise still allow.
+    private var releasingEpoch: UInt64?
     private var batteryThreshold: Int?
     private var batteryBelowSinceUptime: UInt64?
     private var lastTickUptime: UInt64?
@@ -132,6 +143,14 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
     func arm(assertions: [SleepAssertion], mode: WatchdogMode, releaseAfter: TimeInterval?) {
         let now = uptime()
         lock.lock()
+        // If `tick()` is mid-release for whatever is currently armed, wait for
+        // it to finish before taking over. Without this, the stale-cleanup
+        // loop below could call `releaser()` on the exact same assertion IDs
+        // `tick()` is independently releasing right now — a double release of
+        // real IOPMAssertionRelease calls, not just a bookkeeping race.
+        while armed != nil && releasingEpoch == armEpoch {
+            lock.wait()
+        }
         let stale = armed
         armed = Armed(
             assertions: assertions,
@@ -202,6 +221,16 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
     func disarm() -> [SleepAssertion] {
         lock.lock()
         defer { lock.unlock() }
+        // If `tick()` is mid-release for the currently armed session, the
+        // assertions sitting in `armed` right now are the exact ones its
+        // unlocked release loop is already calling `releaser()` on. Racing
+        // ahead and handing them back here too would mean two independent
+        // `IOPMAssertionRelease` calls for the same ID — wait for that release
+        // to finish and land its outcome (success clears `armed`; failure
+        // leaves the true straggler) before answering.
+        while armed != nil && releasingEpoch == armEpoch {
+            lock.wait()
+        }
         // Whatever is still in `armed` is still held by the kernel — either we
         // never fired, or we fired and some releases failed. Either way the
         // caller must release it; dropping it here is how an assertion ends up
@@ -220,10 +249,14 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
     /// Structured in three passes — snapshot, unlocked IO, commit — so `lock`
     /// is never held across `releaser()`, `sampler()`, or `AppLog` calls. Those
     /// can block on `powerd`/IOKit or on the log's own queue; a main actor that
-    /// calls `disarm()`/`mainHeartbeat()`/`arm()` synchronously would otherwise
-    /// queue up behind whichever thread is doing that IO, turning the one
-    /// release path with no main-thread dependency into a new way to stall the
-    /// main thread — the exact failure class this type exists to catch.
+    /// calls `mainHeartbeat()`/`lastTickAgeSeconds()`/`bumpDeadline()`/
+    /// `setBatteryThreshold()` synchronously would otherwise queue up behind
+    /// whichever thread is doing that IO, turning the one release path with no
+    /// main-thread dependency into a new way to stall the main thread — the
+    /// exact failure class this type exists to catch. `arm()`/`disarm()` are
+    /// the two calls that *do* need to coordinate with this window (see
+    /// `releasingEpoch`), because they touch the very assertions this method
+    /// is releasing.
     func tick() {
         let now = uptime()
 
@@ -244,6 +277,10 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         let sessionStart = current.startedAtWall
         let heldSeconds = seconds(now &- current.startedAtUptime)
         let stallSeconds = seconds(now &- current.lastMainHeartbeatUptime)
+        // Mark this epoch as "releasing" before giving up the lock, so a
+        // concurrent `arm()`/`disarm()` sees it and waits instead of also
+        // calling `releaser()` on these same assertions.
+        releasingEpoch = epoch
         lock.unlock()
 
         // Pass 2: unlocked IO. This is the part that can genuinely block —
@@ -302,6 +339,11 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
                 armed = latest
             }
         }
+        // Clear the in-flight marker and wake anyone parked in `arm()`/
+        // `disarm()`'s wait loop above — the release this epoch was doing is
+        // now fully resolved, one way or the other.
+        releasingEpoch = nil
+        lock.broadcast()
         lock.unlock()
 
         if let event = eventToEmit {

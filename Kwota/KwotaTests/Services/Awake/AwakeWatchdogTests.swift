@@ -321,4 +321,107 @@ final class AwakeWatchdogTests: XCTestCase {
         XCTAssertEqual(releaser.released.map(\.id), [1, 2, 1], "retry must not be suppressed by the bump")
         XCTAssertTrue(wd.disarm().isEmpty, "straggler released on retry; nothing left to hand back")
     }
+
+    // MARK: disarm/arm racing an in-flight release
+
+    /// The lock-scope fix above (unlocked IO in `tick()`) opens a second race
+    /// on its own: while `tick()`'s release loop is running unlocked, a
+    /// concurrent `disarm()` could read the same still-armed assertions and
+    /// hand them back to its caller for release — while `tick()` is
+    /// independently calling `releaser()` on the identical IDs. That's a real
+    /// double `IOPMAssertionRelease`, not just a bookkeeping inconsistency.
+    /// `disarm()` must wait for the in-flight release to resolve instead of
+    /// racing ahead of it.
+    func test_disarmDuringInFlightRelease_waitsInsteadOfDoubleReleasing() {
+        let wd = makeWatchdog()
+        wd.arm(assertions: [a1, a2], mode: .auto, releaseAfter: 300)
+        uptime.advance(421)
+
+        let gate = DispatchSemaphore(value: 0)
+        releaser.blockNextRelease(on: gate)   // parks tick() inside releaser(a1)
+
+        let tickFinished = expectation(description: "tick finished")
+        DispatchQueue.global().async {
+            wd.tick()
+            tickFinished.fulfill()
+        }
+        // Let the background tick reach the parked release call — by this
+        // point `releasingEpoch` is already set, since that happens before
+        // the lock is released, well ahead of the actual `releaser()` call.
+        Thread.sleep(forTimeInterval: 0.2)
+
+        var disarmResult: [SleepAssertion] = []
+        let disarmCompleted = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            disarmResult = wd.disarm()
+            disarmCompleted.signal()
+        }
+
+        // If disarm() raced ahead of the in-flight release instead of
+        // waiting, it would complete almost immediately here, handing a1/a2
+        // back to this thread while tick()'s own loop is still releasing
+        // them independently.
+        XCTAssertEqual(
+            disarmCompleted.wait(timeout: .now() + 0.3), .timedOut,
+            "disarm() must wait for the in-flight release rather than racing ahead of it"
+        )
+
+        gate.signal()   // let the parked release proceed
+        wait(for: [tickFinished], timeout: 2.0)
+
+        // disarm() must resume promptly now that the release it was waiting
+        // on has resolved.
+        XCTAssertEqual(
+            disarmCompleted.wait(timeout: .now() + 1.0), .success,
+            "disarm() must resume once the in-flight release completes"
+        )
+
+        // Exactly one release() call per assertion — no ID was ever the
+        // target of two independent releaser() calls.
+        XCTAssertEqual(releaser.released.map(\.id).sorted(), [1, 2])
+        XCTAssertTrue(disarmResult.isEmpty, "tick() already released both cleanly; nothing left for disarm() to hand back")
+    }
+
+    /// Same race, from `arm()`'s side: a fresh `arm()` call must not run its
+    /// stale-cleanup release loop against assertions `tick()` is still
+    /// releasing for the session being replaced.
+    func test_armDuringInFlightRelease_waitsInsteadOfDoubleReleasing() {
+        let wd = makeWatchdog()
+        wd.arm(assertions: [a1], mode: .auto, releaseAfter: 300)
+        uptime.advance(421)
+
+        let gate = DispatchSemaphore(value: 0)
+        releaser.blockNextRelease(on: gate)   // parks tick() inside releaser(a1)
+
+        let tickFinished = expectation(description: "tick finished")
+        DispatchQueue.global().async {
+            wd.tick()
+            tickFinished.fulfill()
+        }
+        Thread.sleep(forTimeInterval: 0.2)
+
+        let replacement = a2
+        let armCompleted = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            wd.arm(assertions: [replacement], mode: .manual, releaseAfter: nil)
+            armCompleted.signal()
+        }
+
+        XCTAssertEqual(
+            armCompleted.wait(timeout: .now() + 0.3), .timedOut,
+            "arm() must wait for the in-flight release of the session it is replacing"
+        )
+
+        gate.signal()
+        wait(for: [tickFinished], timeout: 2.0)
+
+        XCTAssertEqual(
+            armCompleted.wait(timeout: .now() + 1.0), .success,
+            "arm() must resume once the in-flight release completes"
+        )
+
+        // a1 was released exactly once (by tick()), never by arm()'s
+        // stale-cleanup loop.
+        XCTAssertEqual(releaser.released.map(\.id), [1])
+    }
 }
