@@ -884,6 +884,26 @@ final class MenuBarViewModel {
                 persistURL: startupMode == .live ? ActivityHistorian.defaultPersistURL() : nil
             )
 
+        // Close the CLI-identity race on the token refresh path. `refresh`
+        // asks `guardRefresh` once, before the fetch chain starts; the CLI
+        // keychain read inside `freshen`/`forceRefresh` happens later and can
+        // straddle an account switch, so the refresher asks the same question
+        // again once its read has resolved. Wired here rather than at the
+        // construction above because the coordinator does not exist yet at
+        // that point — the same two-phase wiring the recorder below uses.
+        //
+        // Only for a refresher we built ourselves: an injected one belongs to
+        // whoever injected it, and silently attaching a gate backed by this
+        // VM's coordinator would change its behaviour behind the caller's back.
+        if cliRefresher == nil {
+            resolvedCLIRefresher.identityCheck = { [weak self] profileId in
+                guard let self else { return false }
+                guard let profile = self.profileStore.profiles.first(where: { $0.id == profileId })
+                else { return false }
+                return self.autoProfileCoordinator.guardRefresh(profile: profile)
+            }
+        }
+
         // All stored `let` properties are now initialized (Phase 1 complete),
         // so `[weak self]` is safe. Replace the early-assigned recorder with
         // the full version that routes background 429s to the refresh coordinator.

@@ -33,14 +33,37 @@ final class CLITokenRefresher {
     private var lastFreshen: FreshenCache?
     private let freshenCacheTTL: TimeInterval = 10
 
+    /// Post-read identity gate: "is the CLI still signed into the account this
+    /// profile belongs to?", asked *after* a read resolves and *before* the
+    /// result is written or used.
+    ///
+    /// A pre-check cannot answer this. `MenuBarViewModel.refresh` already asks
+    /// `guardRefresh` once, synchronously, before the whole fetch chain starts —
+    /// but the read below is the shared, unscoped `Claude Code-credentials`
+    /// item, and the only bound on it is the reader's own timeout. A `claude
+    /// login` into a second account inside that window makes the answer a token
+    /// for a different account than the one the pre-check approved, and both
+    /// methods here would persist it to `profileId` and immediately fetch with
+    /// it — account B's usage recorded under account A's profile.
+    ///
+    /// A `var` rather than an init-only `let` because the production gate is
+    /// `AutoProfileCoordinator.guardRefresh`, and the coordinator is built
+    /// *after* the refresher in `MenuBarViewModel.init` (the same two-phase
+    /// wiring `liveAccountRecorder` uses there). Defaults to always-allow so
+    /// every existing call site — tests, the hosted-test host, any construction
+    /// that has no watcher to consult — behaves exactly as before.
+    var identityCheck: (UUID) -> Bool
+
     init(
         reader: any CLICredentialReading = CLICredentialReader(),
         store: KeychainCredentialStore,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        identityCheck: @escaping (UUID) -> Bool = { _ in true }
     ) {
         self.reader = reader
         self.store = store
         self.now = now
+        self.identityCheck = identityCheck
     }
 
     /// Returns a credential whose CLI access token is valid for at least
@@ -88,6 +111,20 @@ final class CLITokenRefresher {
             )
             throw error
         }
+        // The account may have changed while the read above was outstanding.
+        // Treated exactly like the timeout arm: `current` is still the best
+        // token we have for *this* profile, and the 401 forceRefresh path
+        // recovers if it turns out to be stale. Writing the other account's
+        // token here would be the failure this gate exists to prevent, and
+        // caching it in `lastFreshen` would keep serving it for the rest of
+        // the TTL — so this returns before both.
+        guard identityCheck(profileId) else {
+            AppLog.shared.log(
+                "CLITokenRefresher.freshen: CLI account no longer matches profile \(profileId.uuidString.prefix(8)) after the keychain read; keeping current token",
+                level: .warn
+            )
+            return current
+        }
         guard case .cliToken(let newAccess, _, _) = result.credential,
               case .cliToken(let oldAccess, _, _) = current,
               newAccess != oldAccess
@@ -129,6 +166,17 @@ final class CLITokenRefresher {
             // retrying the API with a token it could not re-read.
             AppLog.shared.log(
                 "CLITokenRefresher.forceRefresh reader failed: \(String(describing: error))",
+                level: .warn
+            )
+            return nil
+        }
+        // Same post-read gate as `freshen`, with this method's own failure
+        // shape: nil, so the caller surfaces `.unauthorized` instead of
+        // retrying the API with a bearer that belongs to another account —
+        // and, worse, persisting it under this profile first.
+        guard identityCheck(profileId) else {
+            AppLog.shared.log(
+                "CLITokenRefresher.forceRefresh: CLI account no longer matches profile \(profileId.uuidString.prefix(8)) after the keychain read; skipping the retry",
                 level: .warn
             )
             return nil

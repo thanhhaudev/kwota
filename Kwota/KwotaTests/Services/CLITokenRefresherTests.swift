@@ -287,6 +287,96 @@ final class CLITokenRefresherTests: XCTestCase {
         XCTAssertEqual(persisted, result)
     }
 
+    // MARK: - Post-read identity gate
+
+    /// `MenuBarViewModel.refresh` checks the CLI identity once, before the
+    /// fetch chain starts. The read below happens after that check and is only
+    /// bounded by the reader's own timeout, so a `claude login` into another
+    /// account can land inside it. Writing what comes back would persist the
+    /// other account's token under this profile and immediately fetch with it —
+    /// account B's usage recorded under account A.
+    func testFreshenSkipsWriteWhenTheCLIAccountChangesDuringTheRead() async throws {
+        let id = UUID()
+        let stored = cliToken(access: "mine", expiresAt: baseDate.addingTimeInterval(-10))
+        try store.write(stored, for: id)
+
+        let kcJSON = #"""
+        {"accessToken":"other-account","refreshToken":"r","expiresAt":"2030-01-01T00:00:00Z"}
+        """#
+        // The switch happens *inside* the read, which is what makes a pre-check
+        // insufficient and this gate necessary.
+        var identityStillMatches = true
+        let reader = CLICredentialReader(
+            credentialsFile: temp.file("missing.json"),
+            keychainProbe: {
+                identityStillMatches = false
+                return Data(kcJSON.utf8)
+            }
+        )
+        let refresher = CLITokenRefresher(
+            reader: reader, store: store, now: { self.baseDate },
+            identityCheck: { _ in identityStillMatches }
+        )
+
+        let result = try await refresher.freshen(profileId: id, current: stored, minLifetime: 60)
+
+        XCTAssertEqual(result, stored,
+                       "must hand back this profile's own token, not the other account's")
+        XCTAssertEqual(try store.read(for: id), stored,
+                       "the other account's token must never be persisted under this profile")
+    }
+
+    func testFreshenStillWritesWhenTheIdentityCheckPasses() async throws {
+        // The gate must not become "never rotate": the ordinary path, where the
+        // account is unchanged across the read, still has to write.
+        let id = UUID()
+        let stored = cliToken(access: "stale", expiresAt: baseDate.addingTimeInterval(-10))
+        try store.write(stored, for: id)
+
+        let kcJSON = #"""
+        {"accessToken":"fresh","refreshToken":"r","expiresAt":"2030-01-01T00:00:00Z"}
+        """#
+        let refresher = CLITokenRefresher(
+            reader: makeReader(kcJSON), store: store, now: { self.baseDate },
+            identityCheck: { _ in true }
+        )
+
+        let result = try await refresher.freshen(profileId: id, current: stored, minLifetime: 60)
+        guard case .cliToken(let access, _, _) = result else { return XCTFail("expected cliToken") }
+        XCTAssertEqual(access, "fresh")
+        XCTAssertEqual(try store.read(for: id), result)
+    }
+
+    /// Same race on the 401 recovery path. Here the credential is not only
+    /// persisted but handed straight back for an immediate retry, so a
+    /// mismatched token would be used against the API as well as stored.
+    func testForceRefreshReturnsNilWhenTheCLIAccountChangesDuringTheRead() async throws {
+        let id = UUID()
+        let previous = cliToken(access: "mine", expiresAt: baseDate.addingTimeInterval(3600))
+
+        let kcJSON = #"""
+        {"accessToken":"other-account","refreshToken":"r","expiresAt":"2030-01-01T00:00:00Z"}
+        """#
+        var identityStillMatches = true
+        let reader = CLICredentialReader(
+            credentialsFile: temp.file("missing.json"),
+            keychainProbe: {
+                identityStillMatches = false
+                return Data(kcJSON.utf8)
+            }
+        )
+        let refresher = CLITokenRefresher(
+            reader: reader, store: store, now: { self.baseDate },
+            identityCheck: { _ in identityStillMatches }
+        )
+
+        let result = try await refresher.forceRefresh(profileId: id, previous: previous)
+
+        XCTAssertNil(result, "a token from another account must not be retried with")
+        XCTAssertNil(try store.read(for: id),
+                     "nor persisted under this profile on the way past")
+    }
+
     func testForceRefreshBypassesSharedCredentialCache() async throws {
         let id = UUID()
         let previous = cliToken(access: "old", expiresAt: baseDate.addingTimeInterval(3600))
