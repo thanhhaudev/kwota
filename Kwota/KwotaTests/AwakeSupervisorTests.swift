@@ -5,6 +5,7 @@
 
 import XCTest
 import Combine
+import IOKit
 @testable import Kwota
 
 @MainActor
@@ -660,6 +661,60 @@ final class AwakeSupervisorTests: XCTestCase {
         XCTAssertTrue(notifier.calls.isEmpty)
     }
 
+    /// The F-003 recovery race, end to end across all three types.
+    ///
+    /// Main is blocked for hours; the watchdog fires from its own queue,
+    /// releases cleanly, ends its session and stops ticking. Main then recovers,
+    /// and the manager's heartbeat continuation — enqueued before the stall
+    /// began — runs *first*, ahead of the `.fired` event, which only reaches the
+    /// main run loop at firing time. If the mutual watch still saw an age
+    /// measured from the firing, it would call `disable()` here, flip
+    /// `caffeine.$isActive` without the supervisor's suppression flag, and land
+    /// the supervisor in `.idle` — after which `adoptWatchdogFiring` no-ops:
+    /// `.unexpectedExit` instead of `.watchdogStalled`, and no session close at
+    /// `firedAt`, so the awake tint stretches across the entire stall again.
+    func testStaleHeartbeatAfterAFiringDoesNotPreemptTheAdoptPath() async {
+        // Short heartbeat so the mutual watch gets many chances to misfire in
+        // the window below. Rebuilt here rather than in setUp because every
+        // other test in this suite wants the production 60s cadence, which
+        // never fires inside a test.
+        caffeine = CaffeinateManager(holder: holder, watchdog: watchdog, heartbeatInterval: 0.02)
+        var closedAt: Date?
+        let sup = makeSupervisor(onForcedRelease: { date, _ in closedAt = date })
+        activity.emit(at: Date())
+        await Task.yield(); await Task.yield()
+        XCTAssertTrue(caffeine.isActive)
+
+        // The watchdog fired and stopped ticking; its last tick is now as old as
+        // the stall. No await between the two, so no heartbeat can slip in while
+        // the fake still reports itself armed.
+        watchdog.stubbedLastTickAge = 3 * 3600
+        watchdog.simulateCleanFiring()
+
+        // Main "recovers": heartbeats run for a while before the event lands.
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertTrue(caffeine.isActive, "the mutual watch must not have released")
+        XCTAssertTrue(notifier.calls.isEmpty, "and must not have reported a stop")
+
+        let firedAt = Date(timeIntervalSince1970: 500)
+        watchdog.subject.send(.fired(WatchdogFiring(
+            firedAt: firedAt, reason: .stalled, mode: .auto,
+            sessionStart: Date(timeIntervalSince1970: 0),
+            heldSeconds: 10_800, mainStallSeconds: 10_700,
+            batteryPercent: nil, isOnBattery: false,
+            assertionIDs: [1], releaseStatuses: [0]
+        )))
+        await Task.yield(); await Task.yield(); await Task.yield()
+
+        XCTAssertEqual(sup.state, .idle)
+        XCTAssertFalse(caffeine.isActive)
+        XCTAssertEqual(notifier.calls.count, 1)
+        guard case .watchdogStalled = notifier.calls.first else {
+            return XCTFail("expected watchdogStalled, got \(notifier.calls)")
+        }
+        XCTAssertEqual(closedAt, firedAt, "the session must close at the firing, not at recovery")
+    }
+
     // MARK: deadline bumps and threshold push
 
     func testActivityBumpsTheWatchdogDeadline() async {
@@ -701,6 +756,84 @@ final class AwakeSupervisorTests: XCTestCase {
         XCTAssertEqual(sup.state, .idle)
         XCTAssertGreaterThan(holder.released.count, heldBefore,
                              "a straggler must be released, not adopted away")
+    }
+
+    // MARK: full chain, no fakes between the three types
+
+    /// The only test that composes a **real** `AwakeWatchdog`, a real
+    /// `CaffeinateManager` and a real `AwakeSupervisor` the way `KwotaApp` wires
+    /// them — one watchdog instance shared by the manager that arms it and the
+    /// supervisor that reacts to it — and drives a single firing through the
+    /// whole chain: arm → tick → off-main release → evidence record → adopt →
+    /// session close.
+    ///
+    /// Every other test here stubs at least one seam, which is how a defect that
+    /// only exists *between* the types (a heartbeat check that could not tell a
+    /// fired watchdog from a dead one) stayed invisible through several rounds
+    /// of task-scoped review.
+    func testRealWatchdogFiring_flowsThroughManagerAndSupervisor() async {
+        let released = ReleasedAssertionRecorder()
+        let uptime = StubUptime()
+        let evidence = RecordingWatchdogEvidence()
+        // The moment the watchdog fires, in wall-clock terms. Deliberately far
+        // from `Date()` so a session closed at "now" instead of at the firing
+        // cannot pass by coincidence.
+        let firedAt = Date(timeIntervalSince1970: 1_000)
+        let real = AwakeWatchdog(
+            // Zero grace so an injected uptime can pass the deadline without
+            // also having to step over the production two-minute cushion.
+            deadlineGrace: 0,
+            uptime: { uptime.now() },
+            wallClock: { firedAt },
+            releaser: { released.record($0); return kIOReturnSuccess },
+            sampler: { BatteryReading(isOnBattery: false, percent: 90) },
+            evidence: evidence,
+            autoStartTimer: false
+        )
+        caffeine = CaffeinateManager(holder: holder, watchdog: real)
+        var closedAt: Date?
+        // 300s idle window so the in-process idle timer — the path the watchdog
+        // is a backstop for — cannot fire during the test and steal the release.
+        let sup = makeSupervisor(
+            idleWindowOverride: 300,
+            watchdog: real,
+            onForcedRelease: { date, _ in closedAt = date }
+        )
+
+        activity.emit(at: Date())
+        await Task.yield(); await Task.yield()
+        XCTAssertTrue(caffeine.isActive)
+        XCTAssertEqual(holder.acquired.count, 1, "AwakeConfig.default is idle-only")
+
+        // Main actor is blocked from here: no heartbeats, and the idle timer
+        // never gets to run. Only the watchdog's own queue is alive, which in
+        // production is what delivers this tick.
+        uptime.advance(301)
+        real.tick()
+
+        // The kernel-side release already happened, entirely off the main actor.
+        XCTAssertEqual(released.assertions.map(\.id), [1])
+        XCTAssertEqual(evidence.events.count, 1, "one firing, recorded to disk first")
+        guard case .fired(let firing)? = evidence.events.first else {
+            return XCTFail("expected a firing, got \(evidence.events)")
+        }
+        XCTAssertEqual(firing.reason, .stalled)
+        XCTAssertEqual(firing.mode, .auto)
+        XCTAssertEqual(firing.mainStallSeconds, 301, accuracy: 0.001)
+        XCTAssertEqual(firing.releaseStatuses, [kIOReturnSuccess])
+
+        // Main recovers and the event finally lands.
+        await Task.yield(); await Task.yield(); await Task.yield()
+
+        XCTAssertEqual(sup.state, .idle)
+        XCTAssertFalse(caffeine.isActive)
+        XCTAssertTrue(holder.released.isEmpty, "adopted, not double-released")
+        XCTAssertEqual(closedAt, firedAt, "the tint must end at the firing, not at recovery")
+        XCTAssertEqual(notifier.calls.count, 1)
+        guard case .watchdogStalled(let heldMinutes) = notifier.calls.first else {
+            return XCTFail("expected watchdogStalled, got \(notifier.calls)")
+        }
+        XCTAssertEqual(heldMinutes, 5)
     }
 
     // MARK: termination
@@ -752,6 +885,49 @@ final class AwakeSupervisorTests: XCTestCase {
             onDidWakeFromSleep: onDidWakeFromSleep,
             onForcedRelease: onForcedRelease
         )
+    }
+}
+
+// MARK: - Doubles for the full-chain integration test
+//
+// `AwakeWatchdog` takes `@Sendable` closures and calls them from its own queue,
+// so these are locked rather than plain vars — even though this test drives the
+// tick synchronously, the type is free to hand the work to `queue` and the
+// compiler holds us to it.
+
+final class StubUptime: @unchecked Sendable {
+    private let lock = NSLock()
+    private var nanos: UInt64 = 1_000_000_000
+
+    func now() -> UInt64 { lock.lock(); defer { lock.unlock() }; return nanos }
+
+    func advance(_ seconds: TimeInterval) {
+        lock.lock(); defer { lock.unlock() }
+        nanos &+= UInt64(seconds * 1_000_000_000)
+    }
+}
+
+final class ReleasedAssertionRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _assertions: [SleepAssertion] = []
+
+    var assertions: [SleepAssertion] { lock.lock(); defer { lock.unlock() }; return _assertions }
+
+    func record(_ assertion: SleepAssertion) {
+        lock.lock(); defer { lock.unlock() }
+        _assertions.append(assertion)
+    }
+}
+
+final class RecordingWatchdogEvidence: WatchdogEvidenceWriting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _events: [WatchdogEvent] = []
+
+    var events: [WatchdogEvent] { lock.lock(); defer { lock.unlock() }; return _events }
+
+    func append(_ event: WatchdogEvent) {
+        lock.lock(); defer { lock.unlock() }
+        _events.append(event)
     }
 }
 

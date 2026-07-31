@@ -326,6 +326,31 @@ final class CaffeinateManagerTests: XCTestCase {
 
         XCTAssertTrue(manager.isActive)
     }
+
+    /// A watchdog that fired cleanly stops ticking on purpose, so its last tick
+    /// recedes without bound from that moment on. The mutual watch must not read
+    /// that as death: the heartbeat continuation queued before a real main-actor
+    /// stall runs the instant main recovers, ahead of the `.fired` event, and a
+    /// `disable()` from here would flip `isActive` out from under the adopt path
+    /// — losing the stall notification and the session close at `firedAt`.
+    func testFiredWatchdogIsNotTreatedAsSilent() async throws {
+        let mock = MockSleepAssertionHolder()
+        let wd = FakeAwakeWatchdog()
+        let manager = CaffeinateManager(holder: mock, watchdog: wd, heartbeatInterval: 0.02)
+
+        try manager.enable(options: allFlagsOptions())
+        // Both statements run without an await between them, so the heartbeat
+        // task — which is `@MainActor`, like this test — cannot observe the
+        // stale age against a still-armed watchdog.
+        wd.stubbedLastTickAge = 500
+        wd.simulateCleanFiring()
+
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(wd.disarmCount, 0, "the mutual watch must not race the adopt path")
+        XCTAssertTrue(mock.released.isEmpty, "the watchdog already released these")
+        XCTAssertTrue(manager.isActive, "only adoptWatchdogRelease() may end this session")
+    }
 }
 
 // MARK: - Holder variant for the partial-rollback test

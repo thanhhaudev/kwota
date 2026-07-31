@@ -26,7 +26,8 @@ final class FakeAwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
     /// set it to `[]` to simulate a clean firing, or to a subset to simulate a
     /// firing where some releases failed.
     var disarmReturns: [SleepAssertion]?
-    /// Drives the mutual-watch tests.
+    /// Drives the mutual-watch tests. Only reported while armed — see
+    /// `lastTickAgeSeconds()`.
     var stubbedLastTickAge: TimeInterval?
 
     let subject = PassthroughSubject<WatchdogEvent, Never>()
@@ -60,7 +61,31 @@ final class FakeAwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         _heartbeats += 1
     }
 
-    func lastTickAgeSeconds() -> TimeInterval? { stubbedLastTickAge }
+    /// Armed-aware on purpose, mirroring the real `AwakeWatchdog`: an unarmed
+    /// watchdog has stopped its own timer and reports no age at all, however
+    /// long ago it last ticked. Stubbing the age alone used to be enough here,
+    /// and that gap is exactly why a false "watchdog silent" after a clean
+    /// firing survived two task-scoped reviews — the fake could not express the
+    /// coupling the mutual watch depends on. Tests get an age by arming first
+    /// (`arm(...)`, or `CaffeinateManager.enable(...)` which arms for them).
+    func lastTickAgeSeconds() -> TimeInterval? {
+        lock.lock(); defer { lock.unlock() }
+        guard _isArmed else { return nil }
+        return stubbedLastTickAge
+    }
+
+    /// Ends the armed session the way a clean firing does inside the real
+    /// watchdog: `armed` becomes nil and its timer suspends, so `lastTickUptime`
+    /// freezes and the age it would report stops meaning anything.
+    ///
+    /// Deliberately does *not* publish `.fired` — the whole point of the race
+    /// this models is that the watchdog's own state changes at firing time
+    /// while the main actor may not see the event until much later, so tests
+    /// send on `subject` themselves to control that ordering.
+    func simulateCleanFiring() {
+        lock.lock(); defer { lock.unlock() }
+        _isArmed = false
+    }
 
     func disarm() -> [SleepAssertion] {
         lock.lock(); defer { lock.unlock() }

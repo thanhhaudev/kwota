@@ -97,6 +97,18 @@ final class AwakeWatchdogTests: XCTestCase {
         }
     }
 
+    /// Lets an injected closure call back into the watchdog that owns it —
+    /// needed to model a `mainHeartbeat()` landing inside `sampler()`. Weak so
+    /// the closure the watchdog stores doesn't retain the watchdog through it.
+    final class WatchdogBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private weak var _value: AwakeWatchdog?
+        var value: AwakeWatchdog? {
+            get { lock.lock(); defer { lock.unlock() }; return _value }
+            set { lock.lock(); defer { lock.unlock() }; _value = newValue }
+        }
+    }
+
     private var uptime: Uptime!
     private var releaser: SpyReleaser!
     private var evidence: SpyEvidence!
@@ -244,6 +256,66 @@ final class AwakeWatchdogTests: XCTestCase {
         // most watchdogs in a test suite are never armed. autoStartTimer:false
         // here; Task 7 covers the real-timer path.
         for _ in 0..<50 { _ = makeWatchdog() }
+    }
+
+    // MARK: last-tick age (the mutual watch's input)
+
+    func test_lastTickAge_isNilBeforeTheFirstTick() {
+        let wd = makeWatchdog()
+        wd.arm(assertions: [a1], mode: .auto, releaseAfter: 300)
+        XCTAssertNil(wd.lastTickAgeSeconds())
+    }
+
+    func test_lastTickAge_isReportedWhileArmed() {
+        let wd = makeWatchdog()
+        wd.arm(assertions: [a1], mode: .auto, releaseAfter: 3600)
+        uptime.advance(30)
+        wd.tick()
+        uptime.advance(45)
+
+        XCTAssertEqual(wd.lastTickAgeSeconds() ?? -1, 45, accuracy: 0.001)
+    }
+
+    /// A clean firing ends the session and suspends the timer on purpose, so the
+    /// last tick recedes forever from that moment. Reporting that age would tell
+    /// `CaffeinateManager`'s mutual watch the watchdog had died — a false
+    /// positive on every successful firing, and the one that matters races the
+    /// `.fired` event to the main actor and steals the recovery it triggers.
+    func test_lastTickAge_isNilAfterACleanFiring() {
+        let wd = makeWatchdog()
+        wd.arm(assertions: [a1], mode: .auto, releaseAfter: 300)
+        uptime.advance(421)
+        wd.tick()
+        XCTAssertEqual(releaser.released.map(\.id), [1])
+
+        uptime.advance(3 * 3600)   // main was blocked for hours before recovering
+        XCTAssertNil(wd.lastTickAgeSeconds(), "a fired watchdog is done, not silent")
+    }
+
+    func test_lastTickAge_isNilAfterDisarm() {
+        let wd = makeWatchdog()
+        wd.arm(assertions: [a1], mode: .auto, releaseAfter: 3600)
+        uptime.advance(30)
+        wd.tick()
+        _ = wd.disarm()
+        uptime.advance(600)
+
+        XCTAssertNil(wd.lastTickAgeSeconds())
+    }
+
+    /// The armed-aware guard must not disarm the check itself. A firing whose
+    /// release failed stays armed and keeps retrying, and that session is
+    /// precisely the one where a genuinely stalled watchdog would strand a live
+    /// assertion — so it stays watched.
+    func test_lastTickAge_isStillReportedWhileRetryingAStraggler() {
+        let wd = makeWatchdog()
+        releaser.failFor([1])
+        wd.arm(assertions: [a1], mode: .auto, releaseAfter: 300)
+        uptime.advance(421)
+        wd.tick()
+        uptime.advance(200)
+
+        XCTAssertEqual(wd.lastTickAgeSeconds() ?? -1, 200, accuracy: 0.001)
     }
 
     // MARK: release failure
@@ -839,6 +911,45 @@ final class AwakeWatchdogTests: XCTestCase {
         uptime.advance(200); wd.tick()
 
         XCTAssertEqual(stalls(in: received).count, 2, "a second episode is a second record")
+    }
+
+    /// A heartbeat that lands during Pass 2's unlocked sample is stamped with a
+    /// *later* uptime than the `now` this tick captured in Pass 1. Everything in
+    /// this file subtracts `UInt64` uptimes with `&-`, so that ordering wraps to
+    /// ~584 years rather than going negative — and the number lands in
+    /// `mainStallSeconds`, the field a future incident investigation would read
+    /// to decide whether main was genuinely blocked. Zero is the honest value:
+    /// as of this tick, main had just checked in.
+    func test_heartbeatDuringTheSample_doesNotWrapMainStallSeconds() {
+        let box = WatchdogBox()
+        let up = uptime!
+        let rel = releaser!
+        let wd = AwakeWatchdog(
+            deadlineGrace: 0,
+            uptime: { up.now() },
+            wallClock: { Date(timeIntervalSince1970: 0) },
+            releaser: { rel.release($0) },
+            sampler: {
+                // Pass 2 runs unlocked, which is exactly what lets a main-actor
+                // heartbeat interleave here in production.
+                up.advance(60)
+                box.value?.mainHeartbeat()
+                return BatteryReading(isOnBattery: false, percent: 100)
+            },
+            evidence: evidence,
+            autoStartTimer: false
+        )
+        box.value = wd
+        // A configured threshold is what makes Pass 1 ask for the sample at all.
+        wd.setBatteryThreshold(20)
+        wd.arm(assertions: [a1], mode: .auto, releaseAfter: 0)
+        uptime.advance(1)   // grace is 0, so the deadline has lapsed
+        wd.tick()
+
+        guard case .fired(let firing)? = evidence.events.first else {
+            return XCTFail("expected a firing, got \(evidence.events)")
+        }
+        XCTAssertEqual(firing.mainStallSeconds, 0)
     }
 
     // MARK: untimed-on-battery nudge

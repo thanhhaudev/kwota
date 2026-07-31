@@ -335,7 +335,31 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         let now = uptime()
         lock.lock()
         defer { lock.unlock() }
-        guard let last = lastTickUptime else { return nil }
+        // Only an *armed* session has an age worth reporting. An unarmed
+        // watchdog is supposed to stop ticking — `disarm()` and a clean firing
+        // both call `suspendTimerLocked()` — so `lastTickUptime` freezes at the
+        // last tick and grows without bound from then on. Reporting that number
+        // would tell the mutual watch in `CaffeinateManager` that the watchdog
+        // has gone silent, when in fact it did exactly what it was built to do,
+        // and the consequences of that false positive are worst in precisely
+        // the scenario this type exists for: after a firing that ended a
+        // multi-hour main-actor block, the manager's already-queued heartbeat
+        // continuation runs the moment main recovers — ahead of the `.fired`
+        // event, which is only enqueued onto the main run loop at firing time —
+        // sees an age measured from the firing, and calls `disable()`. That
+        // flips `isActive` without the supervisor's suppression flag, so the
+        // supervisor lands in `.idle` first and `adoptWatchdogFiring` no-ops on
+        // arrival: no `.watchdogStalled` notification, and no session close at
+        // `firedAt`, which puts the phantom tint across the whole stall right
+        // back. Returning nil here matches "never ticked", which the mutual
+        // watch already treats as nothing to act on.
+        //
+        // The hazard the check was written for is untouched: a lifecycle bug
+        // that leaves a session armed while its timer sits suspended still has
+        // `armed != nil`, because `arm()` publishes `armed` and resumes the
+        // timer inside one critical section. A firing whose releases partly
+        // failed also stays armed for retry, and stays watched here.
+        guard armed != nil, let last = lastTickUptime else { return nil }
         return seconds(now &- last)
     }
 
@@ -627,7 +651,7 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
             // `mainHeartbeat()` clears that latch, so a main actor that comes
             // back and later goes quiet again is a second episode and earns a
             // second record.
-            let stallNow = seconds(now &- current.lastMainHeartbeatUptime)
+            let stallNow = mainStallSeconds(now: now, since: current.lastMainHeartbeatUptime)
             if stallNow > Self.stallThreshold, !current.stallLatched {
                 current.stallLatched = true
                 notices.append(.stallObserved(WatchdogStall(
@@ -664,7 +688,7 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         let mode = current.mode
         let sessionStart = current.startedAtWall
         let heldSeconds = seconds(now &- current.startedAtUptime)
-        let stallSeconds = seconds(now &- current.lastMainHeartbeatUptime)
+        let stallSeconds = mainStallSeconds(now: now, since: current.lastMainHeartbeatUptime)
         // Mark this epoch as "releasing" before giving up the lock, so a
         // concurrent `arm()`/`disarm()` sees it and waits instead of also
         // calling `releaser()` on these same assertions. Deliberately not set
@@ -769,6 +793,25 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
     }
 
     // MARK: Units
+
+    /// How long the main actor has been quiet, clamped at zero.
+    ///
+    /// `tick()` captures `now` once, in Pass 1, but `mainHeartbeat()` runs on
+    /// the main actor and can land during Pass 2's unlocked IOKit sample —
+    /// stamping a `lastMainHeartbeatUptime` that is *newer* than the `now` this
+    /// tick is reasoning about. Because uptimes are `UInt64` and this file
+    /// subtracts with `&-` throughout, that ordering does not produce a small
+    /// negative number; it wraps to roughly 584 years. The value feeds
+    /// `.stallObserved(seconds:)` and `WatchdogFiring.mainStallSeconds`, the one
+    /// forensic field whose entire job is separating "main was genuinely blocked
+    /// for hours" from "main was fine, the timer just hadn't fired yet" — a
+    /// wrapped value there would point a future incident investigation at
+    /// exactly the wrong conclusion, and it persists to disk. A heartbeat newer
+    /// than `now` means there was no stall at all as of this tick, so zero is
+    /// the honest answer rather than merely the safe one.
+    private func mainStallSeconds(now: UInt64, since last: UInt64) -> TimeInterval {
+        now >= last ? seconds(now &- last) : 0
+    }
 
     private func nanos(_ seconds: TimeInterval) -> UInt64 {
         UInt64((seconds * 1_000_000_000).rounded())
