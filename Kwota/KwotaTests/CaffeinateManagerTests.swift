@@ -296,6 +296,36 @@ final class CaffeinateManagerTests: XCTestCase {
         XCTAssertGreaterThan(during, 0)
         XCTAssertEqual(wd.heartbeats, during, "heartbeat must stop with the assertion")
     }
+
+    // MARK: mutual watch
+
+    func testSilentWatchdogIsDetectedAndAssertionsReleased() async throws {
+        let mock = MockSleepAssertionHolder()
+        let wd = FakeAwakeWatchdog()
+        let manager = CaffeinateManager(holder: mock, watchdog: wd, heartbeatInterval: 0.02)
+
+        try manager.enable(options: allFlagsOptions())
+        // The watchdog has not ticked in far longer than its own tick interval.
+        wd.stubbedLastTickAge = 500
+
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertFalse(manager.isActive, "a silent watchdog must not leave us unprotected")
+        XCTAssertEqual(mock.released.count, 3)
+    }
+
+    func testHealthyWatchdogIsNotTreatedAsSilent() async throws {
+        let mock = MockSleepAssertionHolder()
+        let wd = FakeAwakeWatchdog()
+        let manager = CaffeinateManager(holder: mock, watchdog: wd, heartbeatInterval: 0.02)
+
+        try manager.enable(options: allFlagsOptions())
+        wd.stubbedLastTickAge = 10
+
+        try? await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertTrue(manager.isActive)
+    }
 }
 
 // MARK: - Holder variant for the partial-rollback test

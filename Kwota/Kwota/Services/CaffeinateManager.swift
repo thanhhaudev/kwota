@@ -116,6 +116,19 @@ final class CaffeinateManager: ObservableObject {
                 } catch { return }
                 guard !Task.isCancelled, self != nil else { return }
                 watchdog.mainHeartbeat()
+                // Mutual watch. A lifecycle bug that leaves the timer
+                // suspended means it silently never ticks, which is F-003
+                // again with the safety net quietly removed. Both sides
+                // already tick in this window, so checking costs nothing.
+                if let age = watchdog.lastTickAgeSeconds(),
+                   age > AwakeWatchdog.watchdogSilentThreshold {
+                    AppLog.shared.log(
+                        "AwakeWatchdog silent for \(Int(age))s while armed — releasing from main",
+                        level: .error
+                    )
+                    self?.disable()
+                    return
+                }
             }
         }
         // Hold an App Nap-suppressing activity for as long as we're caffeinated,
