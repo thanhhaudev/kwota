@@ -227,7 +227,15 @@ final class AwakeWatchdogTests: XCTestCase {
     func test_disarmBeforeFiring_handsTheAssertionsBack() {
         let wd = makeWatchdog()
         wd.arm(assertions: [a1, a2], mode: .auto, releaseAfter: 300)
-        XCTAssertEqual(wd.disarm().map(\.id), [1, 2], "caller must release these")
+        let disarmed = wd.disarm()
+        XCTAssertEqual(disarmed.assertions.map(\.id), [1, 2], "caller must release these")
+        // Nothing ever fired, so nothing has been near IOPMAssertionRelease.
+        // This is the flag's "safe to release inline" answer, and the caller
+        // relies on it to keep the ordinary disable() path synchronous.
+        XCTAssertFalse(
+            disarmed.releaseAlreadyAttempted,
+            "an untouched session must not be reported as a retry"
+        )
         uptime.advance(10_000)
         wd.tick()
         XCTAssertTrue(releaser.released.isEmpty)
@@ -238,7 +246,7 @@ final class AwakeWatchdogTests: XCTestCase {
         wd.arm(assertions: [a1], mode: .auto, releaseAfter: 300)
         uptime.advance(421)
         wd.tick()
-        XCTAssertTrue(wd.disarm().isEmpty, "already released; a second release would be a race")
+        XCTAssertTrue(wd.disarm().assertions.isEmpty, "already released; a second release would be a race")
     }
 
     func test_secondTickAfterFiring_isIdempotent() {
@@ -333,7 +341,7 @@ final class AwakeWatchdogTests: XCTestCase {
         uptime.advance(60)
         wd.tick()
         XCTAssertEqual(releaser.released.count, 2)
-        XCTAssertTrue(wd.disarm().isEmpty, "retry succeeded, nothing left to hand back")
+        XCTAssertTrue(wd.disarm().assertions.isEmpty, "retry succeeded, nothing left to hand back")
     }
 
     /// The orphan guard. `disarm()` must hand a still-held assertion back rather
@@ -348,7 +356,17 @@ final class AwakeWatchdogTests: XCTestCase {
         uptime.advance(421)
         wd.tick()
 
-        XCTAssertEqual(wd.disarm().map(\.id), [1], "a2 released cleanly; a1 did not")
+        let disarmed = wd.disarm()
+        XCTAssertEqual(disarmed.assertions.map(\.id), [1], "a2 released cleanly; a1 did not")
+        // And it must be labelled as what it is. The caller cannot tell a
+        // straggler from an untouched assertion by looking at the list, and the
+        // two have opposite release-safety properties: this one has already
+        // proved that releasing it can fail, so retrying it inline on the main
+        // actor is the one thing that must not happen next.
+        XCTAssertTrue(
+            disarmed.releaseAlreadyAttempted,
+            "a straggler from a failed release must be reported as one"
+        )
     }
 
     func test_failedRelease_recordsAndPublishesExactlyOnce() {
@@ -434,7 +452,7 @@ final class AwakeWatchdogTests: XCTestCase {
         wd.tick()   // must still retry — the bump above must have been ignored
 
         XCTAssertEqual(releaser.released.map(\.id), [1, 2, 1], "retry must not be suppressed by the bump")
-        XCTAssertTrue(wd.disarm().isEmpty, "straggler released on retry; nothing left to hand back")
+        XCTAssertTrue(wd.disarm().assertions.isEmpty, "straggler released on retry; nothing left to hand back")
     }
 
     // MARK: disarm/arm racing an in-flight release
@@ -465,7 +483,7 @@ final class AwakeWatchdogTests: XCTestCase {
         // the lock is released, well ahead of the actual `releaser()` call.
         Thread.sleep(forTimeInterval: 0.2)
 
-        var disarmResult: [SleepAssertion] = []
+        var disarmResult = WatchdogDisarm(assertions: [], releaseAlreadyAttempted: false)
         let disarmCompleted = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
             disarmResult = wd.disarm()
@@ -494,7 +512,7 @@ final class AwakeWatchdogTests: XCTestCase {
         // Exactly one release() call per assertion — no ID was ever the
         // target of two independent releaser() calls.
         XCTAssertEqual(releaser.released.map(\.id).sorted(), [1, 2])
-        XCTAssertTrue(disarmResult.isEmpty, "tick() already released both cleanly; nothing left for disarm() to hand back")
+        XCTAssertTrue(disarmResult.assertions.isEmpty, "tick() already released both cleanly; nothing left for disarm() to hand back")
     }
 
     /// Same race, from `arm()`'s side: a fresh `arm()` call must not run its
@@ -563,7 +581,7 @@ final class AwakeWatchdogTests: XCTestCase {
         }
         Thread.sleep(forTimeInterval: 0.1)   // let tick() reach the parked release
 
-        var result: [SleepAssertion] = []
+        var result = WatchdogDisarm(assertions: [], releaseAlreadyAttempted: false)
         let disarmCompleted = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
             result = wd.disarm()
@@ -577,7 +595,15 @@ final class AwakeWatchdogTests: XCTestCase {
             disarmCompleted.wait(timeout: .now() + 1.5), .success,
             "disarm() must time out rather than wait forever for a release that never resolves"
         )
-        XCTAssertEqual(result.map(\.id), [1], "must hand the still in-flight assertion back rather than silently drop it")
+        XCTAssertEqual(result.assertions.map(\.id), [1], "must hand the still in-flight assertion back rather than silently drop it")
+        // The wedged-release case, flagged. `tick()` never reached its commit
+        // pass here, so `firingReported` is still false — the flag has to come
+        // from the timed-out wait itself, or the one caller who has to know
+        // "this ID may still be stuck inside IOKit" would be told the opposite.
+        XCTAssertTrue(
+            result.releaseAlreadyAttempted,
+            "an assertion handed back because the wait timed out is one the release mechanism has already been asked about"
+        )
 
         gate.signal()   // let the permanently parked tick() finish, so nothing dangles past this test
     }
@@ -614,7 +640,7 @@ final class AwakeWatchdogTests: XCTestCase {
         )
 
         // The new session must actually be the one in effect afterward.
-        XCTAssertEqual(wd.disarm().map(\.id), [2], "the fresh session must have taken over despite the stale one's stuck release")
+        XCTAssertEqual(wd.disarm().assertions.map(\.id), [2], "the fresh session must have taken over despite the stale one's stuck release")
 
         gate.signal()   // let the permanently parked tick() finish, so nothing dangles past this test
     }
@@ -667,7 +693,7 @@ final class AwakeWatchdogTests: XCTestCase {
             "the stale assertion must still be released, on a background thread"
         )
         XCTAssertEqual(
-            wd.disarm().map(\.id), [2],
+            wd.disarm().assertions.map(\.id), [2],
             "the fresh session must be the one in effect despite the stale one's stuck release"
         )
 
@@ -701,7 +727,7 @@ final class AwakeWatchdogTests: XCTestCase {
             waitUntil(1.0) { self.releaser.enteredCount >= 1 },
             "the stale assertion must still be released, on a background thread"
         )
-        XCTAssertEqual(wd.disarm().map(\.id), [2])
+        XCTAssertEqual(wd.disarm().assertions.map(\.id), [2])
 
         releaser.unwedgeAllReleases()
     }
@@ -840,7 +866,7 @@ final class AwakeWatchdogTests: XCTestCase {
 
         XCTAssertEqual(releaser.released.map(\.id), [1, 1],
                        "the straggler must still be retried once the battery recovers")
-        XCTAssertTrue(wd.disarm().isEmpty, "the retry succeeded; nothing left to hand back")
+        XCTAssertTrue(wd.disarm().assertions.isEmpty, "the retry succeeded; nothing left to hand back")
         XCTAssertEqual(evidence.events.count, 1, "a retry must not record a second firing")
     }
 
@@ -865,7 +891,7 @@ final class AwakeWatchdogTests: XCTestCase {
 
         XCTAssertEqual(releaser.released.map(\.id), [1, 1],
                        "the straggler must still be retried once the threshold is off")
-        XCTAssertTrue(wd.disarm().isEmpty, "the retry succeeded; nothing left to hand back")
+        XCTAssertTrue(wd.disarm().assertions.isEmpty, "the retry succeeded; nothing left to hand back")
     }
 
     // MARK: stall observation

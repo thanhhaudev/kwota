@@ -26,6 +26,11 @@ final class FakeAwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
     /// set it to `[]` to simulate a clean firing, or to a subset to simulate a
     /// firing where some releases failed.
     var disarmReturns: [SleepAssertion]?
+    /// Mirrors `WatchdogDisarm.releaseAlreadyAttempted`. Defaults to false —
+    /// "nothing fired, these were never handed to IOKit" — which is what the
+    /// plain enable/disable tests model. Set it alongside `disarmReturns` to
+    /// model a straggler the watchdog's own release already failed on.
+    var disarmReportsAttemptedRelease = false
     /// Drives the mutual-watch tests. Only reported while armed — see
     /// `lastTickAgeSeconds()`.
     var stubbedLastTickAge: TimeInterval?
@@ -87,11 +92,14 @@ final class FakeAwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         _isArmed = false
     }
 
-    func disarm() -> [SleepAssertion] {
+    func disarm() -> WatchdogDisarm {
         lock.lock(); defer { lock.unlock() }
         _disarmCount += 1
         let held = _isArmed ? (_armCalls.last?.assertions ?? []) : []
         _isArmed = false
-        return disarmReturns ?? held
+        return WatchdogDisarm(
+            assertions: disarmReturns ?? held,
+            releaseAlreadyAttempted: disarmReportsAttemptedRelease
+        )
     }
 }

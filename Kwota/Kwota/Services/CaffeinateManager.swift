@@ -50,6 +50,15 @@ final class CaffeinateManager: ObservableObject {
     private let holder: SleepAssertionHolder
     private let appNap: AppNapSuppressing
     private let watchdog: any AwakeWatchdogging
+    /// Release path for assertions the watchdog already failed to release, run
+    /// off the main actor. Deliberately not `holder`: `SleepAssertionHolder` is
+    /// documented as non-Sendable (its conformances, including every test
+    /// double, carry actor isolation), so it cannot be handed to a background
+    /// queue at all. `IOKitSleepAssertionHolder.releaseRaw` is the escape hatch
+    /// written for exactly this, and `AwakeWatchdog` takes the same injection
+    /// for the same reason — which is also what makes this testable without
+    /// touching real IOKit.
+    private let strandedReleaser: @Sendable (SleepAssertion) -> Int32
     private let heartbeatInterval: TimeInterval
     private var assertions: [SleepAssertion] = []
     private var appNapToken: NSObjectProtocol?
@@ -59,10 +68,13 @@ final class CaffeinateManager: ObservableObject {
     init(holder: SleepAssertionHolder = IOKitSleepAssertionHolder(),
          appNap: AppNapSuppressing = ProcessInfoAppNapSuppressor(),
          watchdog: any AwakeWatchdogging = AwakeWatchdog(),
+         strandedReleaser: @escaping @Sendable (SleepAssertion) -> Int32
+            = { IOKitSleepAssertionHolder.releaseRaw($0) },
          heartbeatInterval: TimeInterval = 60) {
         self.holder = holder
         self.appNap = appNap
         self.watchdog = watchdog
+        self.strandedReleaser = strandedReleaser
         self.heartbeatInterval = heartbeatInterval
     }
 
@@ -185,11 +197,58 @@ final class CaffeinateManager: ObservableObject {
         // the stragglers after a firing whose releases partly failed.
         // Releasing our own `assertions` array instead would double-release
         // in the second case and — worse — drop the stragglers in the third.
-        let toRelease = watchdog.disarm()
+        let disarmed = watchdog.disarm()
         endSession()
-        for a in toRelease { holder.release(a) }
+        releaseAfterDisarm(disarmed)
         if wasActive {
             AppLog.shared.log("sleep assertions released", level: .info)
+        }
+    }
+
+    /// Releases what `disarm()` handed back, on the main actor or off it
+    /// depending on which of the two cases produced the list.
+    ///
+    /// The ordinary case — nothing fired, so these assertions have never been
+    /// passed to `IOPMAssertionRelease` — stays exactly as it was: a synchronous
+    /// call through `holder`, on the main actor. That call is local mach IPC
+    /// that resolves in well under a millisecond, it is the shape every caller
+    /// of `disable()` has always had, and keeping it synchronous is also what
+    /// keeps the released set observable immediately after `disable()` returns.
+    ///
+    /// A straggler is the case that must not be handled that way. It comes back
+    /// here *because* the watchdog's own release of that exact ID already
+    /// failed, or because `disarm()` could not confirm an in-flight release had
+    /// finished — either way the release mechanism has already shown it may be
+    /// unresponsive for this ID. The moment `disarm()` returned, the watchdog
+    /// stopped owning it: there is no retry behind us any more. Calling
+    /// synchronously into that same mechanism, from the main actor, with no
+    /// timeout and nothing left to catch it, is precisely F-003 — a main actor
+    /// wedged on a stuck IOKit release — reintroduced by the recovery path.
+    ///
+    /// So the straggler goes to a background queue and nobody waits on it. This
+    /// is the same trade `AwakeWatchdog.arm()` makes for its stale-session
+    /// cleanup, for the same reason and with the same consequence: the status
+    /// code is lost, and it had no reader anyway. Raw GCD rather than
+    /// `Task.detached` because this target builds with
+    /// `SWIFT_DEFAULT_ACTOR_ISOLATION=MainActor`, so a detached task body would
+    /// run straight back onto the main actor and buy nothing.
+    ///
+    /// No double-release risk from the dispatch: `endSession()` has already
+    /// cleared `assertions`, so `deinit` will not touch these IDs, and a
+    /// subsequent `enable()` acquires new ones.
+    private func releaseAfterDisarm(_ disarmed: WatchdogDisarm) {
+        guard disarmed.releaseAlreadyAttempted, !disarmed.assertions.isEmpty else {
+            for a in disarmed.assertions { holder.release(a) }
+            return
+        }
+        AppLog.shared.log(
+            "releasing \(disarmed.assertions.count) assertion(s) the watchdog could not release, off the main actor",
+            level: .warn
+        )
+        let release = strandedReleaser
+        let stranded = disarmed.assertions
+        DispatchQueue.global().async {
+            for a in stranded { _ = release(a) }
         }
     }
 

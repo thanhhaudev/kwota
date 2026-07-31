@@ -15,6 +15,27 @@
 import Foundation
 import Combine
 
+/// What `disarm()` hands back: the assertions the caller must now release,
+/// plus whether the watchdog has already tried (or may still be trying) to
+/// release them itself.
+///
+/// The flag exists because those two cases are not equally safe to retry on
+/// the main actor. Assertions from a session where nothing ever fired have
+/// never been near `IOPMAssertionRelease`, and releasing them synchronously is
+/// the pre-existing, empirically-fast path. Assertions that come back *after*
+/// the watchdog's own release attempt failed, or after `disarm()` gave up
+/// waiting for a release still in flight, are the opposite: the release
+/// mechanism has already demonstrated, for these exact IDs, that it can fail
+/// to answer. Retrying those inline is how a wedged `powerd` gets to block the
+/// main actor again — the F-003 failure this whole type exists to remove.
+nonisolated struct WatchdogDisarm: Sendable {
+    /// Exactly what the kernel still holds. Empty after a clean firing.
+    let assertions: [SleepAssertion]
+    /// True when `assertions` are stragglers from a release the watchdog
+    /// already attempted, or from one it could not confirm had finished.
+    let releaseAlreadyAttempted: Bool
+}
+
 nonisolated protocol AwakeWatchdogging: AnyObject, Sendable {
     /// Takes ownership of `assertions` and starts ticking. `releaseAfter` is
     /// the app's own intended release window — the idle window for auto, the
@@ -40,13 +61,18 @@ nonisolated protocol AwakeWatchdogging: AnyObject, Sendable {
     /// Hands ownership back and returns exactly the assertions the caller must
     /// now release — empty when the watchdog already released them all.
     ///
-    /// An array rather than a Bool on purpose. A Bool must mean either "was
+    /// A list rather than a Bool on purpose. A Bool must mean either "was
     /// still armed" or "had not fired", and the partial-failure path makes those
     /// diverge: after a firing where some releases failed, the watchdog is still
     /// armed *and* has already fired, and the kernel still holds those
     /// assertions. Either Bool answer loses information, and the losing answer
     /// strands a live assertion with no owner — F-003 all over again.
-    func disarm() -> [SleepAssertion]
+    ///
+    /// `WatchdogDisarm.releaseAlreadyAttempted` carries the other half of that
+    /// same distinction: *which* of those two situations produced the list. The
+    /// caller has to release either way, but only one of them may be released
+    /// inline on the main actor.
+    func disarm() -> WatchdogDisarm
 
     /// Everything the watchdog observes. Sent from its own queue; subscribers
     /// hop to the main actor themselves.
@@ -363,7 +389,7 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         return seconds(now &- last)
     }
 
-    func disarm() -> [SleepAssertion] {
+    func disarm() -> WatchdogDisarm {
         lock.lock()
         defer { lock.unlock() }
         // If `tick()` is mid-release for the currently armed session, the
@@ -373,7 +399,8 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         // `IOPMAssertionRelease` calls for the same ID — wait for that release
         // to finish and land its outcome (success clears `armed`; failure
         // leaves the true straggler) before answering.
-        if waitForInFlightRelease() {
+        let releaseWaitTimedOut = waitForInFlightRelease()
+        if releaseWaitTimedOut {
             // The in-flight release never resolved within our budget. Hand
             // the assertions back anyway rather than returning empty: if this
             // call returned empty here, the caller believes the session ended
@@ -395,6 +422,16 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         // caller must release it; dropping it here is how an assertion ends up
         // with no owner at all.
         let stillHeld = armed?.assertions ?? []
+        // Both ways this list can contain an assertion the release mechanism
+        // has already been asked about: a firing whose `releaser()` call
+        // returned an error (`firingReported`), and a release that never
+        // answered at all (the wait above timing out — the caller is holding
+        // IDs that may still be mid-release inside a `powerd` that is not
+        // responding). The second is the more dangerous of the two and is
+        // exactly the case a `firingReported`-only flag would miss: `tick()`
+        // sets that flag in its commit pass, which a wedged release never
+        // reaches.
+        let releaseAlreadyAttempted = releaseWaitTimedOut || (armed?.firingReported ?? false)
         armed = nil
         armEpoch &+= 1
         batteryBelowSinceUptime = nil
@@ -402,7 +439,10 @@ nonisolated final class AwakeWatchdog: AwakeWatchdogging, @unchecked Sendable {
         // wakeups at all. A tick that slipped through anyway is harmless — Pass
         // 1 bails on `armed == nil`.
         suspendTimerLocked()
-        return stillHeld
+        return WatchdogDisarm(
+            assertions: stillHeld,
+            releaseAlreadyAttempted: releaseAlreadyAttempted
+        )
     }
 
     // MARK: Timer suspension
