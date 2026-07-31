@@ -57,6 +57,21 @@ struct CLIIdentity: Equatable {
 protocol CLIAccountWatching: AnyObject {
     var onChange: ((CLIIdentity?) -> Void)? { get set }
     var current: CLIIdentity? { get }
+    /// Fresh, synchronous read of the CLI's account state — the same read
+    /// `current` is derived from, but performed now rather than at the last
+    /// debounced recompute.
+    ///
+    /// `current` is only refreshed by the watcher's own event pipeline, which
+    /// sits behind FSEvents plus a 0.3s debounce (and, as a backstop, a 60s
+    /// poll). That lag is harmless for the UI, but it is not a safe basis for
+    /// an authorization decision taken *after* an `await`: the caller may
+    /// already be holding a value that belongs to a different account than the
+    /// one `current` still names. Callers that are about to bind a secret or a
+    /// fetch to a specific account must use this instead.
+    ///
+    /// Cheap by design: a `~/.claude.json` read plus a JSON parse, the exact
+    /// work the watcher already does on the main actor on every file event.
+    func readCurrentIdentity() -> CLIIdentity?
     func start()
     func stop()
 }
@@ -149,14 +164,17 @@ final class CLIAccountWatcher {
     }
 
     private func recompute() {
-        let next = computeCurrent()
+        let next = readCurrentIdentity()
         if hasEmittedBaseline && next == current { return }
         hasEmittedBaseline = true
         current = next
         onChange?(next)
     }
 
-    private func computeCurrent() -> CLIIdentity? {
+    /// The one place the CLI's identity is derived from disk. `recompute()`
+    /// calls it to refresh `current`; callers that cannot afford `current`'s
+    /// debounce lag call it directly — see the protocol requirement.
+    func readCurrentIdentity() -> CLIIdentity? {
         guard let account = oauthRead() else { return nil }
         return CLIIdentity(
             email: account.emailAddress,

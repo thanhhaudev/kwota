@@ -888,7 +888,10 @@ final class MenuBarViewModel {
         // asks `guardRefresh` once, before the fetch chain starts; the CLI
         // keychain read inside `freshen`/`forceRefresh` happens later and can
         // straddle an account switch, so the refresher asks the same question
-        // again once its read has resolved. Wired here rather than at the
+        // again once its read has resolved. `guardRefresh` re-reads the CLI's
+        // own state each time it is asked, so the second answer reflects the
+        // account the CLI is signed into now — not the one the watcher's
+        // debounced pipeline last published. Wired here rather than at the
         // construction above because the coordinator does not exist yet at
         // that point — the same two-phase wiring the recorder below uses.
         //

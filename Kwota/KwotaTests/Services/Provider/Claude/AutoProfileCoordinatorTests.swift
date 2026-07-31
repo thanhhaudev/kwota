@@ -855,6 +855,105 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         )
     }
 
+    /// The narrower half of the same race, and the one a `watcher.current`
+    /// check cannot see at all.
+    ///
+    /// `current` is only refreshed by the watcher's FSEvents pipeline behind a
+    /// 0.3s debounce, so for that whole window it still names account A after
+    /// the CLI has already written account B into `~/.claude.json`. A check
+    /// against `current` therefore *passes* here and binds B's token to
+    /// profile A — and it does not self-heal, because the `expiresAt`
+    /// short-circuit then skips every re-import until the wrong token nears
+    /// expiry. The check has to re-read the CLI's own state instead.
+    func test_seed_skipsWrite_whenOnlyTheFreshCLIStateShowsTheSwitch() async throws {
+        let store = makeStore()
+        let kwotaKeychain = KeychainCredentialStore(
+            service: "com.thanhhaudev.Kwota.test.\(UUID())"
+        )
+        let profileA = Profile(name: "A", authMethod: .cliSync,
+                               providerID: .claude, organizationId: nil,
+                               email: "a@x.com", kind: .auto)
+        try store.add(profileA)
+        // Expired, so the short-circuit above the read does not apply.
+        try kwotaKeychain.write(
+            .cliToken(accessToken: "A-TOKEN", refreshToken: "ra",
+                      expiresAt: Date(timeIntervalSince1970: 0)),
+            for: profileA.id
+        )
+
+        let watcher = FakeWatcher()
+        // Only the *fresh* side switches. `current` is deliberately left on
+        // account A, which is exactly the state the debounce produces.
+        let reader = AccountSwitchingCredentialReader(
+            stub: .cliToken(accessToken: "B-TOKEN", refreshToken: "rb",
+                            expiresAt: .distantFuture)
+        ) { [weak watcher] in
+            watcher?.setFreshIdentityWithoutEmitting(
+                CLIIdentity(email: "b@x.com", orgId: nil, credentialFingerprint: "gg")
+            )
+        }
+        let coord = makeCoordinator(
+            watcher: watcher,
+            profileStore: store,
+            keychain: kwotaKeychain,
+            credentialReader: reader,
+            profileFetcher: AlwaysNilOAuthProfileFetcher(),
+            clock: { self.t0 }
+        )
+        coord.start()
+        watcher.emit(CLIIdentity(email: "a@x.com", orgId: nil,
+                                 credentialFingerprint: "ff"))
+
+        await settleSeedTask()
+        XCTAssertEqual(
+            watcher.current?.email, "a@x.com",
+            "the debounced signal must still be stale — otherwise this test is not testing the debounce gap"
+        )
+        let stored = try kwotaKeychain.read(for: profileA.id)
+        guard case .cliToken(let access, _, _) = stored else {
+            return XCTFail("expected cliToken, got \(String(describing: stored))")
+        }
+        XCTAssertEqual(
+            access, "A-TOKEN",
+            "a switch the CLI has already committed to disk must be caught even while the watcher's debounce is still behind"
+        )
+    }
+
+    /// The same strengthening on the refresh gate. `guardRefresh` is what the
+    /// refresher's post-Keychain-read identity check is wired to, so a stale
+    /// `current` there would let a fetch — and a token write — proceed under
+    /// the wrong account for the length of the debounce.
+    func test_guardRefresh_blocksWhenOnlyTheFreshCLIStateShowsTheSwitch() throws {
+        let store = makeStore()
+        let profileA = Profile(name: "A", authMethod: .cliSync,
+                               providerID: .claude, organizationId: nil,
+                               email: "a@x.com", kind: .auto)
+        try store.add(profileA)
+        let watcher = FakeWatcher()
+        let coord = makeCoordinator(
+            watcher: watcher,
+            profileStore: store,
+            profileFetcher: AlwaysNilOAuthProfileFetcher(),
+            clock: { self.t0 }
+        )
+        coord.start()
+        watcher.emit(CLIIdentity(email: "a@x.com", orgId: nil,
+                                 credentialFingerprint: "ff"))
+        XCTAssertTrue(coord.guardRefresh(profile: profileA),
+                      "baseline: same account on both sides is allowed")
+
+        watcher.setFreshIdentityWithoutEmitting(
+            CLIIdentity(email: "b@x.com", orgId: nil, credentialFingerprint: "gg")
+        )
+
+        XCTAssertEqual(watcher.current?.email, "a@x.com",
+                       "the debounced signal is still on A — that is the point")
+        XCTAssertFalse(
+            coord.guardRefresh(profile: profileA),
+            "the gate must read the CLI's current state, not the watcher's debounced copy"
+        )
+    }
+
     /// The same window, closing cleanly: the CLI is still signed into the same
     /// account when the read resolves, so the import proceeds. Without this the
     /// fix above could be "never write anything" and still look correct.
@@ -1549,11 +1648,27 @@ final class AutoProfileCoordinatorTests: XCTestCase {
 final class FakeWatcher: CLIAccountWatching {
     var onChange: ((CLIIdentity?) -> Void)?
     private(set) var current: CLIIdentity?
+    /// Set once `setFreshIdentityWithoutEmitting` has been called, so "the
+    /// fresh read reports nobody signed in" stays expressible alongside "no
+    /// override, fall back to `current`".
+    private var hasFreshOverride = false
+    private var freshOverride: CLIIdentity?
+    private(set) var freshReadCount = 0
+
     func start() {}
     func stop() {}
     func emit(_ identity: CLIIdentity?) {
         current = identity
         onChange?(identity)
+    }
+
+    /// Mirrors `CLIAccountWatcher.readCurrentIdentity()`: a read of the CLI's
+    /// on-disk state, independent of the debounced `current`. Defaults to
+    /// `current` so the two agree — the ordinary case — unless a test has
+    /// deliberately pulled them apart.
+    func readCurrentIdentity() -> CLIIdentity? {
+        freshReadCount += 1
+        return hasFreshOverride ? freshOverride : current
     }
 
     /// Changes what `current` reports *without* firing `onChange`. Models the
@@ -1562,6 +1677,15 @@ final class FakeWatcher: CLIAccountWatching {
     /// new identity yet.
     func setCurrentWithoutEmitting(_ identity: CLIIdentity?) {
         current = identity
+    }
+
+    /// Diverges the fresh read from `current`, leaving `current` stale. Models
+    /// the real gap the debounce opens: the CLI has rewritten `~/.claude.json`
+    /// for the new account, and the watcher's 0.3s-debounced recompute has not
+    /// run yet, so `current` still names the old one.
+    func setFreshIdentityWithoutEmitting(_ identity: CLIIdentity?) {
+        hasFreshOverride = true
+        freshOverride = identity
     }
 }
 

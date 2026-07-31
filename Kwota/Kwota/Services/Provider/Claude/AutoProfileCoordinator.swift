@@ -214,8 +214,10 @@ final class AutoProfileCoordinator {
     /// (`hasHandled` / `lastHandled`) must be set before any suspension or two
     /// rapid identity emits could both pass the latch and both write.
     ///
-    /// `signedInAs` is the identity `id` was matched from, and it is what makes
-    /// the write safe across that suspension — see `stillSignedIn(as:)`.
+    /// `signedInAs` is the identity `id` was matched from, and it is what the
+    /// post-read re-check compares against so an account switch inside the
+    /// suspension is caught rather than written through — see
+    /// `stillSignedIn(as:)`, which also documents the window that remains.
     private func seedOrUpdateKeychain(for id: UUID, signedInAs identity: CLIIdentity) -> Task<Void, Never>? {
         // If Kwota already holds a non-expired CLI token for this profile,
         // there is nothing to import — skip the cross-app Keychain read that
@@ -274,15 +276,35 @@ final class AutoProfileCoordinator {
     /// Deliberately the same rule `guardRefresh` applies, just expressed
     /// between two identities rather than between an identity and a stored
     /// profile: email must match case-insensitively, and orgId must match only
-    /// when the watcher supplies one. The nil-tolerance is not laxness — see
-    /// `guardRefresh` for why `computeCurrent` reports `orgId: nil` today —
-    /// and requiring strict equality here would make every write fail rather
+    /// when the CLI supplies one. The nil-tolerance is not laxness — see
+    /// `guardRefresh` for why `readCurrentIdentity` reports `orgId: nil` today
+    /// — and requiring strict equality here would make every write fail rather
     /// than only the ones that should.
     ///
-    /// A watcher that reports no current identity at all (signed out mid-read)
-    /// is a mismatch: there is no account to attribute the token to.
+    /// No current identity at all (signed out mid-read) is a mismatch: there is
+    /// no account to attribute the token to.
+    ///
+    /// **What this does and does not guarantee.** The comparison is made
+    /// against `watcher.readCurrentIdentity()` — a fresh read of
+    /// `~/.claude.json` at check time — and deliberately *not* against
+    /// `watcher.current`, which is only refreshed through FSEvents behind a
+    /// 0.3s debounce. Reading `current` would leave a switch that the CLI has
+    /// already committed to disk invisible here for as long as the debounce
+    /// takes to catch up, and the resulting mis-write does not self-heal: the
+    /// `expiresAt` short-circuit at the top of `seedOrUpdateKeychain` would
+    /// then skip every re-import until the wrongly-stored token nears expiry.
+    ///
+    /// What remains is bounded by the CLI's own writes, not by anything Kwota
+    /// controls: `claude login` updates the Keychain item and `~/.claude.json`
+    /// as two separate, unordered writes. If the credential read resolves with
+    /// the new account's token in the gap *before* `~/.claude.json` is
+    /// rewritten, this check still sees the old account and allows the write.
+    /// That window is the CLI's inter-write gap rather than the reader's 10s
+    /// timeout or the watcher's debounce, and it cannot be narrowed further
+    /// from here: the credential the reader hands back carries only tokens and
+    /// an expiry — no account identity to compare against.
     private func stillSignedIn(as identity: CLIIdentity) -> Bool {
-        guard let current = watcher.current,
+        guard let current = watcher.readCurrentIdentity(),
               let currentEmail = current.email,
               let seededEmail = identity.email else { return false }
         let emailMatches = seededEmail.caseInsensitiveCompare(currentEmail) == .orderedSame
@@ -382,8 +404,21 @@ final class AutoProfileCoordinator {
     /// This is the loop-close for the chart-contamination bug — a refresh of
     /// profile A while the CLI is signed into account B is denied.
     ///
-    /// Email match is required. orgId match is required only when the watcher
-    /// supplies one. `CLIAccountWatcher.computeCurrent` currently always
+    /// The CLI's identity is re-read at check time rather than taken from
+    /// `watcher.current`. Every caller of this gate is about to start (or has
+    /// just finished) an `await` — the fetch chain in `MenuBarViewModel.refresh`,
+    /// the post-Keychain-read gate in `CLITokenRefresher` — so the answer has to
+    /// reflect the account the CLI is signed into *now*, not the one the
+    /// watcher's 0.3s-debounced pipeline last got around to publishing. The
+    /// read is the same `~/.claude.json` parse the watcher performs on every
+    /// file event, and it only happens for live Claude profiles: the archived,
+    /// non-Claude and `alwaysAllowRefresh` short-circuits above all return
+    /// first. Residual window: the CLI's Keychain write and its
+    /// `~/.claude.json` write are unordered, so a refresh can still be allowed
+    /// in the gap between them — see `stillSignedIn(as:)`.
+    ///
+    /// Email match is required. orgId match is required only when the CLI
+    /// supplies one. `CLIAccountWatcher.readCurrentIdentity` currently always
     /// reports `orgId: nil` because `~/.claude.json`'s `oauthAccount` block
     /// does not carry organizationUuid — so a strict equality check would
     /// reject every migrated profile whose `organizationId` was populated by
@@ -401,7 +436,8 @@ final class AutoProfileCoordinator {
         if profile.kind == .archived { return false }
         // Non-Claude profiles are not gated by Claude's CLI watcher.
         if profile.providerID != .claude { return true }
-        guard let current = watcher.current, let email = current.email else { return false }
+        guard let current = watcher.readCurrentIdentity(),
+              let email = current.email else { return false }
         let emailMatches = profile.email?.caseInsensitiveCompare(email) == .orderedSame
         let orgMatches = current.orgId == nil || profile.organizationId == current.orgId
         return emailMatches && orgMatches
