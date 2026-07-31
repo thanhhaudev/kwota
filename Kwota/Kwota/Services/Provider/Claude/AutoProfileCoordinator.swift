@@ -159,10 +159,10 @@ final class AutoProfileCoordinator {
                 try? profileStore.updateProfile(updated)
             }
             // Seed or update keychain.
-            seedOrUpdateKeychain(for: match.id)
+            let seed = seedOrUpdateKeychain(for: match.id)
             profileStore.activateOnAppearance(id: match.id, provider: .claude)
             demoteOtherAutoProfiles(except: match.id)
-            probePlanFromProfile(profileId: match.id)
+            probePlanFromProfile(profileId: match.id, after: seed)
             return
         }
 
@@ -183,10 +183,10 @@ final class AutoProfileCoordinator {
         )
         try? profileStore.add(new)
         // Seed keychain for the freshly-created profile.
-        seedOrUpdateKeychain(for: new.id)
+        let seed = seedOrUpdateKeychain(for: new.id)
         profileStore.activateOnAppearance(id: new.id, provider: .claude)
         demoteOtherAutoProfiles(except: new.id)
-        probePlanFromProfile(profileId: new.id)
+        probePlanFromProfile(profileId: new.id, after: seed)
     }
 
     // MARK: - Private helpers
@@ -196,24 +196,44 @@ final class AutoProfileCoordinator {
     /// CLI's current token and overwrites only when they differ. A failure to
     /// read the CLI is silently skipped — the next emit will retry, and the
     /// API path's 401 forceRefresh recovers if Kwota is left on a stale token.
-    private func seedOrUpdateKeychain(for id: UUID) {
+    ///
+    /// Returns the fire-and-forget import task when one was started, so the
+    /// `/api/oauth/profile` probe can wait for the credential it needs; `nil`
+    /// when the stored token already covered us and no import ran.
+    ///
+    /// `handle(_:)` stays synchronous, which is why the import is a detached
+    /// `Task` rather than an `await`: `handle` runs from `watcher.onChange`, a
+    /// non-async closure with no caller that could await it, and its dedup latch
+    /// (`hasHandled` / `lastHandled`) must be set before any suspension or two
+    /// rapid identity emits could both pass the latch and both write.
+    private func seedOrUpdateKeychain(for id: UUID) -> Task<Void, Never>? {
         // If Kwota already holds a non-expired CLI token for this profile,
         // there is nothing to import — skip the cross-app Keychain read that
         // would otherwise prompt the user (notably on the startup baseline
         // emit). The near-expiry refresh (CLITokenRefresher) and 401
         // forceRefresh paths still read Claude Code's Keychain on demand when
         // a token is actually stale.
+        //
+        // Kept on the synchronous path on purpose: this reads Kwota's own
+        // Keychain item, which never raises the cross-app consent dialog that
+        // F-003 hung on, and short-circuiting here means the common emit spawns
+        // no task at all.
         if let stored = try? keychain.read(for: id),
            case .cliToken(_, _, let expiresAt) = stored,
            expiresAt.timeIntervalSinceNow > 60 {
-            return
+            return nil
         }
-        guard let result = try? credentialReader.read() else { return }
-        if let stored = try? keychain.read(for: id),
-           accessTokensMatch(stored, result.credential) {
-            return
+        // Fire-and-forget on purpose. Every step here already tolerates failure
+        // (`try?`, nothing surfaced to the user), and the read below is the
+        // cross-app probe that must never run on the main actor.
+        return Task { [weak self] in
+            guard let self, let result = try? await self.credentialReader.read() else { return }
+            if let stored = try? self.keychain.read(for: id),
+               self.accessTokensMatch(stored, result.credential) {
+                return
+            }
+            try? self.keychain.write(result.credential, for: id)
         }
-        try? keychain.write(result.credential, for: id)
     }
 
     /// True iff both credentials are `.cliToken` with the same access token.
@@ -248,9 +268,14 @@ final class AutoProfileCoordinator {
     /// worst case is a stale-but-correct badge, never a Max→Free downgrade.
     /// Delegates the write path to `ProfileStore.apply(oauthProfile:for:)`
     /// so the user-initiated refresh action shares one diff rule.
-    private func probePlanFromProfile(profileId: UUID) {
+    private func probePlanFromProfile(profileId: UUID, after seed: Task<Void, Never>?) {
         Task { @MainActor [weak self] in
             guard let self else { return }
+            // The credential import is asynchronous now that the CLI Keychain
+            // read is off the main actor, so a first-launch profile has nothing
+            // stored yet at this point. Waiting for the import keeps the probe
+            // from skipping exactly the profile that most needs enriching.
+            await seed?.value
             guard let stored = try? self.keychain.read(for: profileId) else {
                 AppLog.shared.log(
                     "OAuthProfile: no keychain credential for \(profileId.uuidString.prefix(8)); skipping probe",

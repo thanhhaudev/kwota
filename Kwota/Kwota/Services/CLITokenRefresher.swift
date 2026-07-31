@@ -52,7 +52,7 @@ final class CLITokenRefresher {
         profileId: UUID,
         current: Credential,
         minLifetime: TimeInterval = 60
-    ) throws -> Credential {
+    ) async throws -> Credential {
         guard case .cliToken(_, _, let expiresAt) = current else {
             return current
         }
@@ -71,7 +71,16 @@ final class CLITokenRefresher {
         }
         let result: CLICredentialReader.SyncResult
         do {
-            result = try reader.read()
+            result = try await reader.read()
+        } catch is CLICredentialTimeout {
+            // A consent dialog nobody answered must not stall the refresh tick.
+            // `current` is still the best token we have — the API path's 401
+            // forceRefresh recovers if it turns out to be stale.
+            AppLog.shared.log(
+                "CLITokenRefresher.freshen timed out reading the CLI keychain; keeping current token",
+                level: .warn
+            )
+            return current
         } catch {
             AppLog.shared.log(
                 "CLITokenRefresher.freshen reader failed: \(String(describing: error))",
@@ -109,11 +118,15 @@ final class CLITokenRefresher {
     func forceRefresh(
         profileId: UUID,
         previous: Credential? = nil
-    ) throws -> Credential? {
+    ) async throws -> Credential? {
         let result: CLICredentialReader.SyncResult
         do {
-            result = try reader.readFresh()
+            result = try await reader.readFresh()
         } catch {
+            // Deliberately no separate `CLICredentialTimeout` arm: a timeout is
+            // just another read failure here, and returning nil is already the
+            // right answer — the caller surfaces `.unauthorized` rather than
+            // retrying the API with a token it could not re-read.
             AppLog.shared.log(
                 "CLITokenRefresher.forceRefresh reader failed: \(String(describing: error))",
                 level: .warn

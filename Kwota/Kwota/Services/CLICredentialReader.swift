@@ -16,22 +16,38 @@ import Security
 /// Seam that lets tests and higher-level services inject a CLI credential
 /// source without touching `CLICredentialReader`'s real Keychain and
 /// filesystem paths.
-protocol CLICredentialReading {
-    func read() throws -> CLICredentialReader.SyncResult
-    func readFresh() throws -> CLICredentialReader.SyncResult
+///
+/// Both methods are `async` and run their blocking `SecItemCopyMatching` off
+/// the main thread. Keeping a synchronous variant would leave the trap armed
+/// for the next call site: a consent dialog for another app's Keychain item
+/// blocks whatever thread asks, and on the main thread that freezes every
+/// keep-awake release path at once.
+protocol CLICredentialReading: Sendable {
+    func read() async throws -> CLICredentialReader.SyncResult
+    func readFresh() async throws -> CLICredentialReader.SyncResult
 }
 
 extension CLICredentialReading {
-    func readFresh() throws -> CLICredentialReader.SyncResult {
-        try read()
+    func readFresh() async throws -> CLICredentialReader.SyncResult {
+        try await read()
     }
 }
 
-struct CLICredentialReader {
+/// Thrown when a credential read did not answer inside its deadline. In
+/// practice that means an unanswered cross-app Keychain consent dialog: the
+/// caller is released, the thread parked inside `SecItemCopyMatching` is not.
+nonisolated struct CLICredentialTimeout: Error {}
+
+nonisolated struct CLICredentialReader {
     typealias KeychainProbe = () -> Data?
 
     let credentialsFile: URL
-    private let keychainProbe: KeychainProbe
+    // `nonisolated(unsafe)`: the reader is `Sendable` (it crosses onto a global
+    // queue in `read()`) but `KeychainProbe` deliberately is not — the test
+    // seams inject closures over captured state, and a `@Sendable` probe type
+    // would outlaw them. Safe because the probe is assigned once at init and
+    // only ever called, never replaced.
+    private nonisolated(unsafe) let keychainProbe: KeychainProbe
 
     init(
         credentialsFile: URL = CLICredentialReader.defaultPath,
@@ -86,23 +102,36 @@ struct CLICredentialReader {
         enum CodingKeys: String, CodingKey { case claudeAiOauth }
     }
 
-    func read() throws -> SyncResult {
-        if let data = keychainProbe(), let result = decodeKeychainPayload(data) {
-            return result
+    /// Runs the whole read — Keychain probe, legacy-file fallback, decode — on a
+    /// GCD global queue via `OffMain.run`. `Task.detached` would not do: this
+    /// target builds with `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, so a
+    /// detached closure body is still `@MainActor` and would leave the blocking
+    /// `SecItemCopyMatching` exactly where F-003 found it.
+    func read() async throws -> SyncResult {
+        // Snapshot the two stored properties into locals so the `@Sendable`
+        // closure captures values instead of `self`.
+        let probe = keychainProbe
+        let file = credentialsFile
+        return try await OffMain.run {
+            if let data = probe(), let result = Self.decodeKeychainPayload(data) {
+                return result
+            }
+            let data = try Data(contentsOf: file)
+            let payload = try Self.decoder().decode(Payload.self, from: data)
+            return SyncResult(
+                credential: .cliToken(
+                    accessToken: payload.accessToken,
+                    refreshToken: payload.refreshToken,
+                    expiresAt: payload.expiresAt
+                ),
+                subscriptionPlan: payload.subscriptionType
+            )
         }
-        let data = try Data(contentsOf: credentialsFile)
-        let payload = try Self.decoder().decode(Payload.self, from: data)
-        return SyncResult(
-            credential: .cliToken(
-                accessToken: payload.accessToken,
-                refreshToken: payload.refreshToken,
-                expiresAt: payload.expiresAt
-            ),
-            subscriptionPlan: payload.subscriptionType
-        )
     }
 
-    private func decodeKeychainPayload(_ data: Data) -> SyncResult? {
+    // `static` on purpose: these run inside the `@Sendable` closure above, and
+    // an instance method would capture `self` across the isolation boundary.
+    private static func decodeKeychainPayload(_ data: Data) -> SyncResult? {
         let decoder = Self.decoder()
         if let envelope = try? decoder.decode(KeychainEnvelope.self, from: data) {
             return makeResult(envelope.claudeAiOauth)
@@ -113,7 +142,7 @@ struct CLICredentialReader {
         return nil
     }
 
-    private func makeResult(_ p: Payload) -> SyncResult {
+    private static func makeResult(_ p: Payload) -> SyncResult {
         SyncResult(
             credential: .cliToken(
                 accessToken: p.accessToken,
@@ -148,8 +177,8 @@ extension CLICredentialReader: CLICredentialReading {
     /// the protocol default) so the "always live" contract stays local: if a
     /// caching layer is ever added to `read()`, this must stay uncached to keep
     /// 401 recovery working.
-    func readFresh() throws -> SyncResult {
-        try read()
+    func readFresh() async throws -> SyncResult {
+        try await read()
     }
 }
 
@@ -165,36 +194,138 @@ final class CachedCLICredentialReader: CLICredentialReading {
     }
 
     private let reader: any CLICredentialReading
+    /// How long a completed result is reused before a fresh probe is allowed.
     private let ttl: TimeInterval
+    /// How long a caller waits on a probe that has not answered yet. Distinct
+    /// from `ttl`: `ttl` bounds the age of a *result*, `timeout` bounds the wait
+    /// for one that may never arrive.
+    private let timeout: TimeInterval
     private let now: () -> Date
     private var entry: Entry?
+
+    /// Timing out the caller does not unblock the thread — `SecItemCopyMatching`
+    /// is not cancellable. Without this guard an unanswered dialog would have
+    /// every refresh tick park another `DispatchQueue.global` worker: across the
+    /// eight hours F-003 lasted, on the order of a hundred threads at 512 KB of
+    /// stack each, grown by the fix meant to make the hang harmless.
+    private var inFlight: Task<CLICredentialReader.SyncResult, Error>?
 
     init(
         reader: any CLICredentialReading = CLICredentialReader(),
         ttl: TimeInterval = 10,
+        timeout: TimeInterval = 10,
         now: @escaping () -> Date = Date.init
     ) {
         self.reader = reader
         self.ttl = ttl
+        self.timeout = timeout
         self.now = now
     }
 
-    func read() throws -> CLICredentialReader.SyncResult {
+    func read() async throws -> CLICredentialReader.SyncResult {
         let current = now()
         if let entry, current.timeIntervalSince(entry.at) < ttl {
             return try entry.result.get()
         }
-        return try readFresh()
+        return try await readFresh()
     }
 
-    func readFresh() throws -> CLICredentialReader.SyncResult {
+    func readFresh() async throws -> CLICredentialReader.SyncResult {
+        // Piggyback on an outstanding probe rather than starting a second one —
+        // and under the same ceiling. A bare `await inFlight.value` here would be
+        // unbounded and reintroduce exactly the stall the timeout exists for.
+        if let existing = inFlight {
+            return try await withTimeout(seconds: timeout) { try await existing.value }
+        }
+
+        // The marker is cleared by the TASK, not by the caller. Clearing it from
+        // the caller's `defer` looks right and is not: the timeout path returns
+        // at 10 s while `SecItemCopyMatching` is still parked and uncancellable,
+        // so the next refresh tick would see a free slot and park another global
+        // -queue worker. Over an eight-hour unanswered dialog that is the very
+        // thread pile-up this guard exists to prevent.
+        //
+        // `@MainActor` is spelled out rather than inherited so the `defer` can
+        // clear the marker synchronously at task completion. A deferred hop
+        // (`Task { @MainActor in ... }`) would leave a window in which the read
+        // has already returned but the slot still reads as busy, and a caller
+        // landing in that window would piggyback on a finished task and get its
+        // stale result back from a method whose whole contract is "fresh".
+        let source = reader
+        let task = Task { @MainActor [weak self] () -> CLICredentialReader.SyncResult in
+            defer { self?.inFlight = nil }
+            return try await source.readFresh()
+        }
+        inFlight = task
+
         do {
-            let result = try reader.readFresh()
+            let result = try await withTimeout(seconds: timeout) { try await task.value }
             entry = Entry(result: .success(result), at: now())
             return result
         } catch {
             entry = Entry(result: .failure(error), at: now())
             throw error
         }
+    }
+
+    /// Returns as soon as `work` answers or `seconds` elapse, whichever is
+    /// first — and, critically, really does return at the deadline.
+    ///
+    /// The obvious spelling of this races the work against a sleep inside a
+    /// `withThrowingTaskGroup`, and that does not work here. A task group is
+    /// structured: throwing the timeout out of the group cancels the children
+    /// and then *waits* for them, and a thread parked inside
+    /// `SecItemCopyMatching` answers no cancellation. Measured against the
+    /// hung-probe test — three reads with a 0.2 s deadline against a 2 s probe
+    /// took 6.7 s and started three probes, i.e. a timeout in name only, which
+    /// then defeats the in-flight guard because each caller only returns once
+    /// its own probe has finished.
+    ///
+    /// So the two racers are unstructured on purpose. The loser is abandoned
+    /// rather than awaited; when the real read finally answers, its `settle` is
+    /// dropped on the floor.
+    private func withTimeout<T: Sendable>(
+        seconds: TimeInterval,
+        _ work: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+            let gate = TimeoutGate(continuation)
+            let deadline = Task {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                gate.settle(.failure(CLICredentialTimeout()))
+            }
+            Task {
+                do {
+                    let value = try await work()
+                    deadline.cancel()
+                    gate.settle(.success(value))
+                } catch {
+                    deadline.cancel()
+                    gate.settle(.failure(error))
+                }
+            }
+        }
+    }
+}
+
+/// One-shot resume guard for the timeout race above. Both racers finish
+/// eventually — the deadline fires, and the abandoned read answers whenever the
+/// consent dialog is finally dismissed — but a `CheckedContinuation` traps the
+/// process on a second resume, so the loser has to be dropped rather than crash
+/// the app hours after the fact.
+private nonisolated final class TimeoutGate<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Error>?
+
+    init(_ continuation: CheckedContinuation<T, Error>) {
+        self.continuation = continuation
+    }
+
+    func settle(_ result: Result<T, Error>) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(with: result)
     }
 }

@@ -72,7 +72,7 @@ final class ClaudeProvider: AccountProvider {
 
         switch credential {
         case .cliToken:
-            let workingCredential = (try? cliRefresher.freshen(
+            let workingCredential = (try? await cliRefresher.freshen(
                 profileId: profile.id,
                 current: credential
             )) ?? credential
@@ -90,7 +90,7 @@ final class ClaudeProvider: AccountProvider {
                     "ClaudeProvider: 401 from oauth/usage, attempting forceRefresh and retry",
                     level: .info
                 )
-                if let retried = try? cliRefresher.forceRefresh(
+                if let retried = try? await cliRefresher.forceRefresh(
                     profileId: profile.id,
                     previous: workingCredential
                 ) {

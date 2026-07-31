@@ -606,7 +606,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
 
     // MARK: - Keychain seeding (Fix 1)
 
-    func test_create_seedsKeychain_andWritesMetadata() {
+    func test_create_seedsKeychain_andWritesMetadata() async {
         let store = makeStore()
         let keychainService = "com.thanhhaudev.Kwota.test.\(UUID())"
         let keychain = KeychainCredentialStore(service: keychainService)
@@ -634,8 +634,9 @@ final class AutoProfileCoordinatorTests: XCTestCase {
             seatTier: "max_5x", organizationType: nil
         ))
         let profile = store.profiles.first!
-        // Keychain should have been seeded.
-        let stored = try? keychain.read(for: profile.id)
+        // Keychain should have been seeded. The import is fire-and-forget now
+        // that the CLI Keychain read is off the main actor, so poll for it.
+        let stored = await waitForStoredCredential(keychain, id: profile.id)
         XCTAssertNotNil(stored, "coordinator must seed keychain on profile create")
         // Plan should be derived from seatTier.
         XCTAssertEqual(profile.subscriptionPlan, "Max 5x")
@@ -643,7 +644,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         XCTAssertEqual(profile.name, "new@x.com")
     }
 
-    func test_match_seedsKeychain_whenStoreHadNoCredential() throws {
+    func test_match_seedsKeychain_whenStoreHadNoCredential() async throws {
         let store = makeStore()
         let keychainService = "com.thanhhaudev.Kwota.test.\(UUID())"
         let keychain = KeychainCredentialStore(service: keychainService)
@@ -674,7 +675,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         coord.start()
         watcher.emit(CLIIdentity(email: "a@x.com", orgId: nil, credentialFingerprint: "ff"))
         // Keychain should now have an entry for the existing profile.
-        let stored = try? keychain.read(for: existing.id)
+        let stored = await waitForStoredCredential(keychain, id: existing.id)
         XCTAssertNotNil(stored, "coordinator must retroactively seed keychain for matched profile missing credential")
     }
 
@@ -707,7 +708,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
 
     // MARK: - Credential rotation (Fix 2)
 
-    func test_match_overwritesStoredCredential_whenCLIRotated() throws {
+    func test_match_overwritesStoredCredential_whenCLIRotated() async throws {
         // Existing profile has a stale token T1 in Kwota's keychain. CLI now
         // reports T2 (same account, re-login or rotation). The stored token is
         // expired so the guard falls through, the coordinator imports the
@@ -746,7 +747,9 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         watcher.emit(CLIIdentity(email: "a@x.com", orgId: nil,
                                   credentialFingerprint: "ff-new"))
 
-        let restored = try kwotaKeychain.read(for: profile.id)
+        let restored = await waitForStoredCredential(
+            kwotaKeychain, id: profile.id, accessToken: "T2"
+        )
         if case .cliToken(let access, _, _) = restored {
             XCTAssertEqual(access, "T2", "stored credential must rotate to current CLI token")
         } else {
@@ -754,7 +757,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         }
     }
 
-    func test_match_keepsStoredCredential_whenCLITokenUnchanged() throws {
+    func test_match_keepsStoredCredential_whenCLITokenUnchanged() async throws {
         // No-op rotation: stored T1 is expired (guard falls through to the
         // read), reader also returns T1, accessTokensMatch → no write. Store keeps T1.
         let store = makeStore()
@@ -785,6 +788,8 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         watcher.emit(CLIIdentity(email: "a@x.com", orgId: nil,
                                   credentialFingerprint: "ff"))
 
+        // Let the fire-and-forget import run before asserting it changed nothing.
+        await settleSeedTask()
         let restored = try kwotaKeychain.read(for: profile.id)
         if case .cliToken(let access, _, _) = restored {
             XCTAssertEqual(access, "T1")
@@ -795,7 +800,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
 
     // MARK: - Skip CLI Keychain read when stored credential is valid
 
-    func test_seedOrUpdateKeychain_skipsCLIRead_whenStoredCredentialStillValid() throws {
+    func test_seedOrUpdateKeychain_skipsCLIRead_whenStoredCredentialStillValid() async throws {
         // Simulates the startup baseline emit: Kwota already holds a non-expired
         // token, so the coordinator must NOT read Claude Code's Keychain (no prompt).
         let store = makeStore()
@@ -827,6 +832,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         watcher.emit(CLIIdentity(email: "a@x.com", orgId: nil,
                                   credentialFingerprint: "ff"))
 
+        await settleSeedTask()
         XCTAssertEqual(readerCallCount, 0,
             "a valid stored credential must short-circuit before reading Claude Code's Keychain — including the startup baseline emit")
     }
@@ -933,9 +939,12 @@ final class AutoProfileCoordinatorTests: XCTestCase {
     /// expected call count or the deadline elapses. The probe is dispatched
     /// from a fire-and-forget `Task { @MainActor }`, so the assert that
     /// follows `watcher.emit` cannot synchronously observe its result.
+    /// 5 s, not 1 s: the probe now waits on the asynchronous credential import
+    /// before it fetches, and under `make test`'s parallel hosts a 1 s budget is
+    /// short enough that CPU contention alone can end the poll early.
     private func waitUntilFetcherCalled(_ stub: StubOAuthProfileFetcher,
                                         count: Int,
-                                        timeout: TimeInterval = 1.0,
+                                        timeout: TimeInterval = 5.0,
                                         file: StaticString = #filePath,
                                         line: UInt = #line) async {
         let deadline = Date().addingTimeInterval(timeout)
@@ -947,10 +956,40 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                        file: file, line: line)
     }
 
+    /// The coordinator imports the CLI credential from a fire-and-forget task,
+    /// so a keychain assertion right after a synchronous `emit` would race it.
+    /// Returns as soon as a credential is present (optionally matching
+    /// `accessToken`), or nil after `timeout`.
+    private func waitForStoredCredential(
+        _ keychain: KeychainCredentialStore,
+        id: UUID,
+        accessToken: String? = nil,
+        timeout: TimeInterval = 5.0
+    ) async -> Credential? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let stored = try? keychain.read(for: id) {
+                guard let accessToken else { return stored }
+                if case .cliToken(let access, _, _) = stored, access == accessToken {
+                    return stored
+                }
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        }
+        return try? keychain.read(for: id)
+    }
+
+    /// Gives the fire-and-forget import task a chance to run before asserting
+    /// that it did NOT change anything — otherwise the assertion could pass
+    /// simply because the task had not started yet.
+    private func settleSeedTask() async {
+        try? await Task.sleep(nanoseconds: 250_000_000)  // 250ms
+    }
+
     private func waitUntilStoredPlanEquals(_ store: ProfileStore,
                                            profileId: UUID,
                                            expected: String?,
-                                           timeout: TimeInterval = 1.0,
+                                           timeout: TimeInterval = 5.0,
                                            file: StaticString = #filePath,
                                            line: UInt = #line) async {
         let deadline = Date().addingTimeInterval(timeout)
@@ -1451,7 +1490,7 @@ private final class AlwaysNilOAuthProfileFetcher: OAuthProfileFetching {
 
 private struct StubCredentialReader: CLICredentialReading {
     let stub: Credential
-    func read() throws -> CLICredentialReader.SyncResult {
+    func read() async throws -> CLICredentialReader.SyncResult {
         CLICredentialReader.SyncResult(credential: stub, subscriptionPlan: nil)
     }
 }

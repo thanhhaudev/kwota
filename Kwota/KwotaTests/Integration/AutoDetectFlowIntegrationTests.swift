@@ -242,7 +242,7 @@ final class AutoDetectFlowIntegrationTests: XCTestCase {
 }
 
 private struct StubCredentialReader: CLICredentialReading {
-    func read() throws -> CLICredentialReader.SyncResult {
+    func read() async throws -> CLICredentialReader.SyncResult {
         CLICredentialReader.SyncResult(
             credential: .cliToken(
                 accessToken: "test-access",
