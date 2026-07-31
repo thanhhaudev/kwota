@@ -798,6 +798,114 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         }
     }
 
+    /// The CLI keychain read is of the one shared `Claude Code-credentials`
+    /// item — it is scoped to no account — and it is only bounded by the
+    /// reader's timeout. A `claude login` into a second account inside that
+    /// window would otherwise have B's tokens written into A's keychain entry,
+    /// and Kwota would then report B's usage under A's name: two real accounts
+    /// silently crossed, which is worse than the stale token the import fixes.
+    func test_seed_skipsWrite_whenCLIAccountChangesDuringTheRead() async throws {
+        let store = makeStore()
+        let kwotaKeychain = KeychainCredentialStore(
+            service: "com.thanhhaudev.Kwota.test.\(UUID())"
+        )
+        let profileA = Profile(name: "A", authMethod: .cliSync,
+                               providerID: .claude, organizationId: nil,
+                               email: "a@x.com", kind: .auto)
+        try store.add(profileA)
+        // Expired, so the short-circuit above the read does not apply and the
+        // import genuinely runs.
+        let aToken = Credential.cliToken(
+            accessToken: "A-TOKEN", refreshToken: "ra",
+            expiresAt: Date(timeIntervalSince1970: 0)
+        )
+        try kwotaKeychain.write(aToken, for: profileA.id)
+
+        let watcher = FakeWatcher()
+        // The read answers with account B's credential, because by the time it
+        // resolves the CLI is signed into B.
+        let reader = AccountSwitchingCredentialReader(
+            stub: .cliToken(accessToken: "B-TOKEN", refreshToken: "rb",
+                            expiresAt: .distantFuture)
+        ) { [weak watcher] in
+            watcher?.setCurrentWithoutEmitting(
+                CLIIdentity(email: "b@x.com", orgId: nil, credentialFingerprint: "gg")
+            )
+        }
+        let coord = makeCoordinator(
+            watcher: watcher,
+            profileStore: store,
+            keychain: kwotaKeychain,
+            credentialReader: reader,
+            profileFetcher: AlwaysNilOAuthProfileFetcher(),
+            clock: { self.t0 }
+        )
+        coord.start()
+        watcher.emit(CLIIdentity(email: "a@x.com", orgId: nil,
+                                 credentialFingerprint: "ff"))
+
+        await settleSeedTask()
+        let stored = try kwotaKeychain.read(for: profileA.id)
+        guard case .cliToken(let access, _, _) = stored else {
+            return XCTFail("expected cliToken, got \(String(describing: stored))")
+        }
+        XCTAssertEqual(
+            access, "A-TOKEN",
+            "profile A must not be given the token of the account the CLI switched to mid-read"
+        )
+    }
+
+    /// The same window, closing cleanly: the CLI is still signed into the same
+    /// account when the read resolves, so the import proceeds. Without this the
+    /// fix above could be "never write anything" and still look correct.
+    func test_seed_writes_whenCLIAccountIsUnchangedAcrossTheRead() async throws {
+        let store = makeStore()
+        let kwotaKeychain = KeychainCredentialStore(
+            service: "com.thanhhaudev.Kwota.test.\(UUID())"
+        )
+        let profile = Profile(name: "A", authMethod: .cliSync,
+                              providerID: .claude, organizationId: nil,
+                              email: "a@x.com", kind: .auto)
+        try store.add(profile)
+        try kwotaKeychain.write(
+            .cliToken(accessToken: "OLD", refreshToken: "r",
+                      expiresAt: Date(timeIntervalSince1970: 0)),
+            for: profile.id
+        )
+
+        let watcher = FakeWatcher()
+        // Casing differs on purpose: the check is case-insensitive on email,
+        // exactly like `guardRefresh`.
+        let reader = AccountSwitchingCredentialReader(
+            stub: .cliToken(accessToken: "ROTATED", refreshToken: "r2",
+                            expiresAt: .distantFuture)
+        ) { [weak watcher] in
+            watcher?.setCurrentWithoutEmitting(
+                CLIIdentity(email: "A@X.com", orgId: nil, credentialFingerprint: "ff2")
+            )
+        }
+        let coord = makeCoordinator(
+            watcher: watcher,
+            profileStore: store,
+            keychain: kwotaKeychain,
+            credentialReader: reader,
+            profileFetcher: AlwaysNilOAuthProfileFetcher(),
+            clock: { self.t0 }
+        )
+        coord.start()
+        watcher.emit(CLIIdentity(email: "a@x.com", orgId: nil,
+                                 credentialFingerprint: "ff"))
+
+        let restored = await waitForStoredCredential(
+            kwotaKeychain, id: profile.id, accessToken: "ROTATED"
+        )
+        guard case .cliToken(let access, _, _) = restored else {
+            return XCTFail("expected cliToken, got \(String(describing: restored))")
+        }
+        XCTAssertEqual(access, "ROTATED",
+                       "same account across the read → the import must still land")
+    }
+
     // MARK: - Skip CLI Keychain read when stored credential is valid
 
     func test_seedOrUpdateKeychain_skipsCLIRead_whenStoredCredentialStillValid() async throws {
@@ -1447,6 +1555,14 @@ final class FakeWatcher: CLIAccountWatching {
         current = identity
         onChange?(identity)
     }
+
+    /// Changes what `current` reports *without* firing `onChange`. Models the
+    /// state an in-flight credential read can return into: the CLI has already
+    /// switched accounts, but the coordinator has not been re-entered for the
+    /// new identity yet.
+    func setCurrentWithoutEmitting(_ identity: CLIIdentity?) {
+        current = identity
+    }
 }
 
 @MainActor
@@ -1492,5 +1608,24 @@ private struct StubCredentialReader: CLICredentialReading {
     let stub: Credential
     func read() async throws -> CLICredentialReader.SyncResult {
         CLICredentialReader.SyncResult(credential: stub, subscriptionPlan: nil)
+    }
+}
+
+/// Runs `onRead` before answering, so a test can make the CLI switch accounts
+/// while the shared keychain read is outstanding — the exact window the
+/// post-read identity check exists to close, and one that lasts as long as the
+/// reader's timeout in production.
+private final class AccountSwitchingCredentialReader: CLICredentialReading {
+    private let stub: Credential
+    private let onRead: () -> Void
+
+    init(stub: Credential, onRead: @escaping () -> Void) {
+        self.stub = stub
+        self.onRead = onRead
+    }
+
+    func read() async throws -> CLICredentialReader.SyncResult {
+        onRead()
+        return CLICredentialReader.SyncResult(credential: stub, subscriptionPlan: nil)
     }
 }

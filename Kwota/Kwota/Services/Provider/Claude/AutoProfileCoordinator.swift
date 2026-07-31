@@ -163,8 +163,10 @@ final class AutoProfileCoordinator {
                 }
                 try? profileStore.updateProfile(updated)
             }
-            // Seed or update keychain.
-            let seed = seedOrUpdateKeychain(for: match.id)
+            // Seed or update keychain. `identity` rides along so the import
+            // can prove, after its own await, that the CLI is still signed
+            // into the account this profile was matched from.
+            let seed = seedOrUpdateKeychain(for: match.id, signedInAs: identity)
             profileStore.activateOnAppearance(id: match.id, provider: .claude)
             demoteOtherAutoProfiles(except: match.id)
             probePlanFromProfile(profileId: match.id, after: seed)
@@ -188,7 +190,7 @@ final class AutoProfileCoordinator {
         )
         try? profileStore.add(new)
         // Seed keychain for the freshly-created profile.
-        let seed = seedOrUpdateKeychain(for: new.id)
+        let seed = seedOrUpdateKeychain(for: new.id, signedInAs: identity)
         profileStore.activateOnAppearance(id: new.id, provider: .claude)
         demoteOtherAutoProfiles(except: new.id)
         probePlanFromProfile(profileId: new.id, after: seed)
@@ -211,7 +213,10 @@ final class AutoProfileCoordinator {
     /// non-async closure with no caller that could await it, and its dedup latch
     /// (`hasHandled` / `lastHandled`) must be set before any suspension or two
     /// rapid identity emits could both pass the latch and both write.
-    private func seedOrUpdateKeychain(for id: UUID) -> Task<Void, Never>? {
+    ///
+    /// `signedInAs` is the identity `id` was matched from, and it is what makes
+    /// the write safe across that suspension — see `stillSignedIn(as:)`.
+    private func seedOrUpdateKeychain(for id: UUID, signedInAs identity: CLIIdentity) -> Task<Void, Never>? {
         // If Kwota already holds a non-expired CLI token for this profile,
         // there is nothing to import — skip the cross-app Keychain read that
         // would otherwise prompt the user (notably on the startup baseline
@@ -233,12 +238,56 @@ final class AutoProfileCoordinator {
         // cross-app probe that must never run on the main actor.
         return Task { [weak self] in
             guard let self, let result = try? await self.credentialReader.read() else { return }
+            // Re-prove the identity across the await before writing anything.
+            // `credentialReader.read()` reads the one shared
+            // `Claude Code-credentials` Keychain item: it is scoped to no
+            // profile and no account, so what comes back is simply "whatever
+            // the CLI is signed into right now", not "the token belonging to
+            // `id`". The only thing bounding that read is the reader's own
+            // timeout (10s for the default `CachedCLICredentialReader`), which
+            // is an entirely plausible window for a `claude login` into a
+            // second account to land in. Writing unconditionally would then
+            // bind account B's access and refresh tokens to profile A, and
+            // Kwota would go on to show B's usage under A's name — a silent
+            // misattribution between two of the user's real accounts, and a
+            // strictly worse outcome than the stale token this import exists
+            // to replace. Skipping is safe by the same reasoning the doc
+            // comment above already relies on for a failed read: the next
+            // emit retries, and the 401 forceRefresh path recovers.
+            guard self.stillSignedIn(as: identity) else {
+                AppLog.shared.log(
+                    "AutoProfileCoordinator: CLI account changed during the credential read for \(id.uuidString.prefix(8)); skipping the keychain write",
+                    level: .warn
+                )
+                return
+            }
             if let stored = try? self.keychain.read(for: id),
                self.accessTokensMatch(stored, result.credential) {
                 return
             }
             try? self.keychain.write(result.credential, for: id)
         }
+    }
+
+    /// True iff the CLI is still signed into the account `identity` described.
+    ///
+    /// Deliberately the same rule `guardRefresh` applies, just expressed
+    /// between two identities rather than between an identity and a stored
+    /// profile: email must match case-insensitively, and orgId must match only
+    /// when the watcher supplies one. The nil-tolerance is not laxness — see
+    /// `guardRefresh` for why `computeCurrent` reports `orgId: nil` today —
+    /// and requiring strict equality here would make every write fail rather
+    /// than only the ones that should.
+    ///
+    /// A watcher that reports no current identity at all (signed out mid-read)
+    /// is a mismatch: there is no account to attribute the token to.
+    private func stillSignedIn(as identity: CLIIdentity) -> Bool {
+        guard let current = watcher.current,
+              let currentEmail = current.email,
+              let seededEmail = identity.email else { return false }
+        let emailMatches = seededEmail.caseInsensitiveCompare(currentEmail) == .orderedSame
+        let orgMatches = current.orgId == nil || identity.orgId == current.orgId
+        return emailMatches && orgMatches
     }
 
     /// True iff both credentials are `.cliToken` with the same access token.
