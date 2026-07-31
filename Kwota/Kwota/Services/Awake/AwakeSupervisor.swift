@@ -536,7 +536,13 @@ final class AwakeSupervisor {
         // adopting would empty the manager's array on a false premise — leaving
         // a live assertion whose only owner is a watchdog whose next disarm()
         // hands it to a manager that no longer tracks it. `disable()` instead
-        // routes those stragglers back through the holder.
+        // takes those stragglers back from `disarm()` and, because the same
+        // firing already marked their release as attempted-and-failed, retires
+        // them off the main actor through the raw releaser rather than
+        // synchronously through the holder — see
+        // `CaffeinateManager.releaseAfterDisarm`. Calling back into a release
+        // mechanism that has just proved unresponsive, from the main actor,
+        // with nothing behind it, is F-003 arriving through the recovery path.
         let releasedCleanly = firing.releaseStatuses.allSatisfy { $0 == kIOReturnSuccess }
         // Close the session at the real release moment. Using the current
         // clock would stretch the awake tint across the whole stall.
@@ -546,7 +552,7 @@ final class AwakeSupervisor {
             } else {
                 AppLog.shared.log(
                     "AwakeWatchdog firing had failed releases \(firing.releaseStatuses) — "
-                    + "releasing through the holder instead of adopting",
+                    + "releasing the stragglers through the manager instead of adopting",
                     level: .error
                 )
                 self.caffeine.disable()

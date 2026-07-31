@@ -25,6 +25,12 @@ final class AwakeSupervisorTests: XCTestCase {
     var notificationCenter: NotificationCenter!
     var userInput: FakeUserInputMonitor!
     var watchdog: FakeAwakeWatchdog!
+    /// Stands in for `IOKitSleepAssertionHolder.releaseRaw`, which is the
+    /// default `strandedReleaser` and calls the real `IOPMAssertionRelease`.
+    /// Injected into every manager this suite builds, unconditionally: any test
+    /// that makes `disarm()` report an already-attempted release would
+    /// otherwise fire a genuine system call on fabricated assertion ids.
+    var stranded: ReleasedAssertionRecorder!
 
     override func setUp() async throws {
         suite = "AwakeSupervisorTests-\(UUID().uuidString)"
@@ -37,7 +43,8 @@ final class AwakeSupervisorTests: XCTestCase {
         // events. Two instances would let `caffeine.disable()` disarm a
         // watchdog nobody under test is asserting on.
         watchdog = FakeAwakeWatchdog()
-        caffeine = CaffeinateManager(holder: holder, watchdog: watchdog)
+        stranded = ReleasedAssertionRecorder()
+        caffeine = makeCaffeine(watchdog: watchdog)
         activity = AwakeActivityStub()
         battery = FakeBatteryMonitor()
         notifier = FakeAwakeNotifier()
@@ -678,7 +685,7 @@ final class AwakeSupervisorTests: XCTestCase {
         // the window below. Rebuilt here rather than in setUp because every
         // other test in this suite wants the production 60s cadence, which
         // never fires inside a test.
-        caffeine = CaffeinateManager(holder: holder, watchdog: watchdog, heartbeatInterval: 0.02)
+        caffeine = makeCaffeine(watchdog: watchdog, heartbeatInterval: 0.02)
         var closedAt: Date?
         let sup = makeSupervisor(onForcedRelease: { date, _ in closedAt = date })
         activity.emit(at: Date())
@@ -734,28 +741,53 @@ final class AwakeSupervisorTests: XCTestCase {
         XCTAssertEqual(watchdog.thresholds.last, 10)
     }
 
-    /// A firing whose releases partly failed must not be adopted — the manager
-    /// has to release the straggler through its own holder. Adopting on a false
-    /// premise is the one path in this design that recreates F-003.
-    func testPartialFailureFiringReleasesThroughTheHolder() async {
+    /// A firing whose releases partly failed must not be adopted — the straggler
+    /// still has to be released, or it ends up live with no owner at all.
+    /// Adopting on a false premise is the one path in this design that recreates
+    /// F-003.
+    ///
+    /// The fake is set up the way the *real* watchdog behaves after this exact
+    /// firing: `tick()`'s Pass 5 leaves the session armed with the still-held
+    /// assertion and sets `firingReported`, so the `disarm()` that
+    /// `caffeine.disable()` performs a moment later reports
+    /// `releaseAlreadyAttempted == true`. That is what routes the straggler to
+    /// the off-main releaser instead of the main-actor holder — with the fake
+    /// left on its `false` default this test would assert against a state the
+    /// real watchdog cannot produce here, and would prove nothing about the
+    /// path production actually takes.
+    ///
+    /// `strandedReleaser` is the suite-wide recorder (see `makeCaffeine`), never
+    /// the real `IOPMAssertionRelease`.
+    func testPartialFailureFiringReleasesTheStragglerOffTheMainActor() async {
         let sup = makeSupervisor()
         activity.emit(at: Date())
         await Task.yield(); await Task.yield()
-        let heldBefore = holder.released.count
+        let straggler = watchdog.armCalls.first!.assertions[0]
+        XCTAssertTrue(holder.released.isEmpty, "nothing released yet")
 
+        // The watchdog's own release of this id failed, so it kept the
+        // assertion and marked the attempt.
+        watchdog.disarmReturns = [straggler]
+        watchdog.disarmReportsAttemptedRelease = true
         watchdog.subject.send(.fired(WatchdogFiring(
             firedAt: Date(timeIntervalSince1970: 500),
             reason: .stalled, mode: .auto,
             sessionStart: Date(timeIntervalSince1970: 0),
             heldSeconds: 500, mainStallSeconds: 400,
             batteryPercent: nil, isOnBattery: false,
-            assertionIDs: [1], releaseStatuses: [-1]
+            assertionIDs: [straggler.id], releaseStatuses: [-1]
         )))
         await Task.yield(); await Task.yield(); await Task.yield()
 
         XCTAssertEqual(sup.state, .idle)
-        XCTAssertGreaterThan(holder.released.count, heldBefore,
-                             "a straggler must be released, not adopted away")
+        XCTAssertTrue(
+            stranded.waitForRelease(of: straggler, timeout: 2.0),
+            "a straggler must still be released — dropping it is how an assertion ends up with no owner"
+        )
+        XCTAssertTrue(
+            holder.released.isEmpty,
+            "and not by calling back synchronously into the mechanism that just failed on this id"
+        )
     }
 
     // MARK: full chain, no fakes between the three types
@@ -790,7 +822,7 @@ final class AwakeSupervisorTests: XCTestCase {
             evidence: evidence,
             autoStartTimer: false
         )
-        caffeine = CaffeinateManager(holder: holder, watchdog: real)
+        caffeine = makeCaffeine(watchdog: real)
         var closedAt: Date?
         // 300s idle window so the in-process idle timer — the path the watchdog
         // is a backstop for — cannot fire during the test and steal the release.
@@ -856,6 +888,24 @@ final class AwakeSupervisorTests: XCTestCase {
 
     // MARK: Helpers
 
+    /// Every `CaffeinateManager` in this suite must come from here. The one
+    /// parameter that is never optional is `strandedReleaser`: its production
+    /// default goes straight to `IOPMAssertionRelease`, and a manager built
+    /// without it would make a real system call the moment a test models a
+    /// firing whose releases failed.
+    func makeCaffeine(
+        watchdog: any AwakeWatchdogging,
+        heartbeatInterval: TimeInterval = 60
+    ) -> CaffeinateManager {
+        let recorder = stranded!
+        return CaffeinateManager(
+            holder: holder,
+            watchdog: watchdog,
+            strandedReleaser: { recorder.record($0); return kIOReturnSuccess },
+            heartbeatInterval: heartbeatInterval
+        )
+    }
+
     func makeSupervisor(
         config: AwakeConfig = .default,
         idleWindowOverride: TimeInterval? = nil,
@@ -916,6 +966,18 @@ final class ReleasedAssertionRecorder: @unchecked Sendable {
     func record(_ assertion: SleepAssertion) {
         lock.lock(); defer { lock.unlock() }
         _assertions.append(assertion)
+    }
+
+    /// Polls rather than signalling: the straggler release the manager hands to
+    /// a background queue is fire-and-forget by design, so there is no
+    /// completion for a test to await.
+    func waitForRelease(of assertion: SleepAssertion, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if assertions.contains(assertion) { return true }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        return assertions.contains(assertion)
     }
 }
 
