@@ -45,8 +45,13 @@ nonisolated struct CLICredentialReader {
     // `nonisolated(unsafe)`: the reader is `Sendable` (it crosses onto a global
     // queue in `read()`) but `KeychainProbe` deliberately is not — the test
     // seams inject closures over captured state, and a `@Sendable` probe type
-    // would outlaw them. Safe because the probe is assigned once at init and
-    // only ever called, never replaced.
+    // would outlaw them.
+    //
+    // What makes the escape hatch sound is the *production* probe, not the
+    // `let`: `defaultKeychainProbe` closes over nothing mutable — it builds a
+    // fresh query dictionary and calls `SecItemCopyMatching`, so there is no
+    // shared state to race when it is invoked from the GCD worker. Injected
+    // test probes that do capture mutable state own their own synchronisation.
     private nonisolated(unsafe) let keychainProbe: KeychainProbe
 
     init(
@@ -193,6 +198,14 @@ final class CachedCLICredentialReader: CLICredentialReading {
         let at: Date
     }
 
+    /// The marker carries a token so the task that finishes can prove the slot
+    /// it is about to clear is still its own — `Task` is a struct, so there is
+    /// no `===` to compare against. See the `defer` in `readFresh()`.
+    private struct InFlightRead {
+        let token: UUID
+        let task: Task<CLICredentialReader.SyncResult, Error>
+    }
+
     private let reader: any CLICredentialReading
     /// How long a completed result is reused before a fresh probe is allowed.
     private let ttl: TimeInterval
@@ -208,7 +221,7 @@ final class CachedCLICredentialReader: CLICredentialReading {
     /// every refresh tick park another `DispatchQueue.global` worker: across the
     /// eight hours F-003 lasted, on the order of a hundred threads at 512 KB of
     /// stack each, grown by the fix meant to make the hang harmless.
-    private var inFlight: Task<CLICredentialReader.SyncResult, Error>?
+    private var inFlight: InFlightRead?
 
     init(
         reader: any CLICredentialReading = CLICredentialReader(),
@@ -231,35 +244,57 @@ final class CachedCLICredentialReader: CLICredentialReading {
     }
 
     func readFresh() async throws -> CLICredentialReader.SyncResult {
-        // Piggyback on an outstanding probe rather than starting a second one —
-        // and under the same ceiling. A bare `await inFlight.value` here would be
-        // unbounded and reintroduce exactly the stall the timeout exists for.
-        if let existing = inFlight {
-            return try await withTimeout(seconds: timeout) { try await existing.value }
-        }
-
-        // The marker is cleared by the TASK, not by the caller. Clearing it from
-        // the caller's `defer` looks right and is not: the timeout path returns
-        // at 10 s while `SecItemCopyMatching` is still parked and uncancellable,
-        // so the next refresh tick would see a free slot and park another global
-        // -queue worker. Over an eight-hour unanswered dialog that is the very
-        // thread pile-up this guard exists to prevent.
-        //
-        // `@MainActor` is spelled out rather than inherited so the `defer` can
-        // clear the marker synchronously at task completion. A deferred hop
-        // (`Task { @MainActor in ... }`) would leave a window in which the read
-        // has already returned but the slot still reads as busy, and a caller
-        // landing in that window would piggyback on a finished task and get its
-        // stale result back from a method whose whole contract is "fresh".
-        let source = reader
-        let task = Task { @MainActor [weak self] () -> CLICredentialReader.SyncResult in
-            defer { self?.inFlight = nil }
-            return try await source.readFresh()
-        }
-        inFlight = task
-
+        // Every exit from this method writes the cache, which is why both
+        // branches below funnel through one `do`/`catch` instead of returning
+        // directly. A piggybacked success that skipped the write would leave the
+        // cache cold and let the very next `read()` open a brand-new cross-app
+        // Keychain probe — one more consent-prompt opportunity, which is exactly
+        // what this wrapper exists to collapse. That overlap is reachable in
+        // production: the auto-detect coordinator's credential import and a
+        // `CLITokenRefresher.freshen` tick share one instance and can now run at
+        // the same time, because the import became asynchronous.
         do {
-            let result = try await withTimeout(seconds: timeout) { try await task.value }
+            let result: CLICredentialReader.SyncResult
+            if let existing = inFlight {
+                // Piggyback on an outstanding probe rather than starting a second
+                // one — and under the same ceiling. A bare `await existing.value`
+                // here would be unbounded and reintroduce exactly the stall the
+                // timeout exists for.
+                result = try await withTimeout(seconds: timeout) { try await existing.task.value }
+            } else {
+                // The marker is cleared by the TASK, not by the caller. Clearing
+                // it from the caller's `defer` looks right and is not: the
+                // timeout path returns at 10 s while `SecItemCopyMatching` is
+                // still parked and uncancellable, so the next refresh tick would
+                // see a free slot and park another global-queue worker. Over an
+                // eight-hour unanswered dialog that is the very thread pile-up
+                // this guard exists to prevent.
+                //
+                // `@MainActor` is spelled out rather than inherited so the
+                // `defer` can clear the marker synchronously at task completion.
+                // A deferred hop (`Task { @MainActor in ... }`) would leave a
+                // window in which the read has already returned but the slot
+                // still reads as busy, and a caller landing in that window would
+                // piggyback on a finished task and get its stale result back
+                // from a method whose whole contract is "fresh".
+                //
+                // The token check makes "only clear my own slot" a property of
+                // this code rather than of whole-program reasoning. Today no
+                // `await` sits between the `Task` being created and `inFlight`
+                // being assigned, so main-actor serialisation already guarantees
+                // no other read can start and finish in that window — but on a
+                // guard whose whole job is preventing a thread pile-up, a future
+                // refactor that introduces such an await must not be able to
+                // silently free the slot out from under a live probe.
+                let token = UUID()
+                let source = reader
+                let task = Task { @MainActor [weak self] () -> CLICredentialReader.SyncResult in
+                    defer { if self?.inFlight?.token == token { self?.inFlight = nil } }
+                    return try await source.readFresh()
+                }
+                inFlight = InFlightRead(token: token, task: task)
+                result = try await withTimeout(seconds: timeout) { try await task.value }
+            }
             entry = Entry(result: .success(result), at: now())
             return result
         } catch {
@@ -283,8 +318,21 @@ final class CachedCLICredentialReader: CLICredentialReading {
     ///
     /// So the two racers are unstructured on purpose. The loser is abandoned
     /// rather than awaited; when the real read finally answers, its `settle` is
-    /// dropped on the floor.
-    private func withTimeout<T: Sendable>(
+    /// dropped on the floor. That abandonment has a cost worth naming: the
+    /// losing task and its `TimeoutGate` stay resident until the read actually
+    /// answers, so what this really buys is trading a pile of parked 512 KB OS
+    /// threads for a much cheaper pile of suspended tasks — bounded in practice
+    /// by the in-flight guard, which keeps at most one read outstanding.
+    ///
+    /// `nonisolated` on purpose. Without it both racers would inherit this
+    /// class's implicit `@MainActor` and the deadline's own firing would be
+    /// scheduled on the main actor — coupling the insurance to the resource it
+    /// insures. It would not deadlock (the blocking probe is inside
+    /// `OffMain.run` either way), but under main-actor saturation the timeout
+    /// would queue behind whatever is saturating it, delaying precisely the
+    /// safety net that matters most when the main actor is in trouble. Neither
+    /// racer touches `self`, so there is nothing to keep here.
+    private nonisolated func withTimeout<T: Sendable>(
         seconds: TimeInterval,
         _ work: @escaping @Sendable () async throws -> T
     ) async throws -> T {
@@ -313,7 +361,12 @@ final class CachedCLICredentialReader: CLICredentialReading {
 /// consent dialog is finally dismissed — but a `CheckedContinuation` traps the
 /// process on a second resume, so the loser has to be dropped rather than crash
 /// the app hours after the fact.
-private nonisolated final class TimeoutGate<T: Sendable>: @unchecked Sendable {
+///
+/// Internal rather than `private` so `CLICredentialReaderTests` can assert the
+/// one-shot behaviour directly. It is the most dangerous single line in this
+/// file — a regression here surfaces as a process trap at an arbitrary later
+/// moment, with nothing pointing back at the defect.
+nonisolated final class TimeoutGate<T: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<T, Error>?
 

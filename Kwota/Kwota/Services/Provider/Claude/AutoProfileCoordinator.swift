@@ -29,7 +29,12 @@ final class AutoProfileCoordinator {
         watcher: any CLIAccountWatching,
         profileStore: ProfileStore,
         keychain: KeychainCredentialStore = KeychainCredentialStore.live(),
-        credentialReader: any CLICredentialReading = CLICredentialReader(),
+        // Cached, not raw: `probePlanFromProfile` awaits the credential import,
+        // and that wait is only bounded because `CachedCLICredentialReader`
+        // carries a timeout. A bare `CLICredentialReader()` here would leave any
+        // caller that takes the default — a future test, a future call site —
+        // awaiting a hung Keychain probe forever while holding `self` alive.
+        credentialReader: any CLICredentialReading = CachedCLICredentialReader(),
         profileFetcher: any OAuthProfileFetching = OAuthProfileFetcher(),
         clock: @escaping () -> Date = { Date() },
         alwaysAllowRefresh: Bool = false
@@ -275,6 +280,11 @@ final class AutoProfileCoordinator {
             // read is off the main actor, so a first-launch profile has nothing
             // stored yet at this point. Waiting for the import keeps the probe
             // from skipping exactly the profile that most needs enriching.
+            //
+            // This wait is bounded only by the injected reader's own timeout —
+            // there is no deadline here. Every construction path must therefore
+            // supply a timeout-bounded reader; the init default is
+            // `CachedCLICredentialReader` for exactly this reason.
             await seed?.value
             guard let stored = try? self.keychain.read(for: profileId) else {
                 AppLog.shared.log(
