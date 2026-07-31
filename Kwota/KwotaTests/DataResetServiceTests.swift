@@ -245,4 +245,29 @@ final class DataResetServiceTests: XCTestCase {
         XCTAssertNil(try keychain.read(for: id))
         XCTAssertFalse(FileManager.default.fileExists(atPath: sentinel.path))
     }
+
+    func test_wipeAll_removesWatchdogEvidenceFile() throws {
+        let tmp = try makeTempDir()
+        let keychain = makeKeychain()
+        let events = tmp.appendingPathComponent("awake-watchdog-events.json")
+        try Data(#"{"records":[]}"#.utf8).write(to: events)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: events.path))
+
+        let suiteName = "kwota.tests.reset.watchdog.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let svc = DataResetService()
+        try svc.wipeAll(
+            keychain: keychain,
+            appSupportPath: tmp,
+            userDefaults: defaults,
+            bundleIdentifier: suiteName
+        )
+
+        // Reset removes the directory wholesale today, so this passes without
+        // a production change. It exists so a future move to per-file deletion
+        // cannot silently orphan the evidence trail.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: events.path))
+    }
 }

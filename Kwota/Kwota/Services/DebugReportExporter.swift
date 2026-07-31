@@ -36,12 +36,16 @@ final class DebugReportExporter {
 
     func present(vm: MenuBarViewModel) async {
         let snapshot = await SystemInfoProvider.snapshot(registry: vm.registry)
+        // A missing or corrupt evidence file must never block the debug
+        // report — render an empty section instead of throwing.
+        let watchdogEvents = (try? FileWatchdogEvidenceWriter.load(from: AppPaths.watchdogEventsFile)) ?? []
         let payload = buildPayload(
             events: vm.recentEvents,
             rawLine: vm.usage.reader.lastSeenLine(),
             logLines: AppLog.shared.snapshot(),
             snapshot: snapshot,
-            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+            watchdogEvents: watchdogEvents
         )
 
         let panel = NSSavePanel()
@@ -72,6 +76,7 @@ final class DebugReportExporter {
         logLines: [String],
         snapshot: SystemSnapshot?,
         appVersion: String?,
+        watchdogEvents: [WatchdogEvent] = [],
         now: Date = Date()
     ) -> String {
         var out = ""
@@ -107,6 +112,30 @@ final class DebugReportExporter {
                 let time = eventTimeFormatter.string(from: ev.timestamp)
                 let sid = String(ev.sessionId.prefix(8))
                 out += "\(time)  s=\(sid)  in=\(ev.tokens.input)  out=\(ev.tokens.output)\n"
+            }
+        }
+        out += "\n"
+
+        out += "Watchdog Events (\(watchdogEvents.count))\n"
+        out += "----------------\n"
+        if watchdogEvents.isEmpty {
+            out += "(none)\n"
+        } else {
+            for event in watchdogEvents {
+                switch event {
+                case .fired(let f):
+                    out += "\(isoFormatter.string(from: f.firedAt))  FIRED \(f.reason.rawValue)"
+                        + "  mode=\(f.mode.rawValue)  held=\(Int(f.heldSeconds))s"
+                        + "  stall=\(Int(f.mainStallSeconds))s"
+                        + "  batt=\(f.batteryPercent.map(String.init) ?? "n/a")"
+                        + "\(f.isOnBattery ? " (on battery)" : "")"
+                        + "  ids=\(f.assertionIDs)  status=\(f.releaseStatuses)\n"
+                case .stallObserved(let s):
+                    out += "\(isoFormatter.string(from: s.observedAt))  STALL "
+                        + "\(s.side.rawValue) \(Int(s.seconds))s\n"
+                case .untimedOnBatteryNudge(let hours):
+                    out += "NUDGE untimed-on-battery after \(hours)h\n"
+                }
             }
         }
         out += "\n"

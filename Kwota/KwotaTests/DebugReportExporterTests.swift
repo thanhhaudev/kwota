@@ -120,6 +120,37 @@ final class DebugReportExporterTests: XCTestCase {
         XCTAssertTrue(s.contains("Generated: 2024-05-13T05:42:00Z"))
     }
 
+    func test_buildPayload_includesWatchdogEvents() {
+        let firing = WatchdogFiring(
+            firedAt: fixedDate(), reason: .stalled, mode: .auto,
+            sessionStart: fixedDate(), heldSeconds: 28_800, mainStallSeconds: 17_000,
+            batteryPercent: 1, isOnBattery: true,
+            assertionIDs: [42], releaseStatuses: [0]
+        )
+        let s = DebugReportExporter.shared.buildPayload(
+            events: [],
+            rawLine: nil,
+            logLines: [],
+            snapshot: sampleSnapshot(),
+            appVersion: "1.0",
+            watchdogEvents: [.fired(firing)],
+            now: fixedDate()
+        )
+        XCTAssertTrue(s.contains("Watchdog Events"))
+        XCTAssertTrue(s.contains("stalled"))
+        XCTAssertTrue(s.contains("stall=17000s"))
+    }
+
+    func test_buildPayload_noWatchdogEvents_rendersNoneSentinel() {
+        let s = DebugReportExporter.shared.buildPayload(
+            events: [], rawLine: nil, logLines: [],
+            snapshot: nil, appVersion: nil,
+            watchdogEvents: [], now: fixedDate()
+        )
+        XCTAssertTrue(s.contains("Watchdog Events (0)"))
+        XCTAssertTrue(s.contains("(none)"))
+    }
+
     func test_defaultFilename_isTimestamped() {
         let name = DebugReportExporter.shared.defaultFilename(now: fixedDate())
 
