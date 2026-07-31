@@ -19,7 +19,16 @@ struct KwotaApp: App {
 
         switch runtimeContext {
         case .normalApp:
-            let vm = MenuBarViewModel()
+            // The only place a file-backed watchdog is built. The view model's
+            // default is Noop-evidence, so a test or fixture that forgets to
+            // inject writes nothing rather than into the user's real evidence
+            // file — the opt-in lives here, at the live entry point, instead of
+            // behind a `startupMode` check that no test would ever fail.
+            let vm = MenuBarViewModel(
+                watchdog: AwakeWatchdog(
+                    evidence: FileWatchdogEvidenceWriter(url: AppPaths.watchdogEventsFile)
+                )
+            )
             vm.shortcutCoordinator.start()
             _vm = State(initialValue: vm)
             AppDelegate.viewModel = vm
@@ -174,6 +183,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static var viewModel: MenuBarViewModel?
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Release before the other flushes: a quit that leaves the assertion to
+        // process teardown also leaves the awake session open, so the next
+        // launch closes it at `lastPersistedAt` rather than at the real quit
+        // time and the chart under-reports the window that was actually held.
+        AppDelegate.viewModel?.awake.prepareForTermination()
         AppDelegate.viewModel?.usage.stop()
         AppDelegate.viewModel?.statsStore.flush()
     }

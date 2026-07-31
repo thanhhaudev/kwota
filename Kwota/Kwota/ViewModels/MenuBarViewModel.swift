@@ -578,6 +578,10 @@ final class MenuBarViewModel {
     private let codexTraceWatcher: CodexTraceWatcher?
     private let antigravityStatsWatcher: AntigravityStatsWatcher?
     let caffeine: CaffeinateManager
+    /// Shared by `caffeine` (which arms it) and `awake` (which adopts its
+    /// firings). One instance, or the safety net watches an assertion nobody
+    /// reconciles.
+    let watchdog: any AwakeWatchdogging
     let probe: ClaudeProbe
     let cache: CacheCleaner
     let shortcutCoordinator: ShortcutCoordinator
@@ -598,6 +602,7 @@ final class MenuBarViewModel {
         codexTraceWatcher: CodexTraceWatcher? = nil,
         antigravityStatsWatcher: AntigravityStatsWatcher? = nil,
         caffeine: CaffeinateManager? = nil,
+        watchdog: (any AwakeWatchdogging)? = nil,
         probe: ClaudeProbe? = nil,
         cache: CacheCleaner? = nil,
         cachePersistence: CachePersistenceStore? = nil,
@@ -657,7 +662,17 @@ final class MenuBarViewModel {
         let resolvedAntigravityStatsWatcher = antigravityStatsWatcher
             ?? (startupMode == .live ? AntigravityStatsWatcher() : nil)
         self.antigravityStatsWatcher = resolvedAntigravityStatsWatcher
-        self.caffeine = caffeine ?? CaffeinateManager()
+        // Defaults to an AwakeWatchdog with a Noop evidence writer. The file
+        // writer is opted into by the app entry point, NOT inferred from
+        // `startupMode`: that property defaults to `.live` and no test in the
+        // repo passes anything else, so a `.live` gate would be inert and every
+        // VM fixture would write into the user's real evidence file. Hermeticity
+        // in this repo comes from fixtures injecting, not from the gate — so the
+        // failure mode of forgetting to inject must be "no evidence written",
+        // never "evidence written to the real file".
+        let resolvedWatchdog: any AwakeWatchdogging = watchdog ?? AwakeWatchdog()
+        self.watchdog = resolvedWatchdog
+        self.caffeine = caffeine ?? CaffeinateManager(watchdog: resolvedWatchdog)
         self.probe    = probe    ?? ClaudeProbe()
         self.cache    = cache    ?? CacheCleaner()
         self.shortcutCoordinator = shortcutCoordinator ?? ShortcutCoordinator()
@@ -827,6 +842,7 @@ final class MenuBarViewModel {
                 notifier: resolvedNotifier,
                 configStore: resolvedAwakeStore,
                 userInput: userInputMonitor ?? SystemUserInputMonitor(),
+                watchdog: resolvedWatchdog,
                 onWillSleep: { [weak resolvedSessionLog] date, _ in
                     resolvedSessionLog?.closeOpenSessions(at: date)
                 },
@@ -839,6 +855,14 @@ final class MenuBarViewModel {
                     case .idle, .batteryBlocked:
                         break
                     }
+                },
+                // A watchdog firing or a quit releases outside the state
+                // machine, so the open session has to be closed at the real
+                // release moment — otherwise the next launch reconstructs it
+                // from `lastPersistedAt` and reports a shorter window than the
+                // assertion actually held.
+                onForcedRelease: { [weak resolvedSessionLog] date, _ in
+                    resolvedSessionLog?.closeOpenSessions(at: date)
                 }
             )
             if startupMode == .live { composite.start() }
