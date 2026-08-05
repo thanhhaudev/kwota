@@ -457,8 +457,14 @@ final class ProfileSwitcherFetchCoordinator {
             // verbatim preserves the associated value for the host.
             throw ClaudeAPIClient.APIError.rateLimited(retryAfter: retryAfter)
         } catch let error as ProfileUsageFetcherError {
-            // Deterministic fail-closed — don't retry, let the
-            // coordinator's outer catch evict cache and surface .error.
+            // Deterministic — don't retry, let the coordinator's outer catch
+            // decide what happens to the row. Eviction there is conditional
+            // on `isTrustBoundaryFailure`: `.missingCredential`/
+            // `.missingProvider`/`.cliIdentityMismatch` evict the cache and
+            // surface .error, but `.keychainAccessNeeded` (a denied/timed-out
+            // read, not a proven-absent credential) does not — it falls back
+            // to `.stale(cached)` when a cache exists. Not every case in this
+            // enum behaves uniformly downstream.
             throw error
         } catch {
             // Generic transient — cold-start CLI race, slow first OAuth

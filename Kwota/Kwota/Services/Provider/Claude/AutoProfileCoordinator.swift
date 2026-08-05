@@ -276,6 +276,12 @@ final class AutoProfileCoordinator {
                 )
                 return
             }
+            // Deliberately still `try?`, unlike the first read above: a denied
+            // read here just skips the redundant-write check, and the value
+            // written below (`result.credential`) was already read fresh from
+            // the CLI and re-proven via `stillSignedIn(as:)` a few lines up —
+            // so the worst case is one extra write of an already-verified,
+            // already-correct token, never a wrong-account overwrite.
             if let stored = try? await self.keychain.read(for: id),
                self.accessTokensMatch(stored, result.credential) {
                 return
