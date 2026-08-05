@@ -73,6 +73,78 @@ final class MenuBarViewModelGrantKeychainAccessTests: XCTestCase {
         }
     }
 
+    /// The actual point of this whole finding: for a `.cliSync` profile,
+    /// `grantKeychainAccess()` must not stop at Kwota's own (never-blocking)
+    /// Keychain item — it must also drive an `.allow` read against the CLI's
+    /// own credential source (`Claude Code-credentials`, reached through
+    /// `CLICredentialReader`/`CachedCLICredentialReader`), and a successful
+    /// read there must be seeded into Kwota's own store so the very next
+    /// background tick can see it without another dialog.
+    @MainActor
+    func test_grantKeychainAccess_reachesCLICredentialPath_forCliSyncProfile() async {
+        let cliSpy = SpyCLICredentialReader(result: .success(
+            CLICredentialReader.SyncResult(
+                credential: .cliToken(accessToken: "granted-token", refreshToken: "r", expiresAt: .distantFuture),
+                subscriptionPlan: nil
+            )
+        ))
+        let recordingGateway = RecordingKeychainGateway()
+        let vm = makeVM(gateway: recordingGateway, cliCredentialReader: cliSpy)
+        let profile = Profile(name: "P", authMethod: .cliSync)
+        try? vm.profileStore.add(profile)
+
+        await vm.grantKeychainAccess()
+
+        XCTAssertEqual(cliSpy.callCount, 1,
+                       "grantKeychainAccess must reach the CLI credential path for a .cliSync profile")
+        XCTAssertEqual(cliSpy.lastInteraction, .allow,
+                       "the CLI read must be driven with .allow — that item is the one the incident's dialog was for")
+        XCTAssertGreaterThanOrEqual(recordingGateway.writeCount, 1,
+                       "a successful CLI grant must seed Kwota's own store so the next background .deny tick sees it")
+    }
+
+    /// `.sessionKey` profiles never touch the CLI credential source — the
+    /// Grant flow must not probe an item this profile's auth method doesn't
+    /// depend on.
+    @MainActor
+    func test_grantKeychainAccess_doesNotTouchCLIPath_forSessionKeyProfile() async {
+        let cliSpy = SpyCLICredentialReader(result: .success(
+            CLICredentialReader.SyncResult(
+                credential: .cliToken(accessToken: "unused", refreshToken: "r", expiresAt: .distantFuture),
+                subscriptionPlan: nil
+            )
+        ))
+        let recordingGateway = RecordingKeychainGateway()
+        let vm = makeVM(gateway: recordingGateway, cliCredentialReader: cliSpy)
+        let profile = Profile(name: "P", authMethod: .sessionKey)
+        try? vm.profileStore.add(profile)
+
+        await vm.grantKeychainAccess()
+
+        XCTAssertEqual(cliSpy.callCount, 0,
+                       "a .sessionKey profile does not depend on the CLI credential source")
+    }
+
+    /// A denied `.allow` read on the CLI path (distinct from Kwota's own
+    /// store succeeding) must still land on the Grant banner, not a generic
+    /// error — the same "user dismissed/timed out" treatment as a denial on
+    /// Kwota's own item.
+    @MainActor
+    func test_deniedCLIRead_staysInKeychainAccessNeeded() async {
+        let cliSpy = SpyCLICredentialReader(result: .failure(KeychainGatewayError.interactionNotAllowed))
+        let recordingGateway = RecordingKeychainGateway()
+        let vm = makeVM(gateway: recordingGateway, cliCredentialReader: cliSpy)
+        let profile = Profile(name: "P", authMethod: .cliSync)
+        try? vm.profileStore.add(profile)
+
+        await vm.grantKeychainAccess()
+
+        XCTAssertEqual(cliSpy.callCount, 1)
+        XCTAssertEqual(vm.authState, .keychainAccessNeeded)
+        XCTAssertEqual(recordingGateway.writeCount, 0,
+                       "a denied CLI read must not seed Kwota's own store with nothing")
+    }
+
     // MARK: - Fixture
 
     /// Minimal hermetic `MenuBarViewModel` fixture. Unlike
@@ -81,13 +153,21 @@ final class MenuBarViewModelGrantKeychainAccessTests: XCTestCase {
     /// `grantKeychainAccess()` calls the concrete `credentialStore` field
     /// directly — so this fixture builds that concrete `KeychainCredentialStore`
     /// on top of an injectable `KeychainGateways` double instead.
+    ///
+    /// `gateway`, when passed, wins over `gatewayError` — the CLI-path tests
+    /// need a store that actually succeeds/records writes rather than one
+    /// that throws on every call.
     @MainActor
-    private func makeVM(gatewayError: KeychainGatewayError) -> MenuBarViewModel {
+    private func makeVM(
+        gatewayError: KeychainGatewayError = .status(errSecParam),
+        gateway: (any KeychainGateways)? = nil,
+        cliCredentialReader: (any CLICredentialReading)? = nil
+    ) -> MenuBarViewModel {
         let temp = TempDirectory()
         let service = "com.thanhhaudev.Kwota.test.\(UUID())"
         let throwingKeychain = KeychainCredentialStore(
             service: service,
-            gateway: ThrowingKeychainGateway(error: gatewayError)
+            gateway: gateway ?? ThrowingKeychainGateway(error: gatewayError)
         )
         let dataRoot = temp.url
         let profileStore = ProfileStore(
@@ -136,6 +216,7 @@ final class MenuBarViewModelGrantKeychainAccessTests: XCTestCase {
             cachePersistence: CachePersistenceStore(url: temp.file("cache-state-\(UUID().uuidString).json")),
             profileStore: profileStore,
             credentialStore: throwingKeychain,
+            cliCredentialReader: cliCredentialReader,
             apiClient: ClaudeAPIClient(transport: { req in
                 let resp = HTTPURLResponse(
                     url: req.url ?? URL(string: "https://example.invalid")!,
@@ -156,5 +237,59 @@ final class MenuBarViewModelGrantKeychainAccessTests: XCTestCase {
             autoProfileMigrator: inertMigrator,
             activityHistorian: ActivityHistorian(autoBackfill: false)
         )
+    }
+}
+
+/// An in-memory, non-throwing `KeychainGateways` double for
+/// `credentialStore` — unlike `ThrowingKeychainGateway`, this one actually
+/// stores what it's given so the CLI-path tests can confirm a successful
+/// grant seeded Kwota's own item.
+private final class RecordingKeychainGateway: KeychainGateways, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String: Data] = [:]
+    private var _writeCount = 0
+
+    var writeCount: Int { lock.lock(); defer { lock.unlock() }; return _writeCount }
+
+    func read(service: String, account: String?, interaction: KeychainInteraction) async throws -> Data? {
+        lock.lock(); defer { lock.unlock() }
+        guard let account else { return nil }
+        return storage[account]
+    }
+    func write(_ data: Data, service: String, account: String) async throws {
+        lock.lock(); storage[account] = data; _writeCount += 1; lock.unlock()
+    }
+    func delete(service: String, account: String) async throws {
+        lock.lock(); storage.removeValue(forKey: account); lock.unlock()
+    }
+    func deleteAll(service: String) async throws {
+        lock.lock(); storage.removeAll(); lock.unlock()
+    }
+}
+
+/// A `CLICredentialReading` double that records the interaction it was
+/// called with — the seam these tests need to prove `grantKeychainAccess()`
+/// actually reaches Claude Code's own Keychain item, not just Kwota's.
+private final class SpyCLICredentialReader: CLICredentialReading, @unchecked Sendable {
+    private let result: Result<CLICredentialReader.SyncResult, Error>
+    private let lock = NSLock()
+    private var _callCount = 0
+    private var _lastInteraction: KeychainInteraction?
+
+    var callCount: Int { lock.lock(); defer { lock.unlock() }; return _callCount }
+    var lastInteraction: KeychainInteraction? { lock.lock(); defer { lock.unlock() }; return _lastInteraction }
+
+    init(result: Result<CLICredentialReader.SyncResult, Error>) {
+        self.result = result
+    }
+
+    func read() async throws -> CLICredentialReader.SyncResult {
+        lock.lock(); _callCount += 1; _lastInteraction = .deny; lock.unlock()
+        return try result.get()
+    }
+
+    func readFresh(interaction: KeychainInteraction) async throws -> CLICredentialReader.SyncResult {
+        lock.lock(); _callCount += 1; _lastInteraction = interaction; lock.unlock()
+        return try result.get()
     }
 }

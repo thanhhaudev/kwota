@@ -23,11 +23,23 @@ import Foundation
 protocol CLICredentialReading: Sendable {
     func read() async throws -> CLICredentialReader.SyncResult
     func readFresh() async throws -> CLICredentialReader.SyncResult
+    /// Interaction-aware fresh read, for the one caller that needs to drive
+    /// a real `.allow` probe against the CLI's own Keychain item (the Grant
+    /// flow — see `MenuBarViewModel.grantKeychainAccess()`). Defaulted so
+    /// every existing conformer (test doubles included) keeps compiling
+    /// without change; only `CLICredentialReader` and
+    /// `CachedCLICredentialReader` give this a real, interaction-sensitive
+    /// implementation.
+    func readFresh(interaction: KeychainInteraction) async throws -> CLICredentialReader.SyncResult
 }
 
 extension CLICredentialReading {
     func readFresh() async throws -> CLICredentialReader.SyncResult {
         try await read()
+    }
+
+    func readFresh(interaction: KeychainInteraction) async throws -> CLICredentialReader.SyncResult {
+        try await readFresh()
     }
 }
 
@@ -83,13 +95,37 @@ nonisolated struct CLICredentialReader {
     /// The gateway already leaves the main thread and bounds the wait, so this
     /// no longer wraps anything in `OffMain.run`. The legacy-file fallback is
     /// small and local, so it stays on the caller's executor.
+    ///
+    /// `.deny` (the routine background path — token refresh ticks, the
+    /// auto-detect coordinator's seed) swallows every gateway error and
+    /// falls through to the file exactly as before: a denial is the
+    /// everyday, expected outcome here, not something to surface as new
+    /// noise on every tick.
+    ///
+    /// `.allow` (the Grant flow — the one caller that needs to know whether
+    /// the user actually granted access) is different: a denial/timeout on
+    /// this attempt is the answer the caller is waiting for, so it
+    /// propagates instead of being silently swapped for a generic "no such
+    /// file" from the fallback. A genuinely absent Keychain item
+    /// (`errSecItemNotFound`, surfaced by the gateway as `nil`, not an
+    /// error) still falls through to the file on `.allow` too — that case
+    /// was never a denial.
     func read(interaction: KeychainInteraction = .deny) async throws -> SyncResult {
-        if let data = try? await gateway.read(
-            service: Self.keychainService,
-            account: nil,
-            interaction: interaction
-        ), let result = Self.decodeKeychainPayload(data) {
-            return result
+        do {
+            if let data = try await gateway.read(
+                service: Self.keychainService,
+                account: nil,
+                interaction: interaction
+            ), let result = Self.decodeKeychainPayload(data) {
+                return result
+            }
+        } catch let error as KeychainGatewayError {
+            if interaction == .allow,
+               error == .interactionNotAllowed || error == .timedOut {
+                throw error
+            }
+            // .deny, or an .allow attempt that hit some other unexpected
+            // status: fall through to the file, matching prior behavior.
         }
         let file = credentialsFile
         let data = try await OffMain.run { try? Data(contentsOf: file) }
@@ -159,6 +195,13 @@ extension CLICredentialReader: CLICredentialReading {
     /// caching layer is ever added to `read()`, this must stay uncached to keep
     /// 401 recovery working.
     func readFresh() async throws -> SyncResult { try await read(interaction: .deny) }
+
+    /// The Grant flow's entry point: a live, interaction-aware probe against
+    /// Claude Code's own Keychain item. Spelled out explicitly for the same
+    /// reason as `readFresh()` above.
+    func readFresh(interaction: KeychainInteraction) async throws -> SyncResult {
+        try await read(interaction: interaction)
+    }
 }
 
 /// Short-lived shared cache around Claude Code credential reads. The real read
@@ -275,6 +318,27 @@ final class CachedCLICredentialReader: CLICredentialReading {
             entry = Entry(result: .failure(error), at: now())
             throw error
         }
+    }
+
+    /// The Grant flow's entry point (`MenuBarViewModel.grantKeychainAccess()`):
+    /// a rare, user-initiated `.allow` read that must reflect the TRUE live
+    /// outcome of asking Claude Code's Keychain item right now — never a
+    /// cached result, and never piggybacked onto an unrelated in-flight
+    /// background probe.
+    ///
+    /// Deliberately bypasses every mechanism above (`entry`, `inFlight`,
+    /// `withTimeout`) rather than threading `.allow` through them. That
+    /// machinery exists to collapse the high-frequency background case
+    /// (many callers, one shared probe, a short ceiling); reusing it here
+    /// would mean either a background `.deny` probe's stale cache answering
+    /// a "did the user just grant access" question, or an `.allow` read
+    /// waiting behind — or being waited on by — a `.deny` probe it has
+    /// nothing to do with. Going straight to the wrapped reader also means
+    /// this call gets the gateway's own long `.allow` deadline
+    /// (`KeychainGateway.allowTimeout`) instead of this wrapper's much
+    /// shorter background `timeout`.
+    func readFresh(interaction: KeychainInteraction) async throws -> CLICredentialReader.SyncResult {
+        try await reader.readFresh(interaction: interaction)
     }
 
     /// Returns as soon as `work` answers or `seconds` elapse, whichever is

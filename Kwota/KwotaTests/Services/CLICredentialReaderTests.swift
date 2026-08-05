@@ -153,6 +153,55 @@ final class CLICredentialReaderTests: XCTestCase {
         XCTAssertEqual(accessToken(second.credential), "second")
     }
 
+    /// The Grant flow's cache-bypass path
+    /// (`CachedCLICredentialReader.readFresh(interaction:)`) must reach the
+    /// wrapped reader directly with the requested interaction, not go
+    /// through `entry`/`inFlight`/`withTimeout` at all. A cached result from
+    /// an unrelated background `.deny` probe must never answer a "did the
+    /// user just grant access" question.
+    func test_readFreshWithInteraction_bypassesCacheAndForwardsInteraction() async throws {
+        let source = InteractionAwareCredentialReader(access: "granted")
+        let reader = CachedCLICredentialReader(reader: source, ttl: 60)
+
+        // Prime the cache with an unrelated .deny-shaped result.
+        _ = try await reader.read()
+        XCTAssertEqual(source.readCount, 1)
+
+        let result = try await reader.readFresh(interaction: .allow)
+
+        XCTAssertEqual(source.readCount, 2, "must issue a brand-new read, not reuse the cached one")
+        XCTAssertEqual(source.lastInteraction, .allow, "must forward the caller's interaction")
+        XCTAssertEqual(accessToken(result.credential), "granted")
+    }
+
+    private final class InteractionAwareCredentialReader: CLICredentialReading {
+        private let result: CLICredentialReader.SyncResult
+        private nonisolated(unsafe) var _readCount = 0
+        private nonisolated(unsafe) var _lastInteraction: KeychainInteraction?
+
+        var readCount: Int { _readCount }
+        var lastInteraction: KeychainInteraction? { _lastInteraction }
+
+        init(access: String) {
+            result = CLICredentialReader.SyncResult(
+                credential: .cliToken(accessToken: access, refreshToken: "r", expiresAt: .distantFuture),
+                subscriptionPlan: nil
+            )
+        }
+
+        func read() async throws -> CLICredentialReader.SyncResult {
+            _readCount += 1
+            _lastInteraction = .deny
+            return result
+        }
+
+        func readFresh(interaction: KeychainInteraction) async throws -> CLICredentialReader.SyncResult {
+            _readCount += 1
+            _lastInteraction = interaction
+            return result
+        }
+    }
+
     func test_readDoesNotBlockTheMainActor() async throws {
         // A reader whose probe sleeps stands in for an unanswered Keychain
         // consent dialog — the shape that froze every release path in F-003.
@@ -346,6 +395,77 @@ final class CLICredentialReaderTests: XCTestCase {
     private func accessToken(_ credential: Credential) -> String? {
         guard case .cliToken(let access, _, _) = credential else { return nil }
         return access
+    }
+
+    /// The Grant flow's whole point: on `.allow`, a denied read of
+    /// `Claude Code-credentials` must be distinguishable from the item
+    /// genuinely not existing. Before this fix both cases collapsed into the
+    /// same generic `CocoaError(.fileNoSuchFile)` from the legacy-file
+    /// fallback — `grantKeychainAccess()` had no way to tell "user dismissed
+    /// the dialog, try again" from "nothing to read at all".
+    func test_deniedAllowReadIsDistinguishableFromGenuinelyAbsent() async {
+        let denyingReader = CLICredentialReader(
+            credentialsFile: URL(fileURLWithPath: "/nonexistent/.credentials.json"),
+            gateway: StubKeychainGatewayThrowing(error: .interactionNotAllowed)
+        )
+        do {
+            _ = try await denyingReader.read(interaction: .allow)
+            XCTFail("expected interactionNotAllowed")
+        } catch let error as KeychainGatewayError {
+            XCTAssertEqual(error, .interactionNotAllowed)
+        } catch {
+            XCTFail("wrong error type: \(error)")
+        }
+
+        let absentReader = CLICredentialReader(
+            credentialsFile: URL(fileURLWithPath: "/nonexistent/.credentials.json"),
+            gateway: StubKeychainGateway(read: { nil })   // errSecItemNotFound: genuinely absent
+        )
+        do {
+            _ = try await absentReader.read(interaction: .allow)
+            XCTFail("expected a file-not-found error")
+        } catch let error as KeychainGatewayError {
+            XCTFail("a genuinely absent item must not surface as a gateway error: \(error)")
+        } catch {
+            // Falls through to the legacy-file fallback and fails there
+            // instead — the discriminating outcome this test exists to pin.
+        }
+    }
+
+    /// `.deny` (the routine background path) must keep swallowing every
+    /// gateway error and falling through to the file, exactly as before this
+    /// fix — a denial here is the everyday, expected outcome on every
+    /// background tick, not something that should start throwing loudly.
+    func test_deniedReadOnBackgroundPathStillFallsThroughSilently() async throws {
+        let url = temp.file("creds.json")
+        let json = #"""
+        {"accessToken":"file-token","refreshToken":"r","expiresAt":"2030-01-01T00:00:00Z"}
+        """#
+        try Data(json.utf8).write(to: url)
+        let reader = CLICredentialReader(
+            credentialsFile: url,
+            gateway: StubKeychainGatewayThrowing(error: .interactionNotAllowed)
+        )
+        let result = try await reader.read(interaction: .deny)
+        guard case .cliToken(let access, _, _) = result.credential else {
+            return XCTFail("expected cliToken")
+        }
+        XCTAssertEqual(access, "file-token", "a .deny denial must still fall through to the legacy file")
+    }
+
+    /// A `KeychainGateways` double that always throws a configurable
+    /// `KeychainGatewayError`, standing in for a denied/timed-out Keychain
+    /// read (as opposed to `StubKeychainGateway`, which only ever returns
+    /// `Data?` and cannot simulate a thrown error).
+    private final class StubKeychainGatewayThrowing: KeychainGateways, @unchecked Sendable {
+        let error: KeychainGatewayError
+        init(error: KeychainGatewayError) { self.error = error }
+        func read(service: String, account: String?, interaction: KeychainInteraction) async throws -> Data? {
+            throw error
+        }
+        func write(_ data: Data, service: String, account: String) async throws {}
+        func delete(service: String, account: String) async throws {}
+        func deleteAll(service: String) async throws {}
     }
 
     func test_readDoesNotPromptOnBackgroundPaths() async throws {

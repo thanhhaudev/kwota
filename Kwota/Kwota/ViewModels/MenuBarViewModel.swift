@@ -227,6 +227,15 @@ final class MenuBarViewModel {
     /// denied/timed-out keychain read without swapping the concrete store
     /// every other collaborator was constructed with.
     private let credentialReader: any CredentialReading
+    /// The CLI's own credential source (`Claude Code-credentials`), distinct
+    /// from `credentialReader`/`credentialStore` above (Kwota's own item).
+    /// `grantKeychainAccess()` is the one caller that needs to drive an
+    /// interaction-aware read against THIS source — every other consumer
+    /// reads Kwota's own, already-seeded item and never needs to touch this
+    /// directly. Constructor-injectable, mirroring `credentialStore`/
+    /// `credentialReader`, so tests can inject a stub instead of hitting the
+    /// real CLI Keychain item / `.credentials.json`.
+    private let cliCredentialReader: any CLICredentialReading
     /// Lazy fetcher used by ProfileSwitcherCard to populate per-row
     /// utilization bars on expand. Default-live; tests pass a mock that
     /// satisfies `ProfileUsageFetching` directly so coordinator unit tests
@@ -619,6 +628,7 @@ final class MenuBarViewModel {
         profileStore: ProfileStore? = nil,
         credentialStore: KeychainCredentialStore? = nil,
         credentialReader: (any CredentialReading)? = nil,
+        cliCredentialReader: (any CLICredentialReading)? = nil,
         profileUsageFetcher: (any ProfileUsageFetching)? = nil,
         apiClient: ClaudeAPIClient? = nil,
         cliRefresher: CLITokenRefresher? = nil,
@@ -693,7 +703,8 @@ final class MenuBarViewModel {
         self.credentialReader = credentialReader ?? resolvedCredentialStore
         let resolvedAPIClient = apiClient ?? ClaudeAPIClient.live()
         self.apiClient = resolvedAPIClient
-        let resolvedCLICredentialReader = CachedCLICredentialReader()
+        let resolvedCLICredentialReader = cliCredentialReader ?? CachedCLICredentialReader()
+        self.cliCredentialReader = resolvedCLICredentialReader
         let resolvedCLIRefresher = cliRefresher ?? CLITokenRefresher(
             reader: resolvedCLICredentialReader,
             store: resolvedCredentialStore
@@ -2341,15 +2352,37 @@ final class MenuBarViewModel {
 
     /// The one place allowed to raise a Keychain consent dialog on the
     /// credential path: the user pressed a button, so they are present to
-    /// answer it. Everything scheduled runs with `.deny`.
+    /// answer it. Everything else in the app schedules Keychain reads with
+    /// `.deny`.
+    ///
+    /// Two items can need this, and only one is Kwota's own:
+    /// `credentialStore` (`com.thanhhaudev.Kwota.credential`) is trusted on
+    /// its own ACL from first launch and never actually raises a dialog —
+    /// reading it here is cheap insurance, not the fix. For a `.cliSync`
+    /// profile the item that actually needs the user's consent is Claude
+    /// Code's own (`Claude Code-credentials`, read through
+    /// `cliCredentialReader`) — that is the item the original incident's
+    /// dialog was for, and the only one worth driving an `.allow` read
+    /// against for this auth method. A successful CLI read is written
+    /// straight into `credentialStore` so the very next background tick
+    /// (which only ever reads Kwota's own item, with `.deny`) sees it
+    /// immediately rather than waiting for the next auto-detect watcher
+    /// emit to re-seed it.
     func grantKeychainAccess() async {
         guard let profile = profileStore.activeProfile else { return }
         do {
             _ = try await credentialStore.read(for: profile.id, interaction: .allow)
+            if profile.authMethod == .cliSync {
+                let cliResult = try await cliCredentialReader.readFresh(interaction: .allow)
+                try? await credentialStore.write(cliResult.credential, for: profile.id)
+            }
             await refresh(profile: profile)
         } catch KeychainCredentialStore.KeychainError.interactionNotAllowed,
-                KeychainCredentialStore.KeychainError.timedOut {
-            // The user cancelled/dismissed the OS dialog, or it timed out.
+                KeychainCredentialStore.KeychainError.timedOut,
+                KeychainGatewayError.interactionNotAllowed,
+                KeychainGatewayError.timedOut {
+            // The user cancelled/dismissed the OS dialog, or it timed out —
+            // from either Kwota's own store or the CLI credential path.
             // Nothing is actually wrong with the account — leave the Grant
             // banner in place for another attempt rather than claiming the
             // session expired.
