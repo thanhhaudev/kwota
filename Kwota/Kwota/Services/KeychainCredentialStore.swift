@@ -33,8 +33,15 @@ nonisolated final class KeychainCredentialStore {
 
     private let service: String
     private let gateway: any KeychainGateways
-    private let encoder = JSONEncoder()
-    private let decoder = JSONDecoder()
+    // `encoder`/`decoder` are constructed fresh per call (below), not held as
+    // shared instance properties. This class is `nonisolated`, so `write`/
+    // `read` can genuinely run concurrently from multiple overlapping async
+    // calls (multiple profiles refreshing at once, a switcher fetch
+    // overlapping a token refresh, etc.) — before this class picked up
+    // `nonisolated` it was implicitly @MainActor-isolated, so a shared
+    // encoder/decoder was safe by construction. `JSONEncoder`/`JSONDecoder`
+    // are not documented by Apple as safe for concurrent use on the same
+    // instance, and constructing one is cheap, so there's no reason to share.
 
     init(service: String, gateway: any KeychainGateways = KeychainGateway.shared) {
         self.service = service
@@ -49,7 +56,7 @@ nonisolated final class KeychainCredentialStore {
     }
 
     func write(_ credential: Credential, for id: UUID) async throws {
-        let data = try encoder.encode(credential)
+        let data = try JSONEncoder().encode(credential)
         do {
             try await gateway.write(data, service: service, account: id.uuidString)
         } catch let error as KeychainGatewayError {
@@ -68,7 +75,7 @@ nonisolated final class KeychainCredentialStore {
                 interaction: interaction
             ) else { return nil }
             do {
-                return try decoder.decode(Credential.self, from: data)
+                return try JSONDecoder().decode(Credential.self, from: data)
             } catch {
                 throw KeychainError.decodeFailed
             }
