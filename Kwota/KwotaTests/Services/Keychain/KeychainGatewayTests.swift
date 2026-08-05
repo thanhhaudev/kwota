@@ -189,6 +189,60 @@ final class KeychainGatewayTests: XCTestCase {
             "a non-wedged gateway must wait out its own deadline, not fail fast like a wedged one"
         )
     }
+    /// Finding 2: a wedged gateway (armed by a parked `.deny` probe, exactly
+    /// like `test_aWedgedProbeFailsLaterCallsFastInsteadOfQueueingBehindIt`
+    /// above) must not ALSO permanently lock out `.allow` — that would
+    /// strand the Grant button in precisely the scenario it exists to
+    /// recover from. The first `copyMatching` call parks forever (arming
+    /// `wedged` via its timeout); the second one answers immediately, so a
+    /// real answer proves the `.allow` call reached the escape-hatch queue
+    /// rather than being fast-failed like `.deny` correctly is.
+    func test_wedgedGatewayStillReachesAllowCallViaEscapeHatch() async throws {
+        let callIndex = UncheckedBox<Int>(0)
+        let granted = Data("granted".utf8)
+        let gateway = KeychainGateway(
+            primitives: primitives(copyMatching: { _ in
+                var isFirstCall = false
+                callIndex.mutate { count in
+                    isFirstCall = (count == 0)
+                    count += 1
+                }
+                if isFirstCall {
+                    Thread.sleep(forTimeInterval: 30)  // never answers within the test
+                    return (errSecSuccess, nil)
+                }
+                return (errSecSuccess, granted as AnyObject)
+            }),
+            timeout: 0.2,
+            allowTimeout: 5
+        )
+
+        // Arm `wedged` via a parked `.deny` probe, same setup as the
+        // existing wedge test above.
+        _ = try? await gateway.read(service: "s", account: "a", interaction: .deny)
+
+        // A `.deny` call must still fail fast while wedged — unchanged.
+        do {
+            _ = try await gateway.read(service: "s", account: "b", interaction: .deny)
+            XCTFail("expected timedOut")
+        } catch let error as KeychainGatewayError {
+            XCTAssertEqual(error, .timedOut)
+        } catch {
+            XCTFail("wrong error type: \(error)")
+        }
+
+        // An `.allow` call must reach the primitives and get the real
+        // second-call answer — NOT an immediate `.timedOut` the way `.deny`
+        // correctly gets above, and not stuck waiting out `allowTimeout`
+        // either, since the escape-hatch queue is independent of the
+        // primary queue's parked closure.
+        let started = Date()
+        let out = try await gateway.read(service: "s", account: "c", interaction: .allow)
+        XCTAssertEqual(out, granted,
+                       "a wedged gateway must still let .allow reach a real answer via the escape hatch")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.0,
+                          "the escape-hatch queue must not be blocked by the parked primary-queue closure")
+    }
 }
 
 /// Test-local mutable box. The gateway hands its primitives to a background

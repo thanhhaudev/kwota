@@ -21,6 +21,15 @@
 //  than enqueuing them behind the parked one, and clears itself when the parked
 //  work finally answers.
 //
+//  `wedged` only ever gets armed by a `.deny` timeout (a background probe
+//  nobody is watching) — a parked `.allow` call is the opposite, a human
+//  actively looking at the dialog it raised, so it must not punish every
+//  other caller. But the fast-fail applies to `.deny` only when wedged; a
+//  wedged gateway must not ALSO permanently lock out `.allow` — that would
+//  strand the Grant button, the very thing meant to recover from this state.
+//  See `run(interaction:_:)` for the escape hatch that keeps `.allow`
+//  reachable once wedged, and why it's safe.
+//
 
 import Foundation
 import Security
@@ -71,6 +80,13 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
     static let shared = KeychainGateway()
 
     private let queue = DispatchQueue(label: "com.thanhhaudev.kwota.keychain")
+    /// Escape hatch for `.allow` calls made while the gateway is already
+    /// `wedged` — see `run(interaction:_:)` for when this is used and why
+    /// it's safe. Not used for anything else: a non-wedged `.allow` call
+    /// still goes through the primary `queue` like every other call, to
+    /// keep the interaction-flag serialization guarantee intact whenever
+    /// that guarantee is still meaningful.
+    private let allowEscapeQueue = DispatchQueue(label: "com.thanhhaudev.kwota.keychain.allow-escape")
     private let primitives: KeychainPrimitives
     private let timeout: TimeInterval
     /// Deadline for `.allow` calls only. A real consent dialog routinely
@@ -182,6 +198,34 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
     /// answered. The parked thread is not cancellable — `SecItemCopyMatching`
     /// answers no cancellation — so the deadline protects the caller, and
     /// `wedged` protects everyone behind it.
+    ///
+    /// The escape hatch: when `wedged` is already true (a `.deny` probe is
+    /// permanently parked inside `SecItemCopyMatching` on `queue`), a `.deny`
+    /// call still fails fast, unchanged. But an `.allow` call is routed to
+    /// `allowEscapeQueue` instead of `queue` — enqueuing it behind the
+    /// permanently-parked closure would mean it could never run at all,
+    /// which would strand the Grant button exactly when the user is trying
+    /// to use it to recover from this state.
+    ///
+    /// Why this doesn't reopen the interaction-flag race the single serial
+    /// queue exists to prevent: the parked closure is blocked *inside*
+    /// `SecItemCopyMatching`, past the point where it already read the
+    /// process-global interaction flag for its own call — a second queue
+    /// changing that flag afterward cannot affect a call already in flight,
+    /// only calls that haven't started yet. And while wedged, a `.deny`
+    /// call never starts — it fails fast above, before ever touching the
+    /// flag — so there is no `.deny` call left for a concurrent `.allow`
+    /// call to corrupt. `allowEscapeQueue` is itself serial, so multiple
+    /// `.allow` calls racing this path still serialize against each other.
+    /// This reasoning holds ONLY while wedged; the moment the parked
+    /// closure on `queue` finally answers, `wedged` clears and every call —
+    /// `.deny` included — goes back through the single primary `queue`.
+    ///
+    /// `allowEscapeQueue` work deliberately does NOT clear `wedged` on
+    /// completion: its success or failure says nothing about whether the
+    /// original parked closure on `queue` has unstuck. Only that closure's
+    /// own completion (on `queue`) is evidence the primary queue is usable
+    /// again.
     private func run<T: Sendable>(
         interaction: KeychainInteraction,
         _ work: @escaping @Sendable () throws -> T
@@ -189,19 +233,34 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
         lock.lock()
         let isWedged = wedged
         lock.unlock()
-        if isWedged { throw KeychainGatewayError.timedOut }
 
+        if isWedged {
+            guard interaction == .allow else { throw KeychainGatewayError.timedOut }
+            return try await enqueue(on: allowEscapeQueue, interaction: interaction, clearsWedgeOnCompletion: false, work)
+        }
+
+        return try await enqueue(on: queue, interaction: interaction, clearsWedgeOnCompletion: true, work)
+    }
+
+    private func enqueue<T: Sendable>(
+        on targetQueue: DispatchQueue,
+        interaction: KeychainInteraction,
+        clearsWedgeOnCompletion: Bool,
+        _ work: @escaping @Sendable () throws -> T
+    ) async throws -> T {
         let primitives = self.primitives
         let deadline = interaction == .allow ? allowTimeout : timeout
         return try await withCheckedThrowingContinuation { continuation in
             let settled = Settled()
-            queue.async { [weak self] in
+            targetQueue.async { [weak self] in
                 primitives.setInteractionAllowed(interaction == .allow)
                 let outcome = Result { try work() }
                 primitives.setInteractionAllowed(true)
-                self?.lock.lock()
-                self?.wedged = false
-                self?.lock.unlock()
+                if clearsWedgeOnCompletion {
+                    self?.lock.lock()
+                    self?.wedged = false
+                    self?.lock.unlock()
+                }
                 if settled.claim() { continuation.resume(with: outcome) }
             }
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + deadline) { [weak self] in
