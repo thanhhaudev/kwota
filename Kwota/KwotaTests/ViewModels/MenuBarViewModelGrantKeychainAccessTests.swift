@@ -125,6 +125,35 @@ final class MenuBarViewModelGrantKeychainAccessTests: XCTestCase {
                        "a .sessionKey profile does not depend on the CLI credential source")
     }
 
+    /// Regression: `.cliSync` is NOT Claude-specific — Codex (and
+    /// Antigravity) auto-profiles use it too. `cliCredentialReader` only
+    /// ever reads Claude Code's own Keychain item
+    /// (`Claude Code-credentials`), so a Codex `.cliSync` profile must never
+    /// reach that branch — otherwise Claude's OAuth token gets written into
+    /// the Codex profile's own Keychain entry (destroying its real token)
+    /// and then handed to `chatgpt.com`'s API as a Bearer token by the
+    /// `refresh(profile:)` call right after.
+    @MainActor
+    func test_grantKeychainAccess_doesNotTouchCLIPath_forCodexProfile() async {
+        let cliSpy = SpyCLICredentialReader(result: .success(
+            CLICredentialReader.SyncResult(
+                credential: .cliToken(accessToken: "claude-token-must-not-leak", refreshToken: "r", expiresAt: .distantFuture),
+                subscriptionPlan: nil
+            )
+        ))
+        let recordingGateway = RecordingKeychainGateway()
+        let vm = makeVM(gateway: recordingGateway, cliCredentialReader: cliSpy)
+        let profile = Profile(name: "P", authMethod: .cliSync, providerID: .codex)
+        try? vm.profileStore.add(profile)
+
+        await vm.grantKeychainAccess()
+
+        XCTAssertEqual(cliSpy.callCount, 0,
+                       "a Codex .cliSync profile must not read Claude Code's own Keychain item")
+        XCTAssertEqual(recordingGateway.writeCount, 0,
+                       "Claude's token must never be written into a Codex profile's Keychain entry")
+    }
+
     /// A denied `.allow` read on the CLI path (distinct from Kwota's own
     /// store succeeding) must still land on the Grant banner, not a generic
     /// error — the same "user dismissed/timed out" treatment as a denial on

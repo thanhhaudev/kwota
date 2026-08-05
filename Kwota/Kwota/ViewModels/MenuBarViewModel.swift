@@ -2358,9 +2358,9 @@ final class MenuBarViewModel {
     /// Two items can need this, and only one is Kwota's own:
     /// `credentialStore` (`com.thanhhaudev.Kwota.credential`) is trusted on
     /// its own ACL from first launch and never actually raises a dialog —
-    /// reading it here is cheap insurance, not the fix. For a `.cliSync`
-    /// profile the item that actually needs the user's consent is Claude
-    /// Code's own (`Claude Code-credentials`, read through
+    /// reading it here is cheap insurance, not the fix. For a Claude
+    /// `.cliSync` profile the item that actually needs the user's consent is
+    /// Claude Code's own (`Claude Code-credentials`, read through
     /// `cliCredentialReader`) — that is the item the original incident's
     /// dialog was for, and the only one worth driving an `.allow` read
     /// against for this auth method. A successful CLI read is written
@@ -2368,11 +2368,22 @@ final class MenuBarViewModel {
     /// (which only ever reads Kwota's own item, with `.deny`) sees it
     /// immediately rather than waiting for the next auto-detect watcher
     /// emit to re-seed it.
+    ///
+    /// `.cliSync` is NOT Claude-specific — Codex and Antigravity auto-
+    /// profiles use it too (they each sync a CLI-sourced token into their
+    /// own Keychain entry the same way Claude does) — but
+    /// `cliCredentialReader` only ever reads Claude Code's own item. Gating
+    /// on `providerID == .claude` as well keeps this branch from reading
+    /// Claude's OAuth token and writing it into a Codex/Antigravity
+    /// profile's entry (which `refresh(profile:)` would then send to that
+    /// provider's own API as a Bearer token). Codex/Antigravity `.cliSync`
+    /// profiles fall through to the Kwota-own-store-only path below, same
+    /// as `.sessionKey` profiles.
     func grantKeychainAccess() async {
         guard let profile = profileStore.activeProfile else { return }
         do {
             _ = try await credentialStore.read(for: profile.id, interaction: .allow)
-            if profile.authMethod == .cliSync {
+            if profile.authMethod == .cliSync && profile.providerID == .claude {
                 let cliResult = try await cliCredentialReader.readFresh(interaction: .allow)
                 try? await credentialStore.write(cliResult.credential, for: profile.id)
             }
