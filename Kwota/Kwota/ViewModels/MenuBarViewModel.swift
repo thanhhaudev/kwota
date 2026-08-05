@@ -2347,6 +2347,13 @@ final class MenuBarViewModel {
         do {
             _ = try await credentialStore.read(for: profile.id, interaction: .allow)
             await refresh(profile: profile)
+        } catch KeychainCredentialStore.KeychainError.interactionNotAllowed,
+                KeychainCredentialStore.KeychainError.timedOut {
+            // The user cancelled/dismissed the OS dialog, or it timed out.
+            // Nothing is actually wrong with the account — leave the Grant
+            // banner in place for another attempt rather than claiming the
+            // session expired.
+            authState = .keychainAccessNeeded
         } catch {
             AppLog.shared.log("grantKeychainAccess failed: \(error)", level: .warn)
             authState = .error(error.localizedDescription)
