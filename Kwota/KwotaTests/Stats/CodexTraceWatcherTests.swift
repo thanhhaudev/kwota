@@ -50,10 +50,18 @@ final class CodexTraceWatcherTests: XCTestCase {
         home = FileManager.default.temporaryDirectory.appendingPathComponent("empty-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         let watcher = CodexTraceWatcher(codexHome: home, pollInterval: 9999)
-        var fired = false
-        watcher.onChangedPaths = { _ in fired = true }
+        // Inverted expectation: `start()`'s initial backfill now runs inside a
+        // Task (the directory listing hops off-main via OffMain.run), so a
+        // same-tick synchronous assertion right after start()/stop() would
+        // pass trivially whether or not the Task ever ran — not because the
+        // empty-directory path was genuinely exercised. Waiting briefly for
+        // fulfillment gives the Task a real chance to fire before asserting
+        // it didn't. Mirrors test_startFiresInitialBackfillWithSqlitePaths above.
+        let exp = expectation(description: "no fire")
+        exp.isInverted = true
+        watcher.onChangedPaths = { _ in exp.fulfill() }
         watcher.start()
+        wait(for: [exp], timeout: 0.3)
         watcher.stop()
-        XCTAssertFalse(fired, "no logs_*.sqlite -> nothing to read")
     }
 }
