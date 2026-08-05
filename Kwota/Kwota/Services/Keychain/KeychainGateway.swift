@@ -452,6 +452,39 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
                     let hasDrainingEscapeCallsNow = (self?.escapeCallsInFlight ?? 0) > 0
                     self?.lock.unlock()
                     if isWedgedNow || hasDrainingEscapeCallsNow {
+                        // This closure is dispatched to the primary queue
+                        // (only primary-queue closures ever see
+                        // `interaction == .deny` reach this point), so
+                        // `clearsWedgeOnCompletion` is what normally proves
+                        // the primary queue has drained past whatever set
+                        // `wedged`. Bailing here WITHOUT that clear would
+                        // strand `wedged == true` forever if this happens to
+                        // be the last backlog item: reaching the top of a
+                        // primary-queue closure's body already proves the
+                        // queue drained past whatever set `wedged`, so a
+                        // `wedged` seen here is by construction stale —
+                        // safe, and necessary, to clear before bailing.
+                        if clearsWedgeOnCompletion {
+                            self?.lock.lock()
+                            self?.wedged = false
+                            self?.lock.unlock()
+                        }
+                        // `tracksEscapeInFlight` is never true for a `.deny`
+                        // closure today (only escape-queue closures set it,
+                        // and `.deny` never reaches the escape queue), so
+                        // this is currently a no-op — kept explicit, mirroring
+                        // the unconditional increment at admission above,
+                        // so the pairing stays visible here rather than
+                        // silently assumed. If a future `.deny` path ever DID
+                        // reach the escape queue, skipping this decrement
+                        // would leak the counter upward forever (the same
+                        // class of permanent lockout `wedged` above guards
+                        // against).
+                        if tracksEscapeInFlight {
+                            self?.lock.lock()
+                            self?.escapeCallsInFlight -= 1
+                            self?.lock.unlock()
+                        }
                         if settled.claim() { continuation.resume(throwing: KeychainGatewayError.timedOut) }
                         return
                     }

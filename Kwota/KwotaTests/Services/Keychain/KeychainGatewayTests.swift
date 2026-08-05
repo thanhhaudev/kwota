@@ -589,6 +589,145 @@ final class KeychainGatewayTests: XCTestCase {
         XCTAssertEqual(interactionCalls.value.count, 4,
                        "only A's and C's own setInteractionAllowed calls must exist — B must never have called it")
     }
+
+    /// Follow-up review finding on the bail path just added above: bailing
+    /// with `resume(throwing: .timedOut)` closed the trample hazard, but
+    /// did so WITHOUT running `clearsWedgeOnCompletion` — every OTHER
+    /// primary-queue closure (bail or normal completion) is what proves
+    /// `wedged` is stale enough to clear; a bail that skips that step
+    /// breaks the invariant "every primary-queue closure eventually clears
+    /// `wedged`," which can strand it `true` forever if a genuinely stale
+    /// `wedged` (armed by some other call's deadline, moments earlier) is
+    /// what triggered this bail and nothing else ever runs again to clear
+    /// it. This test drives a real bail while `wedged` has genuinely been
+    /// armed for real (via A's own short `timeout` firing while A is still
+    /// blocked) and confirms the gateway fully recovers afterward — a
+    /// fresh, unrelated `.deny` call succeeds normally and quickly, not
+    /// fast-failing forever.
+    ///
+    /// Honest limitation, documented per this file's own established
+    /// practice: this test cannot force B's OWN re-check to observe
+    /// `wedged == true` at the exact instant it runs. Every primary-queue
+    /// closure directly ahead of B — whether it completes normally or
+    /// bails — unconditionally clears `wedged` (when eligible) as the very
+    /// last synchronous step before the queue can advance to B; GCD only
+    /// dequeues the next block after the current one fully returns. So the
+    /// only way for B to observe a stale `wedged == true` is a genuine race
+    /// between an independent call's deadline timer and that handoff — a
+    /// window on the order of the OS's own block-to-block dequeue latency,
+    /// not something forceable via test sequencing (matches the reviewer's
+    /// own characterization: "microseconds to low milliseconds"). What
+    /// this test DOES verify deterministically: `wedged` genuinely engages
+    /// for real during the test (A's own timeout fires while blocked), a
+    /// bail genuinely occurs on the same gateway (B, via
+    /// `escapeCallsInFlight`, exercising the exact shared bail body the
+    /// fix changed — the same `if clearsWedgeOnCompletion { wedged = false }`
+    /// line applies unconditionally whichever condition triggered entry),
+    /// and the gateway is fully healthy afterward. Source-level: the fix's
+    /// clear is unconditional within the bail branch regardless of which
+    /// of `isWedgedNow`/`hasDrainingEscapeCallsNow` was true, so this test
+    /// exercising the branch via one condition still exercises the exact
+    /// line that protects against the other.
+    func test_bailPathDoesNotStrandWedged_gatewayRecoversForSubsequentCalls() async throws {
+        let callIndex = UncheckedBox<Int>(0)
+        let probeGateA = DispatchSemaphore(value: 0)
+        let escapeGateC = DispatchSemaphore(value: 0)
+        let recovered = Data("recovered".utf8)
+
+        let gateway = KeychainGateway(
+            primitives: primitives(copyMatching: { _ in
+                var index = -1
+                callIndex.mutate { count in index = count; count += 1 }
+                switch index {
+                case 0:
+                    probeGateA.wait()  // A: genuinely wedges — its own short timeout fires while blocked
+                    return (errSecSuccess, nil)
+                case 1:
+                    escapeGateC.wait()  // C: the draining escape call
+                    return (errSecSuccess, Data("granted".utf8) as AnyObject)
+                case 2:
+                    return (errSecSuccess, recovered as AnyObject)  // the follow-up call, after everything settles
+                default:
+                    // B must never reach here — that's the earlier bug this file already guards against.
+                    return (errSecSuccess, nil)
+                }
+            }),
+            timeout: 0.15,            // SHORT — A will genuinely hit `wedged = true` while still blocked
+            allowTimeout: 5,
+            allowGraceInterval: 0.1
+        )
+
+        // A occupies the primary queue and blocks.
+        let taskA = Task { try? await gateway.read(service: "s", account: "A", interaction: .deny) }
+        var deadline = Date().addingTimeInterval(2.0)
+        while Date() < deadline, callIndex.value < 1 {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(callIndex.value, 1, "precondition: A must be occupying the primary queue")
+
+        // B is admitted while A is still running — queues up behind A.
+        let taskB = Task { try await gateway.read(service: "s", account: "B", interaction: .deny) }
+        try? await Task.sleep(nanoseconds: 50_000_000)  // let GCD enqueue B behind A
+
+        // Wait past A's own `timeout` (0.15s) — A genuinely wedges: its
+        // deadline timer fires while it's still blocked, setting
+        // `wedged = true` for real (not synthetically).
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        // C (.allow) arrives; A has also exceeded `allowGraceInterval` by
+        // now, so C routes to the escape queue and blocks there —
+        // `escapeCallsInFlight` becomes 1.
+        let taskC = Task { try? await gateway.read(service: "s", account: "C", interaction: .allow) }
+        deadline = Date().addingTimeInterval(2.0)
+        while Date() < deadline, callIndex.value < 2 {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(callIndex.value, 2, "precondition: C must have reached the escape queue and blocked")
+
+        // Release A. Its own completion clears `wedged` (existing,
+        // unchanged behavior) — B, still queued behind it, gets its turn
+        // next while C is still draining, and bails via the shared bail
+        // branch this fix touched.
+        probeGateA.signal()
+        _ = await taskA.value
+
+        // `taskA.value`/`taskB.value` can resolve EARLY via their own
+        // short `timeout` (0.15s) deadline timers — decoupled from when
+        // their REAL closures actually run on `queue`, since a timer firing
+        // only means the `async` caller gave up, not that the underlying
+        // GCD closure has progressed. Give the real queue processing (A's
+        // real completion, then B's real bail-check) genuine wall-clock
+        // margin to happen before checking B's outcome or releasing
+        // `escapeGateC` — without this, the test can race ahead of B's real
+        // closure actually observing `escapeCallsInFlight`, making it
+        // flaky/misleading rather than a reliable regression check.
+        try? await Task.sleep(nanoseconds: 200_000_000)
+
+        do {
+            _ = try await taskB.value
+            XCTFail("expected timedOut")
+        } catch let error as KeychainGatewayError {
+            XCTAssertEqual(error, .timedOut)
+        } catch {
+            XCTFail("wrong error type: \(error)")
+        }
+        XCTAssertEqual(callIndex.value, 2, "B must never reach copyMatching")
+
+        // Release C and let it finish.
+        escapeGateC.signal()
+        _ = await taskC.value
+
+        // The actual regression: confirm neither A's real wedge-and-clear
+        // cycle nor B's bail left `wedged` stranded — a fresh, unrelated
+        // `.deny` call on the now-idle gateway must succeed normally and
+        // quickly, not fail fast forever.
+        let recoveredStart = Date()
+        let out = try await gateway.read(service: "s", account: "after", interaction: .deny)
+        XCTAssertEqual(out, recovered,
+                       "the gateway must be fully usable again after the bail — wedged must not be left stranded")
+        XCTAssertLessThan(Date().timeIntervalSince(recoveredStart), 1.0,
+                          "a healthy gateway must answer quickly, not fail fast forever from a stranded wedged flag")
+    }
 }
 
 /// Test-local mutable box. The gateway hands its primitives to a background
