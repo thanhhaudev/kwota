@@ -42,6 +42,21 @@
 //  after `wedged` itself has cleared, so a fresh `.deny` call can never
 //  resume on the primary queue while an escape closure is still draining.
 //
+//  `wedged` is a LAGGING signal, though: it only becomes true once a parked
+//  call misses its own full `timeout` (10s by default). If a probe gets
+//  stuck at time T, there's a window up to T+timeout where the gateway
+//  doesn't know it yet. An `.allow` call arriving in that window used to see
+//  `wedged == false` and queue normally behind the stuck probe on `queue` —
+//  same practical effect as the original bug, just bounded by `allowTimeout`
+//  instead of unbounded. `primaryOccupantSince` / `primaryQueueProbablyStuck()`
+//  close that gap with a second, much shorter grace period
+//  (`allowGraceInterval`) that applies to `.allow` only: if the primary
+//  queue's current occupant has been running longer than that short grace
+//  period — whether or not it's hit its own full deadline — a newly
+//  arriving `.allow` call routes to `allowEscapeQueue` just like the
+//  wedged-true case. See `primaryQueueProbablyStuck()` for why this is safe
+//  at a much shorter threshold than `timeout` itself.
+//
 
 import Foundation
 import Security
@@ -93,11 +108,14 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "com.thanhhaudev.kwota.keychain")
     /// Escape hatch for `.allow` calls made while the gateway is already
-    /// `wedged` — see `run(interaction:_:)` for when this is used and why
-    /// it's safe. Not used for anything else: a non-wedged `.allow` call
-    /// still goes through the primary `queue` like every other call, to
-    /// keep the interaction-flag serialization guarantee intact whenever
-    /// that guarantee is still meaningful.
+    /// `wedged`, OR while the primary queue's current occupant merely looks
+    /// probably-stuck (`primaryQueueProbablyStuck()`) — see
+    /// `run(interaction:_:)` for when each is used and why both are safe.
+    /// Not used for anything else: an `.allow` call whose primary queue is
+    /// idle, or occupied by something that's about to clear, still goes
+    /// through the primary `queue` like every other call, to keep the
+    /// interaction-flag serialization guarantee intact whenever that
+    /// guarantee is still meaningful.
     private let allowEscapeQueue = DispatchQueue(label: "com.thanhhaudev.kwota.keychain.allow-escape")
     private let primitives: KeychainPrimitives
     private let timeout: TimeInterval
@@ -106,8 +124,26 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
     /// notice and click it — so `.allow` gets a much longer, separate budget
     /// rather than sharing the tight background deadline.
     private let allowTimeout: TimeInterval
+    /// Grace period for `.allow` only, deliberately much shorter than
+    /// `timeout` — see `primaryQueueProbablyStuck()`. Not a deadline for any
+    /// call; purely a "how long is too long to still call this normal"
+    /// threshold used to decide routing.
+    private let allowGraceInterval: TimeInterval
     private let lock = NSLock()
     private var wedged = false
+    /// When the primary `queue`'s current occupant closure started running,
+    /// or `nil` when the queue is idle. Set at the top of that closure's
+    /// body and cleared at the bottom — see `enqueue(...)`'s
+    /// `marksPrimaryOccupancy` parameter. Read by `primaryQueueProbablyStuck()`
+    /// to answer "has whatever is on the primary queue right now been
+    /// running longer than a human-imperceptible grace period" without
+    /// waiting for that occupant's own full deadline.
+    private var primaryOccupantSince: Date?
+    /// Closures to run once the primary queue's current occupant finishes —
+    /// each one resolves a still-pending `primaryQueueProbablyStuck()` call
+    /// with "no, it cleared in time." Drained and cleared every time the
+    /// occupant finishes (see `enqueue(...)`).
+    private var primaryQueueWaiters: [() -> Void] = []
     /// Count of `.allow` escape-queue closures (see `run(interaction:_:)`)
     /// currently between "dispatched" and "finished running its own body,
     /// including its own post-work interaction-flag reset" — NOT the same
@@ -120,10 +156,16 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
     /// live, and the two would race writes to the shared interaction flag.
     private var escapeCallsInFlight = 0
 
-    init(primitives: KeychainPrimitives = .live, timeout: TimeInterval = 10, allowTimeout: TimeInterval = 120) {
+    init(
+        primitives: KeychainPrimitives = .live,
+        timeout: TimeInterval = 10,
+        allowTimeout: TimeInterval = 120,
+        allowGraceInterval: TimeInterval = 0.5
+    ) {
         self.primitives = primitives
         self.timeout = timeout
         self.allowTimeout = allowTimeout
+        self.allowGraceInterval = allowGraceInterval
     }
 
     func read(service: String, account: String?, interaction: KeychainInteraction) async throws -> Data? {
@@ -261,6 +303,12 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
     /// original parked closure on `queue` has unstuck. Only that closure's
     /// own completion (on `queue`) is evidence the primary queue is usable
     /// again.
+    ///
+    /// Between "not wedged yet" and "confirmed wedged" there is a third
+    /// case, checked only for `.allow`: the primary queue is occupied by
+    /// something that hasn't answered within `allowGraceInterval` (far
+    /// shorter than `timeout`), but hasn't missed its own full deadline
+    /// either — see `primaryQueueProbablyStuck()`.
     private func run<T: Sendable>(
         interaction: KeychainInteraction,
         _ work: @escaping @Sendable () throws -> T
@@ -276,10 +324,92 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
 
         if isWedged {
             // `.deny` already threw above — only `.allow` reaches here.
-            return try await enqueue(on: allowEscapeQueue, interaction: interaction, clearsWedgeOnCompletion: false, tracksEscapeInFlight: true, work)
+            return try await enqueue(on: allowEscapeQueue, interaction: interaction, clearsWedgeOnCompletion: false, tracksEscapeInFlight: true, marksPrimaryOccupancy: false, work)
         }
 
-        return try await enqueue(on: queue, interaction: interaction, clearsWedgeOnCompletion: true, tracksEscapeInFlight: false, work)
+        if interaction == .allow, await primaryQueueProbablyStuck() {
+            // Detection-lag gap: the primary queue's current occupant has
+            // been running longer than the short grace period, but hasn't
+            // hit ITS OWN full `timeout` yet, so `wedged` hasn't flipped.
+            // Routing here is safe for the same reason routing while
+            // `wedged` is true is safe (see `primaryQueueProbablyStuck()`).
+            return try await enqueue(on: allowEscapeQueue, interaction: interaction, clearsWedgeOnCompletion: false, tracksEscapeInFlight: true, marksPrimaryOccupancy: false, work)
+        }
+
+        return try await enqueue(on: queue, interaction: interaction, clearsWedgeOnCompletion: true, tracksEscapeInFlight: false, marksPrimaryOccupancy: true, work)
+    }
+
+    /// Answers "has the primary queue's current occupant been running
+    /// longer than `allowGraceInterval`" — the short-grace-period check that
+    /// lets an `.allow` call escape a stuck occupant well before that
+    /// occupant's own full `timeout` deadline (and therefore well before
+    /// `wedged` would naturally become true).
+    ///
+    /// Why a short threshold is safe, using the same reasoning that makes
+    /// the `wedged`-true escape hatch safe (see the file header and
+    /// `run(interaction:_:)` above): the trample risk is two closures alive
+    /// at once, each free to write the process-global interaction flag,
+    /// where one hasn't yet reached the point where its own
+    /// `SecItemCopyMatching` call has consumed that flag. `enqueue(...)`
+    /// calls `setInteractionAllowed` as the very first thing its closure
+    /// does, before touching `primitives.copyMatching` at all — so
+    /// `primaryOccupantSince` being set already means that call has been
+    /// issued and its own flag value captured. The only remaining question
+    /// is whether enough real time has passed that Security.framework's own
+    /// internals have had a chance to actually read that flag before a
+    /// second queue could change it again. A normal, successful background
+    /// Keychain read (no dialog, no contention) completes in low
+    /// milliseconds; `allowGraceInterval` (hundreds of ms by default) is
+    /// generous headroom past that, while still being a small fraction of
+    /// `timeout` (10s) — so a call that hasn't returned within the grace
+    /// window has, for all practical purposes, already made it past the
+    /// flag-capture point, exactly like a call that's missed its full
+    /// deadline has. The margin is a judgment call, not a proof; if this
+    /// turns out to be wrong, the failure mode is an occasional false
+    /// "probably stuck" on a genuinely slow-but-fine read, not a
+    /// use-after-flag-capture — that read still gets serialized correctly
+    /// on `allowEscapeQueue` (which is itself serial), it's just not the
+    /// queue that would have handled it under lighter load.
+    ///
+    /// Only ever consulted for `.allow` — `.deny` never waits on this and
+    /// never marks occupancy differently; its fast-fail behavior is
+    /// unchanged.
+    private func primaryQueueProbablyStuck() async -> Bool {
+        lock.lock()
+        guard let occupantSince = primaryOccupantSince else {
+            lock.unlock()
+            return false
+        }
+        lock.unlock()
+
+        let remainingGrace = allowGraceInterval - Date().timeIntervalSince(occupantSince)
+        if remainingGrace <= 0 {
+            // Already running longer than the grace period by the time we
+            // even checked — no need to wait further. Re-read under the
+            // lock: the occupant may have cleared between the unlocked
+            // `Date()` computation above and now.
+            lock.lock()
+            let stillOccupied = primaryOccupantSince != nil
+            lock.unlock()
+            return stillOccupied
+        }
+
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let settled = Settled()
+            lock.lock()
+            guard primaryOccupantSince != nil else {
+                lock.unlock()
+                if settled.claim() { continuation.resume(returning: false) }
+                return
+            }
+            primaryQueueWaiters.append {
+                if settled.claim() { continuation.resume(returning: false) }
+            }
+            lock.unlock()
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + remainingGrace) {
+                if settled.claim() { continuation.resume(returning: true) }
+            }
+        }
     }
 
     private func enqueue<T: Sendable>(
@@ -287,6 +417,7 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
         interaction: KeychainInteraction,
         clearsWedgeOnCompletion: Bool,
         tracksEscapeInFlight: Bool,
+        marksPrimaryOccupancy: Bool,
         _ work: @escaping @Sendable () throws -> T
     ) async throws -> T {
         if tracksEscapeInFlight {
@@ -299,6 +430,16 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
         return try await withCheckedThrowingContinuation { continuation in
             let settled = Settled()
             targetQueue.async { [weak self] in
+                // Marked at the very top of the closure, before the
+                // interaction flag or `copyMatching` are touched at all —
+                // `primaryQueueProbablyStuck()` relies on this timestamp
+                // meaning "this call has genuinely started running," not
+                // merely "was scheduled."
+                if marksPrimaryOccupancy {
+                    self?.lock.lock()
+                    self?.primaryOccupantSince = Date()
+                    self?.lock.unlock()
+                }
                 primitives.setInteractionAllowed(interaction == .allow)
                 let outcome = Result { try work() }
                 primitives.setInteractionAllowed(true)
@@ -306,6 +447,20 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
                     self?.lock.lock()
                     self?.wedged = false
                     self?.lock.unlock()
+                }
+                // Cleared, and any `.allow` calls waiting on
+                // `primaryQueueProbablyStuck()` released, on the closure's
+                // own completion — same reasoning as `escapeCallsInFlight`'s
+                // decrement below: this has to track when the underlying
+                // `SecItemCopyMatching` call actually returns, not whether
+                // some `async` caller already gave up at its own deadline.
+                if marksPrimaryOccupancy {
+                    self?.lock.lock()
+                    self?.primaryOccupantSince = nil
+                    let waiters = self?.primaryQueueWaiters ?? []
+                    self?.primaryQueueWaiters = []
+                    self?.lock.unlock()
+                    waiters.forEach { $0() }
                 }
                 // Decremented unconditionally here — on the closure's own
                 // completion, not on whether the `async` caller already

@@ -351,6 +351,125 @@ final class KeychainGatewayTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(recoveredStarted), 1.0,
                           "once the escape call has finished draining, .deny must work normally again")
     }
+
+    // MARK: - Third adversarial-review round: detection-lag gap for Grant
+
+    /// Half (a): the common, fast case. A `.deny` probe that settles well
+    /// within `allowGraceInterval` and an `.allow` call that arrives while
+    /// it's still running must NOT get routed to the escape queue — it must
+    /// still go through the primary `queue` like every other non-wedged
+    /// call. Proven here by timing: if the `.allow` call had been routed to
+    /// `allowEscapeQueue` it would run concurrently with the still-parked
+    /// `.deny` probe and its own `copyMatching` call would start almost
+    /// immediately; if it went through the primary `queue` (serial), its
+    /// `copyMatching` call cannot start until the `.deny` probe's closure —
+    /// including its own `copyMatching` call — has finished.
+    func test_allowArrivingDuringAFastDenyProbe_isNotRoutedToEscapeQueue() async throws {
+        struct CallRecord { let index: Int; let start: Date; let end: Date }
+        let callIndex = UncheckedBox<Int>(0)
+        let records = UncheckedBox<[CallRecord]>([])
+        let granted = Data("granted".utf8)
+
+        let gateway = KeychainGateway(
+            primitives: primitives(copyMatching: { _ in
+                var index = -1
+                callIndex.mutate { count in index = count; count += 1 }
+                let start = Date()
+                if index == 0 {
+                    // Stands in for a normal, fast background probe — well
+                    // under the grace period below, nowhere near `timeout`.
+                    Thread.sleep(forTimeInterval: 0.15)
+                }
+                let end = Date()
+                records.mutate { $0.append(CallRecord(index: index, start: start, end: end)) }
+                return (errSecSuccess, granted as AnyObject)
+            }),
+            timeout: 5,
+            allowTimeout: 5,
+            allowGraceInterval: 0.5
+        )
+
+        async let denyResult: Data? = try? await gateway.read(service: "s", account: "deny", interaction: .deny)
+        // Give the .deny probe a moment to actually start running before
+        // the .allow call arrives "during it."
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        async let allowResult: Data? = try? await gateway.read(service: "s", account: "allow", interaction: .allow)
+
+        _ = await denyResult
+        let allowOut = await allowResult
+
+        XCTAssertEqual(allowOut, granted, "the .allow call must still reach a real answer")
+
+        let calls = records.value
+        XCTAssertEqual(calls.count, 2, "both calls must have reached copyMatching")
+        guard let denyCall = calls.first(where: { $0.index == 0 }),
+              let allowCall = calls.first(where: { $0.index == 1 }) else {
+            return XCTFail("expected exactly two recorded calls")
+        }
+        XCTAssertGreaterThanOrEqual(
+            allowCall.start, denyCall.end,
+            "an .allow call arriving during a fast .deny probe must wait for it on the primary queue " +
+            "(serialized), not run concurrently on the escape queue — routing it early would reopen " +
+            "the interaction-flag trample risk this file's serial design exists to prevent"
+        )
+    }
+
+    /// Half (b): the actual bug. An `.allow` call arrives after the primary
+    /// queue's occupant has been stuck longer than `allowGraceInterval`, but
+    /// BEFORE that occupant's own full `timeout` deadline — i.e. before
+    /// `wedged` would naturally become true. Before the fix, `run()` only
+    /// consulted `wedged`, saw `false`, and queued this call behind the
+    /// stuck probe on the primary `queue`, where it would sit uselessly
+    /// until its own `allowTimeout` (verified below by disabling the fix).
+    /// After the fix, it must reach a real answer promptly via the escape
+    /// hatch instead.
+    func test_allowArrivingAfterGraceElapsesButBeforeWedgeDeadline_stillReachesRealAnswerViaEscape() async throws {
+        let callIndex = UncheckedBox<Int>(0)
+        let granted = Data("granted".utf8)
+        let gateway = KeychainGateway(
+            primitives: primitives(copyMatching: { _ in
+                var isFirstCall = false
+                callIndex.mutate { count in isFirstCall = (count == 0); count += 1 }
+                if isFirstCall {
+                    // Stuck for the whole test — nowhere near answering
+                    // within `timeout` (5s) either, so `wedged` never fires
+                    // during this test.
+                    Thread.sleep(forTimeInterval: 30)
+                    return (errSecSuccess, nil)
+                }
+                return (errSecSuccess, granted as AnyObject)
+            }),
+            timeout: 5,             // the stuck probe's own deadline — long, deliberately not reached
+            allowTimeout: 5,
+            allowGraceInterval: 0.2  // short grace period
+        )
+
+        // Start the stuck .deny probe without awaiting its own (5s) deadline.
+        let denyTask = Task { try? await gateway.read(service: "s", account: "stuck", interaction: .deny) }
+
+        // Wait until the probe has actually reached copyMatching (parked).
+        let readyDeadline = Date().addingTimeInterval(2.0)
+        while Date() < readyDeadline, callIndex.value < 1 {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(callIndex.value, 1, "precondition: the probe must have reached copyMatching")
+
+        // Wait past the grace period, but stay well short of `timeout`
+        // (5s) — this is the detection-lag window: `wedged` is still false.
+        try? await Task.sleep(nanoseconds: 400_000_000)
+
+        let started = Date()
+        let out = try await gateway.read(service: "s", account: "grant", interaction: .allow)
+        let elapsed = Date().timeIntervalSince(started)
+
+        XCTAssertEqual(out, granted,
+                       "an .allow call arriving during the detection-lag window must still reach a real " +
+                       "answer via the escape hatch, not queue behind the stuck probe")
+        XCTAssertLessThan(elapsed, 2.0,
+                          "must escape promptly — not wait out allowTimeout (5s) queued behind the stuck probe")
+
+        denyTask.cancel()
+    }
 }
 
 /// Test-local mutable box. The gateway hands its primitives to a background
