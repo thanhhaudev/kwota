@@ -70,6 +70,15 @@ final class MenuBarViewModel {
     private(set) var lastFetchedAt: Date?
     private(set) var lastError: String?
     private(set) var isSwitchingProfile: Bool = false
+    /// True while `grantKeychainAccess()` is in flight. Each `.allow` read
+    /// inside it can take up to `allowTimeout` (120s) waiting on a real
+    /// consent dialog, and `readFresh(interaction:)` deliberately bypasses
+    /// the CLI reader's cache/in-flight dedup for `.allow`, so without this
+    /// guard repeated Grant-button taps would each queue another up-to-120s
+    /// probe on the serial Keychain gateway. Threaded into
+    /// `KeychainAccessBanner`'s `isBusy` to disable the button and show a
+    /// spinner instead, matching `RateLimitBanner.isProbing`'s shape.
+    private(set) var isGrantingKeychainAccess: Bool = false
 
     // MARK: - Usage tab chart-region resolution
 
@@ -2380,11 +2389,41 @@ final class MenuBarViewModel {
     /// profiles fall through to the Kwota-own-store-only path below, same
     /// as `.sessionKey` profiles.
     func grantKeychainAccess() async {
+        // Re-entry guard: each `.allow` read below can take up to
+        // `allowTimeout` (120s) waiting on a real dialog, and the CLI read
+        // deliberately bypasses its normal in-flight dedup for `.allow` — so
+        // without this, repeated taps on the Grant banner would each queue
+        // another up-to-120s probe on the serial gateway behind the first.
+        guard !isGrantingKeychainAccess else { return }
         guard let profile = profileStore.activeProfile else { return }
+        isGrantingKeychainAccess = true
+        defer { isGrantingKeychainAccess = false }
         do {
             _ = try await credentialStore.read(for: profile.id, interaction: .allow)
             if profile.authMethod == .cliSync && profile.providerID == .claude {
                 let cliResult = try await cliCredentialReader.readFresh(interaction: .allow)
+                // Re-verify identity and profile liveness AFTER the .allow
+                // read resolves — it can sit for up to `allowTimeout` (120s)
+                // waiting on the user to answer a real dialog. Nothing above
+                // guarantees `profile` still exists or that the CLI is still
+                // signed into the account it represents by the time this
+                // point is reached; without this check a profile removed
+                // mid-wait, or a CLI account switched mid-wait, would have
+                // this read's token written under a stale/wrong profile id.
+                // `guardRefresh` is the same identity gate `CLITokenRefresher`
+                // uses in production (see its wiring in `init` above) — it
+                // re-reads the CLI's current identity rather than trusting
+                // whatever was true when this function started.
+                guard profileStore.profiles.contains(where: { $0.id == profile.id }),
+                      autoProfileCoordinator.guardRefresh(profile: profile)
+                else {
+                    AppLog.shared.log(
+                        "grantKeychainAccess: profile \(profile.id.uuidString.prefix(8)) no longer valid after the CLI grant read resolved — skipping the write",
+                        level: .warn
+                    )
+                    authState = .keychainAccessNeeded
+                    return
+                }
                 try? await credentialStore.write(cliResult.credential, for: profile.id)
             }
             await refresh(profile: profile)

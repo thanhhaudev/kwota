@@ -174,6 +174,133 @@ final class MenuBarViewModelGrantKeychainAccessTests: XCTestCase {
                        "a denied CLI read must not seed Kwota's own store with nothing")
     }
 
+    // MARK: - Finding 3: re-verify identity/liveness before the write
+
+    /// If the profile was removed from the store while the `.allow` CLI read
+    /// was in flight (it can take up to `allowTimeout`, 120s, waiting on a
+    /// real dialog), the resolved token must never be written under an id
+    /// that no longer names a live profile — and the UI must land back on
+    /// the Grant banner, not silently proceed as if nothing happened.
+    @MainActor
+    func test_grantKeychainAccess_skipsWrite_whenProfileRemovedWhileCLIReadWasInFlight() async throws {
+        let recordingGateway = RecordingKeychainGateway()
+        // The reader needs to reach back into the VM's own `profileStore` to
+        // remove the profile mid-flight, but that store doesn't exist until
+        // the VM is built — and the reader has to already be constructed to
+        // hand to the VM's initializer. The box breaks the cycle: it starts
+        // empty and is filled in right after the VM exists, before
+        // `grantKeychainAccess()` is called.
+        let box = ProfileStoreBox()
+        let cliSpy = ProfileRemovingCLICredentialReader(box: box, result: .success(
+            CLICredentialReader.SyncResult(
+                credential: .cliToken(accessToken: "stale-account-token", refreshToken: "r", expiresAt: .distantFuture),
+                subscriptionPlan: nil
+            )
+        ))
+        let vm = makeVM(gateway: recordingGateway, cliCredentialReader: cliSpy)
+        let profile = Profile(name: "P", authMethod: .cliSync)
+        try? vm.profileStore.add(profile)
+        box.store = vm.profileStore
+        box.profileId = profile.id
+
+        await vm.grantKeychainAccess()
+
+        XCTAssertEqual(recordingGateway.writeCount, 0,
+                       "a token resolved after the profile was removed must never be written")
+        XCTAssertEqual(vm.authState, .keychainAccessNeeded,
+                       "must land back on the Grant banner, not a stale success path")
+    }
+
+    /// If the CLI's on-disk identity no longer matches the profile by the
+    /// time the `.allow` read resolves (the user ran `codex`/`claude login`
+    /// as a different account while the dialog was open), the resolved
+    /// token must not be written under the old profile's id — the same
+    /// cross-account misattribution `CLITokenRefresher.identityCheck` guards
+    /// against on the background refresh path, reused here via
+    /// `autoProfileCoordinator.guardRefresh`.
+    @MainActor
+    func test_grantKeychainAccess_skipsWrite_whenIdentityNoLongerMatchesAfterCLIRead() async throws {
+        let recordingGateway = RecordingKeychainGateway()
+        let cliSpy = SpyCLICredentialReader(result: .success(
+            CLICredentialReader.SyncResult(
+                credential: .cliToken(accessToken: "other-account-token", refreshToken: "r", expiresAt: .distantFuture),
+                subscriptionPlan: nil
+            )
+        ))
+        let vm = makeVM(
+            gateway: recordingGateway,
+            cliCredentialReader: cliSpy,
+            coordinatorOAuthRead: {
+                OAuthAccountReader.Account(
+                    seatTier: nil,
+                    emailAddress: "someone-else@example.com",
+                    displayName: nil,
+                    organizationName: nil,
+                    subscriptionCreatedAt: nil,
+                    organizationType: nil,
+                    organizationRateLimitTier: nil,
+                    accountUuid: nil,
+                    organizationUuid: nil
+                )
+            }
+        )
+        let profile = Profile(name: "P", authMethod: .cliSync, email: "owner@example.com")
+        try? vm.profileStore.add(profile)
+
+        await vm.grantKeychainAccess()
+
+        XCTAssertEqual(cliSpy.callCount, 1, "the CLI read itself must still happen")
+        XCTAssertEqual(recordingGateway.writeCount, 0,
+                       "a token for a different on-disk account must never be written under this profile")
+        XCTAssertEqual(vm.authState, .keychainAccessNeeded,
+                       "must land back on the Grant banner, not a stale success path")
+    }
+
+    // MARK: - Finding 4: in-flight guard
+
+    /// A second tap on the Grant banner while the first attempt is still
+    /// parked inside the (up to 120s) `.allow` CLI read must not queue a
+    /// second probe — `readFresh(interaction: .allow)` deliberately bypasses
+    /// the reader's normal cache/in-flight dedup, so without this guard at
+    /// the view-model layer every repeat tap genuinely reaches the gateway.
+    @MainActor
+    func test_grantKeychainAccess_guardsAgainstConcurrentReentry() async throws {
+        let gate = CLIReadGate()
+        let cliSpy = GatedSpyCLICredentialReader(gate: gate, result: .success(
+            CLICredentialReader.SyncResult(
+                credential: .cliToken(accessToken: "granted", refreshToken: "r", expiresAt: .distantFuture),
+                subscriptionPlan: nil
+            )
+        ))
+        let recordingGateway = RecordingKeychainGateway()
+        let vm = makeVM(gateway: recordingGateway, cliCredentialReader: cliSpy)
+        let profile = Profile(name: "P", authMethod: .cliSync)
+        try? vm.profileStore.add(profile)
+
+        let task1 = Task { @MainActor in await vm.grantKeychainAccess() }
+
+        // Wait for the first attempt to reach the parked CLI read.
+        var deadline = Date().addingTimeInterval(5.0)
+        while Date() < deadline {
+            if await gate.callCount >= 1 { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let callCountBeforeSecondTap = await gate.callCount
+        XCTAssertEqual(callCountBeforeSecondTap, 1, "precondition: first attempt must be parked in the CLI read")
+        XCTAssertTrue(vm.isGrantingKeychainAccess, "the in-flight flag must be set while the first attempt is parked")
+
+        // A second tap while the first is still in flight must be a no-op.
+        await vm.grantKeychainAccess()
+
+        await gate.release()
+        await task1.value
+
+        let finalCallCount = await gate.callCount
+        XCTAssertEqual(finalCallCount, 1,
+                       "a concurrent second grantKeychainAccess() call must not queue another CLI read")
+        XCTAssertFalse(vm.isGrantingKeychainAccess, "flag must clear once the in-flight attempt completes")
+    }
+
     // MARK: - Fixture
 
     /// Minimal hermetic `MenuBarViewModel` fixture. Unlike
@@ -190,7 +317,14 @@ final class MenuBarViewModelGrantKeychainAccessTests: XCTestCase {
     private func makeVM(
         gatewayError: KeychainGatewayError = .status(errSecParam),
         gateway: (any KeychainGateways)? = nil,
-        cliCredentialReader: (any CLICredentialReading)? = nil
+        cliCredentialReader: (any CLICredentialReading)? = nil,
+        // Finding 3 coverage: when non-nil, the coordinator's watcher reads
+        // this identity instead of the always-permissive default, and
+        // `alwaysAllowRefresh` flips to false so `guardRefresh` actually
+        // compares it against the profile's email — letting a test simulate
+        // "the CLI signed into a different account while the Grant dialog
+        // was open."
+        coordinatorOAuthRead: (() -> OAuthAccountReader.Account?)? = nil
     ) -> MenuBarViewModel {
         let temp = TempDirectory()
         let service = "com.thanhhaudev.Kwota.test.\(UUID())"
@@ -207,11 +341,14 @@ final class MenuBarViewModelGrantKeychainAccessTests: XCTestCase {
         // Hermetic watchers: unwired onChange, so no live-IO auto-detect
         // emit reaches ProfileStore during this test.
         let vmWatcher = CLIAccountWatcher(oauthRead: { nil }, fileEvents: AsyncStream { _ in })
-        let coordWatcher = CLIAccountWatcher(oauthRead: { nil }, fileEvents: AsyncStream { _ in })
+        let coordWatcher = CLIAccountWatcher(
+            oauthRead: coordinatorOAuthRead ?? { nil },
+            fileEvents: AsyncStream { _ in }
+        )
         let permissiveCoord = AutoProfileCoordinator(
             watcher: coordWatcher,
             profileStore: profileStore,
-            alwaysAllowRefresh: true
+            alwaysAllowRefresh: coordinatorOAuthRead == nil
         )
         let codexWatcherStub = CodexAccountWatcher(authRead: { nil }, fileEvents: AsyncStream { _ in })
         let codexCoordStub = CodexAutoProfileCoordinator(
@@ -319,6 +456,93 @@ private final class SpyCLICredentialReader: CLICredentialReading, @unchecked Sen
 
     func readFresh(interaction: KeychainInteraction) async throws -> CLICredentialReader.SyncResult {
         lock.lock(); _callCount += 1; _lastInteraction = interaction; lock.unlock()
+        return try result.get()
+    }
+}
+
+// MARK: - Finding 3 fixtures
+
+/// Breaks the construction-order cycle between a `CLICredentialReading`
+/// double and the `ProfileStore` it needs to mutate — the reader has to
+/// exist before `MenuBarViewModel.init` runs, but the store it needs to
+/// reach doesn't exist until after. `@unchecked Sendable`: only ever
+/// mutated/read on the main actor in these tests, mirroring
+/// `RecordingKeychainGateway`'s existing pattern in this file.
+private final class ProfileStoreBox: @unchecked Sendable {
+    var store: ProfileStore?
+    var profileId: UUID?
+}
+
+/// A `CLICredentialReading` double that removes the profile from the store
+/// (via `ProfileStoreBox`) the instant its `.allow` read resolves —
+/// standing in for the profile being deleted while the user was still
+/// looking at the real OS consent dialog.
+private final class ProfileRemovingCLICredentialReader: CLICredentialReading, @unchecked Sendable {
+    private let box: ProfileStoreBox
+    private let result: Result<CLICredentialReader.SyncResult, Error>
+
+    init(box: ProfileStoreBox, result: Result<CLICredentialReader.SyncResult, Error>) {
+        self.box = box
+        self.result = result
+    }
+
+    func read() async throws -> CLICredentialReader.SyncResult { try result.get() }
+
+    func readFresh(interaction: KeychainInteraction) async throws -> CLICredentialReader.SyncResult {
+        if let store = box.store, let id = box.profileId {
+            try? await store.remove(id: id)
+        }
+        return try result.get()
+    }
+}
+
+// MARK: - Finding 4 fixtures
+
+/// Orders the reentrancy test deterministically: the CLI read parks until
+/// released, letting the test call `grantKeychainAccess()` a second time
+/// while the first attempt is still in flight, then release and confirm
+/// only one read actually happened. Mirrors the `TransportGate` pattern in
+/// `MenuBarViewModelRefreshGateTests`.
+private actor CLIReadGate {
+    private(set) var callCount = 0
+    private var released = false
+    private var parked: [CheckedContinuation<Void, Never>] = []
+
+    func register() -> Int {
+        callCount += 1
+        return callCount
+    }
+
+    func parkUntilReleased() async {
+        if released { return }
+        await withCheckedContinuation { parked.append($0) }
+    }
+
+    func release() {
+        released = true
+        parked.forEach { $0.resume() }
+        parked.removeAll()
+    }
+}
+
+/// A `CLICredentialReading` double whose `.allow` read parks on `gate`
+/// until the test releases it — the reentrancy test's way of holding a
+/// Grant attempt "in flight" for long enough to prove a concurrent second
+/// call doesn't queue another read.
+private final class GatedSpyCLICredentialReader: CLICredentialReading, @unchecked Sendable {
+    private let gate: CLIReadGate
+    private let result: Result<CLICredentialReader.SyncResult, Error>
+
+    init(gate: CLIReadGate, result: Result<CLICredentialReader.SyncResult, Error>) {
+        self.gate = gate
+        self.result = result
+    }
+
+    func read() async throws -> CLICredentialReader.SyncResult { try result.get() }
+
+    func readFresh(interaction: KeychainInteraction) async throws -> CLICredentialReader.SyncResult {
+        _ = await gate.register()
+        await gate.parkUntilReleased()
         return try result.get()
     }
 }

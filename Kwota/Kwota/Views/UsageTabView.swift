@@ -140,9 +140,12 @@ struct UsageTabView: View {
                     .padding(.bottom, 10)
             }
         case .keychainAccessNeeded:
-            KeychainAccessBanner {
-                Task { @MainActor in await vm.grantKeychainAccess() }
-            }
+            KeychainAccessBanner(
+                onGrant: {
+                    Task { @MainActor in await vm.grantKeychainAccess() }
+                },
+                isBusy: vm.isGrantingKeychainAccess
+            )
             .padding(.bottom, 10)
         case .refreshing:
             // Keep the rate-limit banner mounted (with a spinner in the

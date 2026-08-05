@@ -12,6 +12,12 @@ import SwiftUI
 
 struct KeychainAccessBanner: View {
     let onGrant: () -> Void
+    /// True while a Grant attempt is in flight (mirrors
+    /// `RateLimitBanner.isProbing`). The underlying probe can wait up to two
+    /// minutes on a real consent dialog, so this disables the button and
+    /// shows a spinner instead of allowing a second tap to queue another
+    /// up-to-120s probe behind the first.
+    var isBusy: Bool = false
 
     var body: some View {
         KwotaInlineAlert(
@@ -20,7 +26,8 @@ struct KeychainAccessBanner: View {
             title: "Keychain access needed",
             detail: "Kwota needs your approval to read the Claude Code credential. Showing the last known figures until then.",
             actionTitle: "Grant",
-            onAction: onGrant
+            onAction: onGrant,
+            isActionBusy: isBusy
         )
     }
 }
