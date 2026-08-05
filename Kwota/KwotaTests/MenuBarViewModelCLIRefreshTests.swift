@@ -35,7 +35,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
     }
 
     override func tearDown() async throws {
-        try? keychain.deleteAll()
+        try? await keychain.deleteAll()
         try await super.tearDown()
     }
 
@@ -193,7 +193,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         )
     }
 
-    private func seedCLIProfile(accessToken: String) throws -> Profile {
+    private func seedCLIProfile(accessToken: String) async throws -> Profile {
         let profile = Profile(name: "CLI", authMethod: .cliSync)
         let cred = Credential.cliToken(
             accessToken: accessToken,
@@ -202,7 +202,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
             // 401 → forceRefresh branch is what the test exercises.
             expiresAt: Date().addingTimeInterval(3600)
         )
-        try keychain.write(cred, for: profile.id)
+        try await keychain.write(cred, for: profile.id)
         try profileStore.add(profile)
         try profileStore.setActive(id: profile.id)
         return profile
@@ -211,7 +211,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
     // MARK: - Tests
 
     func test401ThenForceRefreshRotates_RetriesAndAuthenticates() async throws {
-        let profile = try seedCLIProfile(accessToken: "old")
+        let profile = try await seedCLIProfile(accessToken: "old")
 
         let transport = RecordingTransport(
             rejectTokens: ["old"],
@@ -266,7 +266,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
 
         // Store now holds the rotated credential so subsequent ticks start
         // from the fresh token (forceRefresh wrote it back).
-        let persisted = try keychain.read(for: profile.id)
+        let persisted = try await keychain.read(for: profile.id)
         guard case .cliToken(let access, _, _)? = persisted else {
             return XCTFail("expected cliToken in store after rotation")
         }
@@ -274,7 +274,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
     }
 
     func test401AndCLINotRotated_SkipsRetryAndSurfacesExpired() async throws {
-        _ = try seedCLIProfile(accessToken: "stuck")
+        _ = try await seedCLIProfile(accessToken: "stuck")
 
         let transport = RecordingTransport(rejectTokens: ["stuck"], okHeaders: [:])
         let api = ClaudeAPIClient(transport: { req in transport.handle(req) })
@@ -330,7 +330,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
     }
 
     func test401AndForceRefreshReadFails_SurfacesExpired() async throws {
-        _ = try seedCLIProfile(accessToken: "old")
+        _ = try await seedCLIProfile(accessToken: "old")
 
         let transport = RecordingTransport(rejectTokens: ["old"], okHeaders: [:])
         let api = ClaudeAPIClient(transport: { req in transport.handle(req) })
@@ -374,7 +374,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
     }
 
     func test401ThenRetryAlsoFails_SurfacesExpired() async throws {
-        _ = try seedCLIProfile(accessToken: "old")
+        _ = try await seedCLIProfile(accessToken: "old")
 
         // Reject every token — second call after rotation also 401's.
         let transport = RecordingTransport(rejectTokens: ["old", "new"], okHeaders: [:])
@@ -475,7 +475,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
             refreshToken: "r",
             expiresAt: Date().addingTimeInterval(3600)
         )
-        try vm.addProfile(name: "Hau", credential: cred, authMethod: .cliSync)
+        try await vm.addProfile(name: "Hau", credential: cred, authMethod: .cliSync)
 
         // Wait for refresh to settle — same gate the other test uses.
         await waitForAuthState(vm, .authenticated)
@@ -494,7 +494,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
     // .authenticated — otherwise UsageTabView's loading-placeholder
     // branch keeps the "Refreshing…" spinner up indefinitely.
     func testCLIRefresh200CommitsSnapshotToVM() async throws {
-        _ = try seedCLIProfile(accessToken: "ok")
+        _ = try await seedCLIProfile(accessToken: "ok")
 
         // Real OAuth-usage payload shape: top-level five_hour, seven_day,
         // plus the per-model and extra_usage blocks the decoder accepts.
@@ -592,7 +592,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
     }
 
     func testMalformedUsageResponseClearsUsageLoadingPlaceholder() async throws {
-        _ = try seedCLIProfile(accessToken: "bad-json")
+        _ = try await seedCLIProfile(accessToken: "bad-json")
 
         let api = ClaudeAPIClient(transport: { req in
             let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!

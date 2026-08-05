@@ -25,7 +25,7 @@ final class CodexAutoProfileCoordinatorTests: XCTestCase {
     }
 
     override func tearDown() async throws {
-        try? keychain.deleteAll()
+        try? await keychain.deleteAll()
         try await super.tearDown()
     }
 
@@ -42,7 +42,27 @@ final class CodexAutoProfileCoordinatorTests: XCTestCase {
         )
     }
 
-    func test_newLogin_createsActiveCodexProfile() throws {
+    /// `CodexAutoProfileCoordinator.seedKeychain` writes from a fire-and-forget
+    /// `Task`, so a keychain assertion right after a synchronous `emit` would
+    /// race it. Same bounded-poll shape as `AutoProfileCoordinatorTests.
+    /// waitForStoredCredential` — returns as soon as a credential is present,
+    /// or nil after `timeout`.
+    private func waitForStoredCredential(
+        _ keychain: KeychainCredentialStore,
+        id: UUID,
+        timeout: TimeInterval = 5.0
+    ) async -> Credential? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let stored = try? await keychain.read(for: id) {
+                return stored
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        }
+        return try? await keychain.read(for: id)
+    }
+
+    func test_newLogin_createsActiveCodexProfile() async throws {
         let watcher = StubCodexAccountWatcher()
         let coord = makeCoord(watcher: watcher)
         coord.start()
@@ -56,7 +76,7 @@ final class CodexAutoProfileCoordinatorTests: XCTestCase {
         XCTAssertEqual(profileStore.activeProfileId, added?.id)
 
         // Keychain must be seeded on new login.
-        let stored = try keychain.read(for: added!.id)
+        let stored = await waitForStoredCredential(keychain, id: added!.id)
         XCTAssertNotNil(stored, "Codex login must seed a Keychain credential")
         if case .cliToken(let access, _, _) = stored {
             XCTAssertFalse(access.isEmpty, "seeded access token must not be empty")

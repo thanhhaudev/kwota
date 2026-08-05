@@ -26,7 +26,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
     }
 
     override func tearDown() async throws {
-        try? keychain.deleteAll()
+        try? await keychain.deleteAll()
         try await super.tearDown()
     }
 
@@ -127,7 +127,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
         )
     }
 
-    private func seedProfile(plan: String? = "Max", status: String? = nil) throws -> Profile {
+    private func seedProfile(plan: String? = "Max", status: String? = nil) async throws -> Profile {
         let p = Profile(
             name: "Hau", authMethod: .cliSync,
             subscriptionPlan: plan,
@@ -135,7 +135,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
             subscriptionStatus: status
         )
         try profileStore.add(p)
-        try keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
+        try await keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
                                      expiresAt: .distantFuture), for: p.id)
         return p
     }
@@ -156,7 +156,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
     // MARK: - Cases
 
     func test_refreshProfileMetadata_returnsUpdated_whenFieldsChange() async throws {
-        let p = try seedProfile(plan: "Max")
+        let p = try await seedProfile(plan: "Max")
         let stub = StubOAuthProfileFetcher()
         stub.outcome = .success(makeResponse(planLabel: "Max 20x"))
         let vm = makeVM(stubFetcher: stub)
@@ -171,7 +171,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
         // Seed a profile whose persisted fields exactly match what the response
         // will return, including hasExtraUsageEnabled (nil vs false diverges)
         // and organizationId (response carries orgUuid: "org-1").
-        var p = try seedProfile(plan: "Max 20x", status: "active")
+        var p = try await seedProfile(plan: "Max 20x", status: "active")
         // Patch hasExtraUsageEnabled and organizationId so apply() sees no diff.
         p.hasExtraUsageEnabled = false
         p.organizationId = "org-1"
@@ -185,7 +185,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
     }
 
     func test_refreshProfileMetadata_returnsUnauthorized_on401() async throws {
-        let p = try seedProfile()
+        let p = try await seedProfile()
         let stub = StubOAuthProfileFetcher()
         stub.outcome = .failure(ClaudeAPIClient.APIError.unauthorized)
         let vm = makeVM(stubFetcher: stub)
@@ -195,7 +195,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
     }
 
     func test_refreshProfileMetadata_returnsRateLimited_withRetryAfter() async throws {
-        let p = try seedProfile()
+        let p = try await seedProfile()
         let stub = StubOAuthProfileFetcher()
         stub.outcome = .failure(ClaudeAPIClient.APIError.rateLimited(retryAfter: 42))
         let vm = makeVM(stubFetcher: stub)
@@ -205,7 +205,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
     }
 
     func test_refreshProfileMetadata_returnsOffline_onURLErrorNotConnected() async throws {
-        let p = try seedProfile()
+        let p = try await seedProfile()
         let stub = StubOAuthProfileFetcher()
         stub.outcome = .failure(URLError(.notConnectedToInternet))
         let vm = makeVM(stubFetcher: stub)
@@ -215,7 +215,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
     }
 
     func test_refreshProfileMetadata_returnsOtherError_onUnknownThrow() async throws {
-        let p = try seedProfile()
+        let p = try await seedProfile()
         let stub = StubOAuthProfileFetcher()
         let oddError = NSError(domain: "Test", code: 99, userInfo: [NSLocalizedDescriptionKey: "boom"])
         stub.outcome = .failure(oddError)
@@ -261,7 +261,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
             let p = Profile(name: "Gx", authMethod: .cliSync,
                             providerID: .codex, email: "g@x.com")
             try profileStore.add(p)
-            try keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
+            try await keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
                                          expiresAt: .distantFuture), for: p.id)
             let stub = StubRefreshProvider(id: .codex, outcome: outcome)
             let registry = ProviderRegistry()
@@ -270,7 +270,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
 
             let result = await vm.refreshProfileMetadata(for: p.id)
             XCTAssertEqual(result, expected, "outcome \(outcome)")
-            try? profileStore.remove(id: p.id)
+            try? await profileStore.remove(id: p.id)
         }
     }
 
@@ -283,7 +283,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
             email: "h@x.com"
         )
         try profileStore.add(p)
-        try keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
+        try await keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
                                      expiresAt: .distantFuture), for: p.id)
 
         let stub = StubOAuthProfileFetcher()
@@ -323,7 +323,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
         let p = Profile(name: "Hau", authMethod: .cliSync,
                         providerID: .claude, email: "h@x.com")
         try profileStore.add(p)
-        try keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
+        try await keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
                                      expiresAt: .distantFuture), for: p.id)
         let provider = CountingProvider(id: .claude, separatePlan: true)
         let registry = ProviderRegistry()
@@ -349,7 +349,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
         let p = Profile(name: "Hau", authMethod: .cliSync,
                         providerID: .claude, email: "h@x.com")
         try profileStore.add(p)
-        try keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
+        try await keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
                                      expiresAt: .distantFuture), for: p.id)
         let provider = CountingProvider(id: .claude, separatePlan: true)
         let registry = ProviderRegistry()
@@ -378,7 +378,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
         let p = Profile(name: "Hau", authMethod: .cliSync,
                         providerID: .claude, email: "h@x.com")
         try profileStore.add(p)
-        try keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
+        try await keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
                                      expiresAt: .distantFuture), for: p.id)
         let provider = CountingProvider(id: .claude, separatePlan: true)
         let registry = ProviderRegistry()
@@ -403,7 +403,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
     /// round-trip — only `.manual` re-probes. Stale plan persists until the
     /// user (or a CLI account change) triggers a refresh.
     func test_automaticRefresh_doesNotReprobePlanMetadata() async throws {
-        let p = try seedProfile(plan: "Max 20x")
+        let p = try await seedProfile(plan: "Max 20x")
         let stub = StubOAuthProfileFetcher()
         stub.outcome = .success(makeResponse(planLabel: "Max 5x"))
         let vm = makeVM(stubFetcher: stub)
@@ -430,7 +430,7 @@ final class MenuBarViewModelRefreshProfileTests: XCTestCase {
         let p = Profile(name: "Gx", authMethod: .cliSync,
                         providerID: .codex, email: "g@x.com")
         try profileStore.add(p)
-        try keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
+        try await keychain.write(.cliToken(accessToken: "T", refreshToken: "r",
                                      expiresAt: .distantFuture), for: p.id)
         let provider = CountingProvider(id: .codex)
         let registry = ProviderRegistry()

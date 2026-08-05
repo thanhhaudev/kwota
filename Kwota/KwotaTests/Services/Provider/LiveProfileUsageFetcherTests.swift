@@ -246,7 +246,7 @@ final class LiveProfileUsageFetcherTests: XCTestCase {
 @MainActor
 private final class InMemoryCredentialStore: CredentialReading {
     private var store: [UUID: Credential] = [:]
-    func read(for id: UUID) throws -> Credential? { store[id] }
+    func read(for id: UUID, interaction: KeychainInteraction) async throws -> Credential? { store[id] }
     func write(_ credential: Credential, for id: UUID) throws { store[id] = credential }
 }
 

@@ -1396,6 +1396,11 @@ final class MenuBarViewModel {
 
     /// Creates a new profile, writes its credential to Keychain, and switches
     /// the active profile to the new one. Throws if persistence fails.
+    ///
+    /// `async` only because `credentialStore.write` is (Task 3, keychain-off-
+    /// main-actor work). This function has no production caller yet — the
+    /// add-profile UI wiring is Task 4's job — so this signature change is a
+    /// compiler-forced minimum, not the scoped async-ification Task 4 does.
     func addProfile(
         name: String,
         credential: Credential,
@@ -1403,7 +1408,7 @@ final class MenuBarViewModel {
         subscriptionPlan: String? = nil,
         subscriptionCreatedAt: Date? = nil,
         email: String? = nil
-    ) throws {
+    ) async throws {
         let profile = Profile(
             name: name,
             authMethod: authMethod,
@@ -1411,7 +1416,7 @@ final class MenuBarViewModel {
             subscriptionCreatedAt: subscriptionCreatedAt,
             email: email
         )
-        try credentialStore.write(credential, for: profile.id)
+        try await credentialStore.write(credential, for: profile.id)
         try profileStore.add(profile)
         try profileStore.setActive(id: profile.id)
     }
@@ -1443,6 +1448,11 @@ final class MenuBarViewModel {
     /// `email` / `organizationId` are backfilled from the supplied values.
     /// `sessionKeyExpiresAt` is set when `newAuthMethod == .sessionKey` and
     /// cleared otherwise. The profile is set active.
+    ///
+    /// `async` only because `credentialStore.write` is (Task 3, keychain-off-
+    /// main-actor work). This function has no production caller yet — the
+    /// re-auth UI wiring is Task 4's job — so this signature change is a
+    /// compiler-forced minimum, not the scoped async-ification Task 4 does.
     @discardableResult
     func replaceCredentials(
         profileId: UUID,
@@ -1453,7 +1463,7 @@ final class MenuBarViewModel {
         organizationId: String? = nil,
         subscriptionPlan: String? = nil,
         subscriptionCreatedAt: Date? = nil
-    ) throws -> Profile {
+    ) async throws -> Profile {
         guard let existing = profileStore.profiles.first(where: { $0.id == profileId }) else {
             throw NSError(domain: "MenuBarViewModel", code: 404, userInfo: [
                 NSLocalizedDescriptionKey: "Profile not found"
@@ -1480,7 +1490,7 @@ final class MenuBarViewModel {
         if let subscriptionCreatedAt {
             updated.subscriptionCreatedAt = subscriptionCreatedAt
         }
-        try credentialStore.write(newCredential, for: updated.id)
+        try await credentialStore.write(newCredential, for: updated.id)
         try profileStore.updateProfile(updated)
         try profileStore.setActive(id: updated.id)
         // Force a refresh even when setActive didn't change the active id
@@ -1525,7 +1535,7 @@ final class MenuBarViewModel {
         }
         let credential: Credential
         do {
-            guard let stored = try credentialStore.read(for: profileId) else {
+            guard let stored = try await credentialStore.read(for: profileId) else {
                 return .otherError("No credential stored for this profile")
             }
             credential = stored
@@ -1987,7 +1997,7 @@ final class MenuBarViewModel {
         }
 
         do {
-            guard let credential = try credentialStore.read(for: profile.id) else {
+            guard let credential = try await credentialStore.read(for: profile.id) else {
                 if canCommitToUI() {
                     authState = .expired
                     isSwitchingProfile = false

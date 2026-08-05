@@ -46,16 +46,16 @@ struct ResetEverythingCard: View {
         .sheet(isPresented: $secondAlertShown) {
             ResetConfirmSheet(resetField: $resetField) {
                 secondAlertShown = false
-                performReset()
+                Task { await performReset() }
             } onCancel: {
                 secondAlertShown = false
             }
         }
     }
 
-    private func performReset() {
+    private func performReset() async {
         do {
-            try resetService.wipeAll(keychain: vm.credentialStore)
+            try await resetService.wipeAll(keychain: vm.credentialStore)
             NSApp.terminate(nil)
         } catch let error as DataResetService.WipeError {
             AppLog.shared.log("Reset failed: \(error)", level: .error)

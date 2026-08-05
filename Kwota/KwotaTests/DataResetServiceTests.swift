@@ -34,7 +34,7 @@ final class DataResetServiceTests: XCTestCase {
     /// "Keychain failure" branches without touching a real keychain.
     private struct ThrowingKeychain: KeychainWiping {
         let error: Error
-        func deleteAll() throws { throw error }
+        func deleteAll() async throws { throw error }
     }
 
     private enum StubError: Error, Equatable {
@@ -43,7 +43,7 @@ final class DataResetServiceTests: XCTestCase {
 
     // MARK: - Updated existing tests
 
-    func test_wipeAll_clearsCredentialsForKnownProfiles() throws {
+    func test_wipeAll_clearsCredentialsForKnownProfiles() async throws {
         let tmp = try makeTempDir()
         let keychain = makeKeychain()
         let store = makeProfileStore(in: tmp, keychain: keychain)
@@ -57,24 +57,28 @@ final class DataResetServiceTests: XCTestCase {
         try store.add(Profile(id: idB, name: "B", authMethod: .sessionKey))
         // Seed credentials directly so we are testing keychain effect, not
         // ProfileStore.add's incidental writes.
-        try keychain.write(.sessionKey(value: "k-A"), for: idA)
-        try keychain.write(.sessionKey(value: "k-B"), for: idB)
-        XCTAssertNotNil(try keychain.read(for: idA))
-        XCTAssertNotNil(try keychain.read(for: idB))
+        try await keychain.write(.sessionKey(value: "k-A"), for: idA)
+        try await keychain.write(.sessionKey(value: "k-B"), for: idB)
+        let seededA = try await keychain.read(for: idA)
+        let seededB = try await keychain.read(for: idB)
+        XCTAssertNotNil(seededA)
+        XCTAssertNotNil(seededB)
 
         let svc = DataResetService()
-        try svc.wipeAll(
+        try await svc.wipeAll(
             keychain: keychain,
             appSupportPath: tmp,
             userDefaults: defaults,
             bundleIdentifier: suiteName
         )
 
-        XCTAssertNil(try keychain.read(for: idA))
-        XCTAssertNil(try keychain.read(for: idB))
+        let clearedA = try await keychain.read(for: idA)
+        let clearedB = try await keychain.read(for: idB)
+        XCTAssertNil(clearedA)
+        XCTAssertNil(clearedB)
     }
 
-    func test_wipeAll_clearsInjectedUserDefaultsForGivenDomain() throws {
+    func test_wipeAll_clearsInjectedUserDefaultsForGivenDomain() async throws {
         let suiteName = "kwota.tests.reset.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -85,7 +89,7 @@ final class DataResetServiceTests: XCTestCase {
 
         let tmp = try makeTempDir()
         let svc = DataResetService()
-        try svc.wipeAll(
+        try await svc.wipeAll(
             keychain: makeKeychain(),
             appSupportPath: tmp,
             userDefaults: defaults,
@@ -99,50 +103,53 @@ final class DataResetServiceTests: XCTestCase {
 
     /// Regression for the headline bug: a credential whose profile entry was
     /// lost (corrupt profiles.json, stale entry) must still be erased by reset.
-    func test_wipeAll_clearsOrphanCredentialsNotInStore() throws {
+    func test_wipeAll_clearsOrphanCredentialsNotInStore() async throws {
         let tmp = try makeTempDir()
         let keychain = makeKeychain()
         let orphanID = UUID()
-        try keychain.write(.sessionKey(value: "orphan"), for: orphanID)
-        XCTAssertNotNil(try keychain.read(for: orphanID))
+        try await keychain.write(.sessionKey(value: "orphan"), for: orphanID)
+        let seeded = try await keychain.read(for: orphanID)
+        XCTAssertNotNil(seeded)
 
         let suiteName = "kwota.tests.reset.orphan.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let svc = DataResetService()
-        try svc.wipeAll(
+        try await svc.wipeAll(
             keychain: keychain,
             appSupportPath: tmp,
             userDefaults: defaults,
             bundleIdentifier: suiteName
         )
 
-        XCTAssertNil(try keychain.read(for: orphanID))
+        let cleared = try await keychain.read(for: orphanID)
+        XCTAssertNil(cleared)
     }
 
-    func test_wipeAll_throwsWhenKeychainFails() throws {
+    func test_wipeAll_throwsWhenKeychainFails() async throws {
         let tmp = try makeTempDir()
         let suiteName = "kwota.tests.reset.throw.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let svc = DataResetService()
-        XCTAssertThrowsError(
-            try svc.wipeAll(
+        do {
+            try await svc.wipeAll(
                 keychain: ThrowingKeychain(error: StubError.forced),
                 appSupportPath: tmp,
                 userDefaults: defaults,
                 bundleIdentifier: suiteName
             )
-        ) { error in
-            guard case DataResetService.WipeError.keychainFailed = error else {
-                return XCTFail("expected keychainFailed, got \(error)")
-            }
+            XCTFail("expected keychainFailed")
+        } catch DataResetService.WipeError.keychainFailed {
+            // expected
+        } catch {
+            XCTFail("expected keychainFailed, got \(error)")
         }
     }
 
-    func test_wipeAll_throwsAppSupportFailed_whenRemoveFails() throws {
+    func test_wipeAll_throwsAppSupportFailed_whenRemoveFails() async throws {
         let tmp = try makeTempDir()
         let appSupport = tmp.appendingPathComponent("app-support")
         try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
@@ -171,15 +178,18 @@ final class DataResetServiceTests: XCTestCase {
         let keychain = makeKeychain()
         let svc = DataResetService()
 
-        XCTAssertThrowsError(try svc.wipeAll(
-            keychain: keychain,
-            appSupportPath: appSupport,
-            userDefaults: defaults,
-            bundleIdentifier: suiteName
-        )) { error in
-            guard case DataResetService.WipeError.appSupportFailed = error else {
-                return XCTFail("expected appSupportFailed, got \(error)")
-            }
+        do {
+            try await svc.wipeAll(
+                keychain: keychain,
+                appSupportPath: appSupport,
+                userDefaults: defaults,
+                bundleIdentifier: suiteName
+            )
+            XCTFail("expected appSupportFailed")
+        } catch DataResetService.WipeError.appSupportFailed {
+            // expected
+        } catch {
+            XCTFail("expected appSupportFailed, got \(error)")
         }
 
         // UserDefaults must be cleared even though step 2 failed.
@@ -192,7 +202,7 @@ final class DataResetServiceTests: XCTestCase {
     /// Ordering invariant: a Keychain failure must abort BEFORE the
     /// destructive Application Support / UserDefaults steps run, so the user
     /// can retry without having lost their data.
-    func test_wipeAll_doesNotTouchAppSupportWhenKeychainFails() throws {
+    func test_wipeAll_doesNotTouchAppSupportWhenKeychainFails() async throws {
         let tmp = try makeTempDir()
         let sentinel = tmp.appendingPathComponent("sentinel.txt")
         try "still here".write(to: sentinel, atomically: true, encoding: .utf8)
@@ -203,14 +213,17 @@ final class DataResetServiceTests: XCTestCase {
         defaults.set("still here", forKey: "kwota.tests.orderProbe")
 
         let svc = DataResetService()
-        XCTAssertThrowsError(
-            try svc.wipeAll(
+        do {
+            try await svc.wipeAll(
                 keychain: ThrowingKeychain(error: StubError.forced),
                 appSupportPath: tmp,
                 userDefaults: defaults,
                 bundleIdentifier: suiteName
             )
-        )
+            XCTFail("expected wipeAll to throw")
+        } catch {
+            // expected
+        }
 
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: sentinel.path),
@@ -221,32 +234,33 @@ final class DataResetServiceTests: XCTestCase {
     }
 
     /// Success path ordering: when keychain wipe succeeds, AppSupport is gone too.
-    func test_wipeAll_clearsKeychainAndAppSupportOnSuccess() throws {
+    func test_wipeAll_clearsKeychainAndAppSupportOnSuccess() async throws {
         let tmp = try makeTempDir()
         let sentinel = tmp.appendingPathComponent("sentinel.txt")
         try "doomed".write(to: sentinel, atomically: true, encoding: .utf8)
 
         let keychain = makeKeychain()
         let id = UUID()
-        try keychain.write(.sessionKey(value: "doomed"), for: id)
+        try await keychain.write(.sessionKey(value: "doomed"), for: id)
 
         let suiteName = "kwota.tests.reset.success.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let svc = DataResetService()
-        try svc.wipeAll(
+        try await svc.wipeAll(
             keychain: keychain,
             appSupportPath: tmp,
             userDefaults: defaults,
             bundleIdentifier: suiteName
         )
 
-        XCTAssertNil(try keychain.read(for: id))
+        let cleared = try await keychain.read(for: id)
+        XCTAssertNil(cleared)
         XCTAssertFalse(FileManager.default.fileExists(atPath: sentinel.path))
     }
 
-    func test_wipeAll_removesWatchdogEvidenceFile() throws {
+    func test_wipeAll_removesWatchdogEvidenceFile() async throws {
         let tmp = try makeTempDir()
         let keychain = makeKeychain()
         let events = tmp.appendingPathComponent("awake-watchdog-events.json")
@@ -258,7 +272,7 @@ final class DataResetServiceTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let svc = DataResetService()
-        try svc.wipeAll(
+        try await svc.wipeAll(
             keychain: keychain,
             appSupportPath: tmp,
             userDefaults: defaults,

@@ -87,7 +87,7 @@ final class MenuBarViewModelAgentProcessTests: XCTestCase {
     }
 
     override func tearDown() async throws {
-        try? keychain.deleteAll()
+        try? await keychain.deleteAll()
         try await super.tearDown()
     }
 

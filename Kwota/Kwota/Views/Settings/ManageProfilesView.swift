@@ -62,27 +62,29 @@ struct ManageProfilesView: View {
         .sheet(item: $selectedDetail) { p in
             ProfileDetailView(profile: p, vm: vm) {
                 guard p.kind == .archived else { return }
-                do {
-                    try vm.profileStore.remove(id: p.id)
-                } catch let error as ProfileStore.RemoveError {
-                    switch error {
-                    case .sideStateLingered(_, let keychainError, let directoryError):
-                        let parts: [String] = [
-                            keychainError.map { "credential: \($0.localizedDescription)" },
-                            directoryError.map { "history: \($0.localizedDescription)" }
-                        ].compactMap { $0 }
+                Task { @MainActor in
+                    do {
+                        try await vm.profileStore.remove(id: p.id)
+                    } catch let error as ProfileStore.RemoveError {
+                        switch error {
+                        case .sideStateLingered(_, let keychainError, let directoryError):
+                            let parts: [String] = [
+                                keychainError.map { "credential: \($0.localizedDescription)" },
+                                directoryError.map { "history: \($0.localizedDescription)" }
+                            ].compactMap { $0 }
+                            removeError = RemoveErrorAlert(
+                                profileName: p.name,
+                                message: parts.joined(separator: "; ")
+                            )
+                        }
+                    } catch {
                         removeError = RemoveErrorAlert(
                             profileName: p.name,
-                            message: parts.joined(separator: "; ")
+                            message: error.localizedDescription
                         )
                     }
-                } catch {
-                    removeError = RemoveErrorAlert(
-                        profileName: p.name,
-                        message: error.localizedDescription
-                    )
+                    selectedDetail = nil
                 }
-                selectedDetail = nil
             }
         }
         .alert(item: $removeError) { err in

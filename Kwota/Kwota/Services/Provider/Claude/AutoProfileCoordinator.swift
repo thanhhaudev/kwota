@@ -204,9 +204,10 @@ final class AutoProfileCoordinator {
     /// read the CLI is silently skipped — the next emit will retry, and the
     /// API path's 401 forceRefresh recovers if Kwota is left on a stale token.
     ///
-    /// Returns the fire-and-forget import task when one was started, so the
-    /// `/api/oauth/profile` probe can wait for the credential it needs; `nil`
-    /// when the stored token already covered us and no import ran.
+    /// Always returns the fire-and-forget task so the `/api/oauth/profile`
+    /// probe (`probePlanFromProfile`) can wait for it — even on the
+    /// already-covered path, where the task's own first step is the cheap
+    /// "nothing to import" check below and it returns almost immediately.
     ///
     /// `handle(_:)` stays synchronous, which is why the import is a detached
     /// `Task` rather than an `await`: `handle` runs from `watcher.onChange`, a
@@ -219,27 +220,29 @@ final class AutoProfileCoordinator {
     /// suspension is caught rather than written through — see
     /// `stillSignedIn(as:)`, which also documents the window that remains.
     private func seedOrUpdateKeychain(for id: UUID, signedInAs identity: CLIIdentity) -> Task<Void, Never>? {
-        // If Kwota already holds a non-expired CLI token for this profile,
-        // there is nothing to import — skip the cross-app Keychain read that
-        // would otherwise prompt the user (notably on the startup baseline
-        // emit). The near-expiry refresh (CLITokenRefresher) and 401
-        // forceRefresh paths still read Claude Code's Keychain on demand when
-        // a token is actually stale.
-        //
-        // Kept on the synchronous path on purpose: this reads Kwota's own
-        // Keychain item, which never raises the cross-app consent dialog that
-        // F-003 hung on, and short-circuiting here means the common emit spawns
-        // no task at all.
-        if let stored = try? keychain.read(for: id),
-           case .cliToken(_, _, let expiresAt) = stored,
-           expiresAt.timeIntervalSinceNow > 60 {
-            return nil
-        }
         // Fire-and-forget on purpose. Every step here already tolerates failure
         // (`try?`, nothing surfaced to the user), and the read below is the
         // cross-app probe that must never run on the main actor.
         return Task { [weak self] in
-            guard let self, let result = try? await self.credentialReader.read() else { return }
+            guard let self else { return }
+            // If Kwota already holds a non-expired CLI token for this profile,
+            // there is nothing to import — skip the cross-app Keychain read
+            // that would otherwise prompt the user (notably on the startup
+            // baseline emit). The near-expiry refresh (CLITokenRefresher) and
+            // 401 forceRefresh paths still read Claude Code's Keychain on
+            // demand when a token is actually stale.
+            //
+            // This is Kwota's own Keychain item, which never raises the
+            // cross-app consent dialog that F-003 hung on — but the read is
+            // still async now that KeychainCredentialStore is, so it runs as
+            // the task's first step rather than short-circuiting before the
+            // task is created.
+            if let stored = try? await self.keychain.read(for: id),
+               case .cliToken(_, _, let expiresAt) = stored,
+               expiresAt.timeIntervalSinceNow > 60 {
+                return
+            }
+            guard let result = try? await self.credentialReader.read() else { return }
             // Re-prove the identity across the await before writing anything.
             // `credentialReader.read()` reads the one shared
             // `Claude Code-credentials` Keychain item: it is scoped to no
@@ -263,11 +266,11 @@ final class AutoProfileCoordinator {
                 )
                 return
             }
-            if let stored = try? self.keychain.read(for: id),
+            if let stored = try? await self.keychain.read(for: id),
                self.accessTokensMatch(stored, result.credential) {
                 return
             }
-            try? self.keychain.write(result.credential, for: id)
+            try? await self.keychain.write(result.credential, for: id)
         }
     }
 
@@ -357,7 +360,7 @@ final class AutoProfileCoordinator {
             // supply a timeout-bounded reader; the init default is
             // `CachedCLICredentialReader` for exactly this reason.
             await seed?.value
-            guard let stored = try? self.keychain.read(for: profileId) else {
+            guard let stored = try? await self.keychain.read(for: profileId) else {
                 AppLog.shared.log(
                     "OAuthProfile: no keychain credential for \(profileId.uuidString.prefix(8)); skipping probe",
                     level: .info

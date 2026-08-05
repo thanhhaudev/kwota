@@ -27,7 +27,7 @@ import Foundation
 /// declare a protocol so tests can inject an in-memory variant.
 @MainActor
 protocol CredentialReading: AnyObject {
-    func read(for id: UUID) throws -> Credential?
+    func read(for id: UUID, interaction: KeychainInteraction) async throws -> Credential?
 }
 
 extension KeychainCredentialStore: CredentialReading {}
@@ -77,7 +77,7 @@ final class LiveProfileUsageFetcher: ProfileUsageFetching {
     }
 
     func fetch(profile: Profile) async throws -> ProviderUsageSummary {
-        guard let credential = try credentialStore.read(for: profile.id) else {
+        guard let credential = try await credentialStore.read(for: profile.id, interaction: .deny) else {
             throw ProfileUsageFetcherError.missingCredential(profileID: profile.id)
         }
         guard let provider = registry.provider(for: profile.providerID) else {

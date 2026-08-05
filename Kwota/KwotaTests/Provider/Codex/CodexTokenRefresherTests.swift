@@ -17,7 +17,7 @@ final class CodexTokenRefresherTests: XCTestCase {
     }
 
     override func tearDown() async throws {
-        try? keychain.deleteAll()
+        try? await keychain.deleteAll()
         try await super.tearDown()
     }
 
@@ -25,7 +25,7 @@ final class CodexTokenRefresherTests: XCTestCase {
         StubCodexAuthReader(token: accessToken)
     }
 
-    func test_freshen_returnsCurrent_whenAccessTokenHasHeadroom() throws {
+    func test_freshen_returnsCurrent_whenAccessTokenHasHeadroom() async throws {
         let now = Date()
         let current = Credential.cliToken(
             accessToken: "old",
@@ -37,7 +37,7 @@ final class CodexTokenRefresherTests: XCTestCase {
             store: keychain,
             now: { now }
         )
-        let result = try refresher.freshen(profileId: profileId, current: current)
+        let result = try await refresher.freshen(profileId: profileId, current: current)
         if case .cliToken(let access, _, _) = result {
             XCTAssertEqual(access, "old",
                            "Cheap-path: still-valid token must be returned unchanged, no disk read")
@@ -46,7 +46,7 @@ final class CodexTokenRefresherTests: XCTestCase {
         }
     }
 
-    func test_freshen_reReadsFromDisk_whenAccessTokenWithinMinLifetime() throws {
+    func test_freshen_reReadsFromDisk_whenAccessTokenWithinMinLifetime() async throws {
         let now = Date()
         let current = Credential.cliToken(
             accessToken: "old",
@@ -58,7 +58,7 @@ final class CodexTokenRefresherTests: XCTestCase {
             store: keychain,
             now: { now }
         )
-        let result = try refresher.freshen(profileId: profileId, current: current)
+        let result = try await refresher.freshen(profileId: profileId, current: current)
         if case .cliToken(let access, _, _) = result {
             XCTAssertEqual(access, "new-from-disk",
                            "Re-read path: when local expiry is near, return the rotated token from auth.json")
@@ -67,7 +67,7 @@ final class CodexTokenRefresherTests: XCTestCase {
         }
     }
 
-    func test_forceRefresh_returnsNil_whenAuthJsonHasSameToken() throws {
+    func test_forceRefresh_returnsNil_whenAuthJsonHasSameToken() async throws {
         let previous = Credential.cliToken(
             accessToken: "stuck",
             refreshToken: "r",
@@ -78,13 +78,14 @@ final class CodexTokenRefresherTests: XCTestCase {
             store: keychain,
             now: { Date() }
         )
+        let result = try await refresher.forceRefresh(profileId: profileId, previous: previous)
         XCTAssertNil(
-            try refresher.forceRefresh(profileId: profileId, previous: previous),
+            result,
             "When auth.json carries the same token as the failing previous, retrying would 401 again — return nil"
         )
     }
 
-    func test_forceRefresh_returnsRotatedToken_whenAuthJsonChanged() throws {
+    func test_forceRefresh_returnsRotatedToken_whenAuthJsonChanged() async throws {
         let previous = Credential.cliToken(
             accessToken: "expired",
             refreshToken: "r",
@@ -95,9 +96,8 @@ final class CodexTokenRefresherTests: XCTestCase {
             store: keychain,
             now: { Date() }
         )
-        let result = try XCTUnwrap(
-            try refresher.forceRefresh(profileId: profileId, previous: previous)
-        )
+        let refreshed = try await refresher.forceRefresh(profileId: profileId, previous: previous)
+        let result = try XCTUnwrap(refreshed)
         if case .cliToken(let access, _, _) = result {
             XCTAssertEqual(access, "rotated")
         } else {

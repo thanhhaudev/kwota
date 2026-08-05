@@ -725,7 +725,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
             accessToken: "T1", refreshToken: "r1",
             expiresAt: Date(timeIntervalSince1970: 0)   // stale → guard falls through, must re-import
         )
-        try kwotaKeychain.write(oldToken, for: profile.id)
+        try await kwotaKeychain.write(oldToken, for: profile.id)
 
         // Fake reader returns T2.
         let newToken = Credential.cliToken(
@@ -772,7 +772,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
             accessToken: "T1", refreshToken: "r1",
             expiresAt: Date(timeIntervalSince1970: 0)   // stale → guard falls through, reader matches, no write
         )
-        try kwotaKeychain.write(token, for: profile.id)
+        try await kwotaKeychain.write(token, for: profile.id)
 
         let reader = StubCredentialReader(stub: token)
         let watcher = FakeWatcher()
@@ -790,7 +790,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
 
         // Let the fire-and-forget import run before asserting it changed nothing.
         await settleSeedTask()
-        let restored = try kwotaKeychain.read(for: profile.id)
+        let restored = try await kwotaKeychain.read(for: profile.id)
         if case .cliToken(let access, _, _) = restored {
             XCTAssertEqual(access, "T1")
         } else {
@@ -819,7 +819,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
             accessToken: "A-TOKEN", refreshToken: "ra",
             expiresAt: Date(timeIntervalSince1970: 0)
         )
-        try kwotaKeychain.write(aToken, for: profileA.id)
+        try await kwotaKeychain.write(aToken, for: profileA.id)
 
         let watcher = FakeWatcher()
         // The read answers with account B's credential, because by the time it
@@ -845,7 +845,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                                  credentialFingerprint: "ff"))
 
         await settleSeedTask()
-        let stored = try kwotaKeychain.read(for: profileA.id)
+        let stored = try await kwotaKeychain.read(for: profileA.id)
         guard case .cliToken(let access, _, _) = stored else {
             return XCTFail("expected cliToken, got \(String(describing: stored))")
         }
@@ -875,7 +875,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                                email: "a@x.com", kind: .auto)
         try store.add(profileA)
         // Expired, so the short-circuit above the read does not apply.
-        try kwotaKeychain.write(
+        try await kwotaKeychain.write(
             .cliToken(accessToken: "A-TOKEN", refreshToken: "ra",
                       expiresAt: Date(timeIntervalSince1970: 0)),
             for: profileA.id
@@ -909,7 +909,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
             watcher.current?.email, "a@x.com",
             "the debounced signal must still be stale — otherwise this test is not testing the debounce gap"
         )
-        let stored = try kwotaKeychain.read(for: profileA.id)
+        let stored = try await kwotaKeychain.read(for: profileA.id)
         guard case .cliToken(let access, _, _) = stored else {
             return XCTFail("expected cliToken, got \(String(describing: stored))")
         }
@@ -966,7 +966,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                               providerID: .claude, organizationId: nil,
                               email: "a@x.com", kind: .auto)
         try store.add(profile)
-        try kwotaKeychain.write(
+        try await kwotaKeychain.write(
             .cliToken(accessToken: "OLD", refreshToken: "r",
                       expiresAt: Date(timeIntervalSince1970: 0)),
             for: profile.id
@@ -1019,7 +1019,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         let storedToken = Credential.cliToken(accessToken: "stored",
                                               refreshToken: "r",
                                               expiresAt: .distantFuture)
-        try kwotaKeychain.write(storedToken, for: profile.id)
+        try await kwotaKeychain.write(storedToken, for: profile.id)
 
         var readerCallCount = 0
         let reader = CLICredentialReader(
@@ -1175,7 +1175,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
     ) async -> Credential? {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if let stored = try? keychain.read(for: id) {
+            if let stored = try? await keychain.read(for: id) {
                 guard let accessToken else { return stored }
                 if case .cliToken(let access, _, _) = stored, access == accessToken {
                     return stored
@@ -1183,7 +1183,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
             }
             try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
         }
-        return try? keychain.read(for: id)
+        return try? await keychain.read(for: id)
     }
 
     /// Gives the fire-and-forget import task a chance to run before asserting
@@ -1217,7 +1217,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                               email: "h@x.com", kind: .auto,
                               ownershipBoundary: t0))
         let profileId = store.profiles[0].id
-        try kc.write(.cliToken(accessToken: "T", refreshToken: "r",
+        try await kc.write(.cliToken(accessToken: "T", refreshToken: "r",
                                expiresAt: .distantFuture), for: profileId)
         let stub = StubOAuthProfileFetcher()
         stub.outcome = .success(.init(
@@ -1251,7 +1251,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                               email: "h@x.com", kind: .auto,
                               ownershipBoundary: t0))
         let profileId = store.profiles[0].id
-        try kc.write(.cliToken(accessToken: "T", refreshToken: "r",
+        try await kc.write(.cliToken(accessToken: "T", refreshToken: "r",
                                expiresAt: .distantFuture), for: profileId)
         let stub = StubOAuthProfileFetcher()
         // Default outcome is .success with planLabel: nil.
@@ -1281,7 +1281,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                               email: "h@x.com", kind: .auto,
                               ownershipBoundary: t0))
         let profileId = store.profiles[0].id
-        try kc.write(.cliToken(accessToken: "T", refreshToken: "r",
+        try await kc.write(.cliToken(accessToken: "T", refreshToken: "r",
                                expiresAt: .distantFuture), for: profileId)
         let stub = StubOAuthProfileFetcher()
         stub.outcome = .failure(ClaudeAPIClient.APIError.unauthorized)

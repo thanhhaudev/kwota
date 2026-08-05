@@ -16,43 +16,47 @@ final class KeychainCredentialStoreTests: XCTestCase {
         store = KeychainCredentialStore(service: testService)
     }
 
-    override func tearDown() {
-        try? store.deleteAll()
-        super.tearDown()
+    override func tearDown() async throws {
+        try? await store.deleteAll()
+        try await super.tearDown()
     }
 
-    func testWriteThenReadRoundTripsSessionKey() throws {
+    func testWriteThenReadRoundTripsSessionKey() async throws {
         let id = UUID()
         let cred = Credential.sessionKey(value: "sk-abc123")
-        try store.write(cred, for: id)
-        let loaded = try store.read(for: id)
+        try await store.write(cred, for: id)
+        let loaded = try await store.read(for: id)
         XCTAssertEqual(loaded, cred)
     }
 
-    func testReadMissingReturnsNil() throws {
+    func testReadMissingReturnsNil() async throws {
         let id = UUID()
-        XCTAssertNil(try store.read(for: id))
+        let loaded = try await store.read(for: id)
+        XCTAssertNil(loaded)
     }
 
-    func testWriteOverwritesExisting() throws {
+    func testWriteOverwritesExisting() async throws {
         let id = UUID()
-        try store.write(.sessionKey(value: "old"), for: id)
-        try store.write(.sessionKey(value: "new"), for: id)
-        XCTAssertEqual(try store.read(for: id), .sessionKey(value: "new"))
+        try await store.write(.sessionKey(value: "old"), for: id)
+        try await store.write(.sessionKey(value: "new"), for: id)
+        let loaded = try await store.read(for: id)
+        XCTAssertEqual(loaded, .sessionKey(value: "new"))
     }
 
-    func testDeleteRemovesEntry() throws {
+    func testDeleteRemovesEntry() async throws {
         let id = UUID()
-        try store.write(.sessionKey(value: "x"), for: id)
-        try store.delete(for: id)
-        XCTAssertNil(try store.read(for: id))
+        try await store.write(.sessionKey(value: "x"), for: id)
+        try await store.delete(for: id)
+        let loaded = try await store.read(for: id)
+        XCTAssertNil(loaded)
     }
 
-    func testCLITokenRoundTrips() throws {
+    func testCLITokenRoundTrips() async throws {
         let id = UUID()
         let date = Date(timeIntervalSince1970: 1_800_000_000)
         let cred = Credential.cliToken(accessToken: "a", refreshToken: "r", expiresAt: date)
-        try store.write(cred, for: id)
-        XCTAssertEqual(try store.read(for: id), cred)
+        try await store.write(cred, for: id)
+        let loaded = try await store.read(for: id)
+        XCTAssertEqual(loaded, cred)
     }
 }

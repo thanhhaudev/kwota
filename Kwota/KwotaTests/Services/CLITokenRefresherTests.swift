@@ -21,7 +21,7 @@ final class CLITokenRefresherTests: XCTestCase {
     }
 
     override func tearDown() async throws {
-        try? store.deleteAll()
+        try? await store.deleteAll()
         try await super.tearDown()
     }
 
@@ -43,7 +43,7 @@ final class CLITokenRefresherTests: XCTestCase {
     func testFreshenIsNoOpWhenStoredTokenHasMoreThanMinLifetime() async throws {
         let id = UUID()
         let stored = cliToken(access: "stored", expiresAt: baseDate.addingTimeInterval(120))
-        try store.write(stored, for: id)
+        try await store.write(stored, for: id)
 
         var probeCalled = false
         let reader = CLICredentialReader(
@@ -63,7 +63,7 @@ final class CLITokenRefresherTests: XCTestCase {
     func testFreshenReadsCLIWhenTokenIsWithinMinLifetime() async throws {
         let id = UUID()
         let stored = cliToken(access: "stale", expiresAt: baseDate.addingTimeInterval(30))
-        try store.write(stored, for: id)
+        try await store.write(stored, for: id)
 
         let kcJSON = #"""
         {"accessToken":"fresh","refreshToken":"r","expiresAt":"2030-01-01T00:00:00Z"}
@@ -75,14 +75,14 @@ final class CLITokenRefresherTests: XCTestCase {
         XCTAssertEqual(access, "fresh")
 
         // Verify it was persisted to the store as well.
-        let persisted = try store.read(for: id)
+        let persisted = try await store.read(for: id)
         XCTAssertEqual(persisted, result)
     }
 
     func testFreshenReadsCLIWhenStoredTokenAlreadyExpired() async throws {
         let id = UUID()
         let stored = cliToken(access: "expired", expiresAt: baseDate.addingTimeInterval(-3600))
-        try store.write(stored, for: id)
+        try await store.write(stored, for: id)
 
         let kcJSON = #"""
         {"accessToken":"fresh","refreshToken":"r","expiresAt":"2030-01-01T00:00:00Z"}
@@ -100,7 +100,7 @@ final class CLITokenRefresherTests: XCTestCase {
         // the same access token (CLI hasn't rotated yet). Refresher must NOT
         // overwrite the store with a token that's already there.
         let stored = cliToken(access: "same", expiresAt: baseDate.addingTimeInterval(-10))
-        try store.write(stored, for: id)
+        try await store.write(stored, for: id)
 
         let kcJSON = #"""
         {"accessToken":"same","refreshToken":"r","expiresAt":"2025-01-01T00:00:00Z"}
@@ -114,7 +114,7 @@ final class CLITokenRefresherTests: XCTestCase {
     func testFreshenRethrowsWhenReaderFails() async throws {
         let id = UUID()
         let stored = cliToken(access: "stale", expiresAt: baseDate.addingTimeInterval(-10))
-        try store.write(stored, for: id)
+        try await store.write(stored, for: id)
 
         // Empty file path + nil keychain probe → reader.read() throws.
         let reader = CLICredentialReader(
@@ -154,7 +154,7 @@ final class CLITokenRefresherTests: XCTestCase {
         let id = UUID()
         // Stored token is fresh (would skip on freshen). forceRefresh must read anyway.
         let stored = cliToken(access: "stored", expiresAt: baseDate.addingTimeInterval(3600))
-        try store.write(stored, for: id)
+        try await store.write(stored, for: id)
 
         let kcJSON = #"""
         {"accessToken":"forced","refreshToken":"r","expiresAt":"2030-01-01T00:00:00Z"}
@@ -165,7 +165,7 @@ final class CLITokenRefresherTests: XCTestCase {
         guard case .cliToken(let access, _, _)? = result else { return XCTFail("expected cliToken") }
         XCTAssertEqual(access, "forced")
 
-        let persisted = try store.read(for: id)
+        let persisted = try await store.read(for: id)
         XCTAssertEqual(persisted, result)
     }
 
@@ -198,7 +198,8 @@ final class CLITokenRefresherTests: XCTestCase {
         XCTAssertNil(result, "Identical token after 401 → return nil instead of bouncing the same token back")
 
         // Store must remain untouched (we never wrote anything for this id).
-        XCTAssertNil(try store.read(for: id), "Store must not be written when CLI hasn't rotated")
+        let stored = try await store.read(for: id)
+        XCTAssertNil(stored, "Store must not be written when CLI hasn't rotated")
     }
 
     func testFreshenMemoizesReaderReadWithinCacheWindow() async throws {
@@ -208,7 +209,7 @@ final class CLITokenRefresherTests: XCTestCase {
         // Memoization phải skip reader.read() trong window 10s.
         let id = UUID()
         let stored = cliToken(access: "stale", expiresAt: baseDate.addingTimeInterval(-10))
-        try store.write(stored, for: id)
+        try await store.write(stored, for: id)
 
         let kcJSON = #"""
         {"accessToken":"fresh","refreshToken":"r","expiresAt":"2030-01-01T00:00:00Z"}
@@ -244,7 +245,7 @@ final class CLITokenRefresherTests: XCTestCase {
         // Sau TTL, cache phải invalidate → reader.read() lại được gọi.
         let id = UUID()
         let stored = cliToken(access: "stale", expiresAt: baseDate.addingTimeInterval(-10))
-        try store.write(stored, for: id)
+        try await store.write(stored, for: id)
 
         let kcJSON = #"""
         {"accessToken":"fresh","refreshToken":"r","expiresAt":"2030-01-01T00:00:00Z"}
@@ -283,7 +284,7 @@ final class CLITokenRefresherTests: XCTestCase {
         guard case .cliToken(let access, _, _)? = result else { return XCTFail("expected cliToken") }
         XCTAssertEqual(access, "new")
 
-        let persisted = try store.read(for: id)
+        let persisted = try await store.read(for: id)
         XCTAssertEqual(persisted, result)
     }
 
@@ -298,7 +299,7 @@ final class CLITokenRefresherTests: XCTestCase {
     func testFreshenSkipsWriteWhenTheCLIAccountChangesDuringTheRead() async throws {
         let id = UUID()
         let stored = cliToken(access: "mine", expiresAt: baseDate.addingTimeInterval(-10))
-        try store.write(stored, for: id)
+        try await store.write(stored, for: id)
 
         let kcJSON = #"""
         {"accessToken":"other-account","refreshToken":"r","expiresAt":"2030-01-01T00:00:00Z"}
@@ -322,7 +323,8 @@ final class CLITokenRefresherTests: XCTestCase {
 
         XCTAssertEqual(result, stored,
                        "must hand back this profile's own token, not the other account's")
-        XCTAssertEqual(try store.read(for: id), stored,
+        let persisted = try await store.read(for: id)
+        XCTAssertEqual(persisted, stored,
                        "the other account's token must never be persisted under this profile")
     }
 
@@ -331,7 +333,7 @@ final class CLITokenRefresherTests: XCTestCase {
         // account is unchanged across the read, still has to write.
         let id = UUID()
         let stored = cliToken(access: "stale", expiresAt: baseDate.addingTimeInterval(-10))
-        try store.write(stored, for: id)
+        try await store.write(stored, for: id)
 
         let kcJSON = #"""
         {"accessToken":"fresh","refreshToken":"r","expiresAt":"2030-01-01T00:00:00Z"}
@@ -344,7 +346,8 @@ final class CLITokenRefresherTests: XCTestCase {
         let result = try await refresher.freshen(profileId: id, current: stored, minLifetime: 60)
         guard case .cliToken(let access, _, _) = result else { return XCTFail("expected cliToken") }
         XCTAssertEqual(access, "fresh")
-        XCTAssertEqual(try store.read(for: id), result)
+        let persisted = try await store.read(for: id)
+        XCTAssertEqual(persisted, result)
     }
 
     /// Same race on the 401 recovery path. Here the credential is not only
@@ -373,7 +376,8 @@ final class CLITokenRefresherTests: XCTestCase {
         let result = try await refresher.forceRefresh(profileId: id, previous: previous)
 
         XCTAssertNil(result, "a token from another account must not be retried with")
-        XCTAssertNil(try store.read(for: id),
+        let persisted = try await store.read(for: id)
+        XCTAssertNil(persisted,
                      "nor persisted under this profile on the way past")
     }
 

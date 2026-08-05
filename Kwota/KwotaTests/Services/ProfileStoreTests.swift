@@ -79,7 +79,7 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.setActive(id: UUID()))
     }
 
-    func testRemoveDeletesProfileAndCascadesToKeychainAndDisk() throws {
+    func testRemoveDeletesProfileAndCascadesToKeychainAndDisk() async throws {
         let keychain = KeychainCredentialStore(service: "com.thanhhaudev.Kwota.test.\(UUID())")
         let dataRoot = temp.file("data-root")
         let store = ProfileStore(
@@ -90,17 +90,18 @@ final class ProfileStoreTests: XCTestCase {
 
         let p = Profile(name: "ToRemove", authMethod: .sessionKey)
         try store.add(p)
-        try keychain.write(.sessionKey(value: "x"), for: p.id)
+        try await keychain.write(.sessionKey(value: "x"), for: p.id)
 
         let pdir = dataRoot.appendingPathComponent(p.id.uuidString)
         try FileManager.default.createDirectory(at: pdir, withIntermediateDirectories: true)
         try Data("history".utf8).write(to: pdir.appendingPathComponent("usage-history.json"))
 
-        try store.remove(id: p.id)
+        try await store.remove(id: p.id)
 
         XCTAssertTrue(store.profiles.isEmpty)
         XCTAssertNil(store.activeProfileId)
-        XCTAssertNil(try keychain.read(for: p.id))
+        let loaded = try await keychain.read(for: p.id)
+        XCTAssertNil(loaded)
         XCTAssertFalse(FileManager.default.fileExists(atPath: pdir.path))
     }
 
@@ -149,7 +150,7 @@ final class ProfileStoreTests: XCTestCase {
         )
     }
 
-    func testRemoveActiveAdvancesToNextProfile() throws {
+    func testRemoveActiveAdvancesToNextProfile() async throws {
         let keychain = KeychainCredentialStore(service: "com.thanhhaudev.Kwota.test.\(UUID())")
         let store = ProfileStore(
             profilesFile: temp.file("profiles3.json"),
@@ -161,7 +162,7 @@ final class ProfileStoreTests: XCTestCase {
         try store.add(p1)
         try store.add(p2)
         try store.setActive(id: p1.id)
-        try store.remove(id: p1.id)
+        try await store.remove(id: p1.id)
         XCTAssertEqual(store.activeProfileId, p2.id)
     }
 
@@ -287,7 +288,7 @@ final class ProfileStoreTests: XCTestCase {
     /// When the profile directory cannot be removed, remove() must:
     /// 1. Still persist the removal (profile absent from profiles.json), and
     /// 2. Throw RemoveError.sideStateLingered with a non-nil directoryError.
-    func test_remove_throwsRemoveError_whenDirectoryDeleteFails() throws {
+    func test_remove_throwsRemoveError_whenDirectoryDeleteFails() async throws {
         let keychain = KeychainCredentialStore(service: "com.thanhhaudev.Kwota.test.\(UUID())")
 
         // Create a read-only child inside the profile directory so that
@@ -321,7 +322,7 @@ final class ProfileStoreTests: XCTestCase {
 
         var caughtRemoveError: ProfileStore.RemoveError?
         do {
-            try profileStore.remove(id: p.id)
+            try await profileStore.remove(id: p.id)
         } catch let err as ProfileStore.RemoveError {
             caughtRemoveError = err
         } catch {

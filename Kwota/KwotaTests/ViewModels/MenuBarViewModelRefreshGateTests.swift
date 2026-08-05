@@ -32,7 +32,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
     }
 
     override func tearDown() async throws {
-        try? keychain.deleteAll()
+        try? await keychain.deleteAll()
         try await super.tearDown()
     }
 
@@ -146,10 +146,10 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
     }
 
     @discardableResult
-    private func seedActiveProfile() throws -> Profile {
+    private func seedActiveProfile() async throws -> Profile {
         let p = Profile(name: "Gate", authMethod: .cliSync, email: "g@x.com")
         try profileStore.add(p)
-        try keychain.write(
+        try await keychain.write(
             .cliToken(accessToken: "T", refreshToken: "r", expiresAt: .distantFuture),
             for: p.id
         )
@@ -167,16 +167,16 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         XCTAssertTrue(vm.canRefreshNow(now: clock))
     }
 
-    func test_canRefreshNow_isFalse_whileBackoffActive() throws {
-        let p = try seedActiveProfile()
+    func test_canRefreshNow_isFalse_whileBackoffActive() async throws {
+        let p = try await seedActiveProfile()
         let vm = makeVM()
         try profileStore.setActive(id: p.id)  // see test_refreshUsageNow_isBlocked_whileBackoffActive
         vm.refreshCoordinator?.applyRetryAfter(60, for: .claude)
         XCTAssertFalse(vm.canRefreshNow(now: clock))
     }
 
-    func test_canRefreshNow_becomesTrue_afterBackoffExpires() throws {
-        let p = try seedActiveProfile()
+    func test_canRefreshNow_becomesTrue_afterBackoffExpires() async throws {
+        let p = try await seedActiveProfile()
         let vm = makeVM()
         try profileStore.setActive(id: p.id)
         vm.refreshCoordinator?.applyRetryAfter(60, for: .claude)
@@ -201,8 +201,8 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
 
     // MARK: - refreshUsageNow gating
 
-    func test_refreshUsageNow_isBlocked_whenThrottleFloorActive() throws {
-        try seedActiveProfile()
+    func test_refreshUsageNow_isBlocked_whenThrottleFloorActive() async throws {
+        try await seedActiveProfile()
         let vm = makeVM()
         vm.lastFetchAttemptAt = clock.addingTimeInterval(-3) // 3s ago, floor = 10s
 
@@ -215,8 +215,8 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         )
     }
 
-    func test_refreshUsageNow_isBlocked_whileBackoffActive() throws {
-        let p = try seedActiveProfile()
+    func test_refreshUsageNow_isBlocked_whileBackoffActive() async throws {
+        let p = try await seedActiveProfile()
         let vm = makeVM()
         // VM init may auto-promote an Antigravity profile when the
         // Antigravity language_server happens to be running on the dev
@@ -236,8 +236,8 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         )
     }
 
-    func test_refreshUsageNow_isAllowed_whenGateOpen_andRecordsAttempt() throws {
-        try seedActiveProfile()
+    func test_refreshUsageNow_isAllowed_whenGateOpen_andRecordsAttempt() async throws {
+        try await seedActiveProfile()
         let vm = makeVM()
         vm.lastFetchAttemptAt = nil
 
@@ -251,11 +251,11 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
 
     // MARK: - Profile switch resets throttle
 
-    func test_profileSwitch_resetsThrottle_soNewProfileFetchesImmediately() throws {
-        let a = try seedActiveProfile()
+    func test_profileSwitch_resetsThrottle_soNewProfileFetchesImmediately() async throws {
+        let a = try await seedActiveProfile()
         let b = Profile(name: "B", authMethod: .cliSync, email: "b@x.com")
         try profileStore.add(b)
-        try keychain.write(
+        try await keychain.write(
             .cliToken(accessToken: "T2", refreshToken: "r2", expiresAt: .distantFuture),
             for: b.id
         )
@@ -289,7 +289,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
     // The fix lifts the `rateLimitedUntil` write out of the gate.
 
     func test_429response_setsRateLimitedUntil_soBannerSurfacesGateState() async throws {
-        try seedActiveProfile()
+        try await seedActiveProfile()
         // Stub API returns 429 with Retry-After: 60 seconds.
         let vm = makeVM(apiClient: stubAPIClient(status: 429, retryAfter: "60"))
 
@@ -330,7 +330,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
     // minutes, not most of an hour.
 
     func test_429withLongRetryAfter_capsBannerWindow_whileCoordinatorHonorsVerbatim() async throws {
-        try seedActiveProfile()
+        try await seedActiveProfile()
         let vm = makeVM(apiClient: stubAPIClient(status: 429, retryAfter: "2400"))
 
         let deadline = Date().addingTimeInterval(5.0)
@@ -352,7 +352,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
     }
 
     func test_manualGate_opensAfterCap_whileAutomaticStaysFloored() async throws {
-        try seedActiveProfile()
+        try await seedActiveProfile()
         let vm = makeVM(apiClient: stubAPIClient(status: 429, retryAfter: "2400"))
 
         let deadline = Date().addingTimeInterval(5.0)
@@ -380,8 +380,8 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
     // Before this trigger existed, "Try now" routed through the automatic
     // gate and silently no-opped for the entire countdown.
 
-    func test_probe_bypassesBackoffFloor_andStampsAttempt() throws {
-        let p = try seedActiveProfile()
+    func test_probe_bypassesBackoffFloor_andStampsAttempt() async throws {
+        let p = try await seedActiveProfile()
         let vm = makeVM()
         try profileStore.setActive(id: p.id)
         vm.refreshCoordinator?.applyRetryAfter(2400, for: .claude)
@@ -395,8 +395,8 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         )
     }
 
-    func test_probe_respectsBurstThrottle() throws {
-        try seedActiveProfile()
+    func test_probe_respectsBurstThrottle() async throws {
+        try await seedActiveProfile()
         let vm = makeVM()
         vm.lastFetchAttemptAt = clock.addingTimeInterval(-3) // 3s ago, floor = 10s
 
@@ -412,7 +412,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
     // MARK: - Successful fetch clears rate-limit state
 
     func test_successfulFetch_clearsCoordinatorFloor() async throws {
-        let p = try seedActiveProfile()
+        let p = try await seedActiveProfile()
         let okJSON = #"""
         {"five_hour":{"utilization":10,"resets_at":"2026-06-13T00:00:00Z"},
          "seven_day":{"utilization":20,"resets_at":"2026-06-18T00:00:00Z"}}
@@ -446,7 +446,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
     // MARK: - rateLimitedUntil is provider-scoped across rebinds
 
     func test_signOut_clearsRateLimitBannerState() async throws {
-        try seedActiveProfile()
+        try await seedActiveProfile()
         let vm = makeVM(apiClient: stubAPIClient(status: 429, retryAfter: "60"))
 
         let deadline = Date().addingTimeInterval(5.0)
@@ -475,8 +475,8 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
     // floor expires. Single-account trigger: switch away to another
     // provider and back, or sign out and back in, while throttled.
 
-    func test_rebindOntoFlooredProvider_settlesAuthState_insteadOfStranding() throws {
-        let p = try seedActiveProfile()
+    func test_rebindOntoFlooredProvider_settlesAuthState_insteadOfStranding() async throws {
+        let p = try await seedActiveProfile()
         let vm = makeVM()
         vm.refreshCoordinator?.applyRetryAfter(2400, for: .claude)
 
@@ -510,7 +510,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
     // co-occur on a degraded API, so the window is realistic.
 
     func test_staleSlowSuccess_doesNotClear_newer429State() async throws {
-        try seedActiveProfile()
+        try await seedActiveProfile()
 
         let okJSON = #"""
         {"five_hour":{"utilization":10,"resets_at":"2026-06-13T00:00:00Z"},
@@ -586,7 +586,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
     // inherits step 2 of the ladder and backs off 120s instead of 60s.
 
     func test_silent429Fallback_restartsAt60s_afterSignOutCycle() async throws {
-        let p = try seedActiveProfile()
+        let p = try await seedActiveProfile()
         // 429 with NO Retry-After — exercises the fallback ladder.
         let vm = makeVM(apiClient: stubAPIClient(status: 429))
 
@@ -622,8 +622,8 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
 
     // MARK: - replaceCredentials resets throttle
 
-    func test_replaceCredentials_resetsThrottle_soReauthFetchesImmediately() throws {
-        let p = try seedActiveProfile()
+    func test_replaceCredentials_resetsThrottle_soReauthFetchesImmediately() async throws {
+        let p = try await seedActiveProfile()
         let vm = makeVM()
 
         vm.lastFetchAttemptAt = clock.addingTimeInterval(-3)
@@ -635,7 +635,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
             refreshToken: "r-new",
             expiresAt: .distantFuture
         )
-        _ = try vm.replaceCredentials(
+        _ = try await vm.replaceCredentials(
             profileId: p.id,
             newCredential: newCredential,
             newAuthMethod: .cliSync
@@ -657,8 +657,8 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
     // profile, the UI kept showing the prior provider's quota until the
     // next fetch landed. Fix: clear `summary` at the top of `rebindHistory`.
 
-    func test_rebindHistory_signOut_clearsSummaryNotJustSnapshot() throws {
-        let p = try seedActiveProfile()
+    func test_rebindHistory_signOut_clearsSummaryNotJustSnapshot() async throws {
+        let p = try await seedActiveProfile()
         let vm = makeVM()
         // Seed a non-nil summary (simulates "we just fetched something").
         vm.summary = ProviderUsageSummary(
@@ -680,11 +680,11 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         _ = p // silence unused warning
     }
 
-    func test_rebindHistory_profileSwitch_clearsSummary() throws {
-        let a = try seedActiveProfile()
+    func test_rebindHistory_profileSwitch_clearsSummary() async throws {
+        let a = try await seedActiveProfile()
         let b = Profile(name: "B", authMethod: .cliSync, email: "b@x.com")
         try profileStore.add(b)
-        try keychain.write(
+        try await keychain.write(
             .cliToken(accessToken: "T2", refreshToken: "r2", expiresAt: .distantFuture),
             for: b.id
         )
@@ -714,19 +714,19 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         _ = a
     }
 
-    func test_rebindHistory_clearsSummary_evenWhenCachedSnapshotExists() throws {
+    func test_rebindHistory_clearsSummary_evenWhenCachedSnapshotExists() async throws {
         // Switching to a Claude profile WITH a cached snapshot still must
         // not leak the prior account's `summary` (which carries the prior
         // provider's primary/secondary buckets — distinct from
         // `Profile.lastSnapshot`).
-        let a = try seedActiveProfile()
+        let a = try await seedActiveProfile()
         var b = Profile(name: "B", authMethod: .cliSync, email: "b@x.com")
         b.lastSnapshot = UsageSnapshot(
             fiveHour: UsageBucket(utilization: 0.42, resetsAt: clock.addingTimeInterval(3600)),
             sevenDay: UsageBucket(utilization: 0.1, resetsAt: clock.addingTimeInterval(7 * 86400))
         )
         try profileStore.add(b)
-        try keychain.write(
+        try await keychain.write(
             .cliToken(accessToken: "T2", refreshToken: "r2", expiresAt: .distantFuture),
             for: b.id
         )
@@ -765,8 +765,8 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         )
     }
 
-    func test_popoverDidOpen_skipsRefresh_whenSummaryWithinFreshnessWindow() throws {
-        try seedActiveProfile()
+    func test_popoverDidOpen_skipsRefresh_whenSummaryWithinFreshnessWindow() async throws {
+        try await seedActiveProfile()
         let vm = makeVM()
         // Pre-seed: a successful fetch landed 5s ago. Throttle floor is
         // 10s but SWR window is 120s; the SWR gate must win and short-circuit
@@ -782,8 +782,8 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         )
     }
 
-    func test_popoverDidOpen_refreshes_whenSummaryOutsideFreshnessWindow() throws {
-        try seedActiveProfile()
+    func test_popoverDidOpen_refreshes_whenSummaryOutsideFreshnessWindow() async throws {
+        try await seedActiveProfile()
         let vm = makeVM()
         // Pre-seed: a successful fetch landed 120s ago — at the SWR
         // boundary. popoverDidOpen must refresh.
@@ -798,8 +798,8 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         )
     }
 
-    func test_popoverDidOpen_refreshes_whenNoSummaryYet() throws {
-        try seedActiveProfile()
+    func test_popoverDidOpen_refreshes_whenNoSummaryYet() async throws {
+        try await seedActiveProfile()
         let vm = makeVM()
         // No prior summary (cold-start, first popover open).
         vm.summary = nil
@@ -860,8 +860,8 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         )
     }
 
-    func test_quotaRelevantActivity_refreshesWhenThresholdNotificationsEnabled() throws {
-        let p = try seedActiveProfile()
+    func test_quotaRelevantActivity_refreshesWhenThresholdNotificationsEnabled() async throws {
+        let p = try await seedActiveProfile()
         let vm = makeVM()
         try profileStore.setActive(id: p.id)
         vm.notificationSettingsStore.value = NotificationSettings(
@@ -880,8 +880,8 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         )
     }
 
-    func test_quotaRelevantActivity_skipsWhenRecentFetchIsFresh() throws {
-        let p = try seedActiveProfile()
+    func test_quotaRelevantActivity_skipsWhenRecentFetchIsFresh() async throws {
+        let p = try await seedActiveProfile()
         let vm = makeVM()
         try profileStore.setActive(id: p.id)
         vm.notificationSettingsStore.value = NotificationSettings(
@@ -901,8 +901,8 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         )
     }
 
-    func test_quotaRelevantActivity_skipsMutedProfile() throws {
-        var p = try seedActiveProfile()
+    func test_quotaRelevantActivity_skipsMutedProfile() async throws {
+        var p = try await seedActiveProfile()
         p.notificationsMuted = true
         try profileStore.updateProfile(p)
         let vm = makeVM()
@@ -923,8 +923,8 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         )
     }
 
-    func test_isPopoverOpen_tracksLifecycle() throws {
-        try seedActiveProfile()
+    func test_isPopoverOpen_tracksLifecycle() async throws {
+        try await seedActiveProfile()
         let vm = makeVM()
         XCTAssertFalse(vm.isPopoverOpen, "popover starts closed at launch")
         vm.popoverDidOpen()
@@ -935,7 +935,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
 
     // MARK: - Profile-switch SWR gate
 
-    func test_profileSwitch_skipsRefresh_whenProfileLastFetchedAtIsFresh() throws {
+    func test_profileSwitch_skipsRefresh_whenProfileLastFetchedAtIsFresh() async throws {
         // A→B→A→B back-and-forth in the switcher used to fire a fresh
         // fetch on every switch, draining the /api/oauth/usage token
         // bucket. With the SWR gate, a switch to a profile whose
@@ -943,7 +943,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         // NOT fire refreshUsageNow — provided the profile also has a
         // renderable cache (Claude `lastSnapshot`) so the cleared
         // `summary` doesn't leave the chart at `.empty`.
-        _ = try seedActiveProfile()
+        _ = try await seedActiveProfile()
         var b = Profile(name: "B", authMethod: .cliSync, email: "b@x.com")
         b.lastFetchedAt = clock.addingTimeInterval(-5)  // 5s ago — fresh
         // Claude renderable fallback: lastSnapshot must be present for
@@ -953,7 +953,7 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
             sevenDay: UsageBucket(utilization: 0.1, resetsAt: clock.addingTimeInterval(7 * 86400))
         )
         try profileStore.add(b)
-        try keychain.write(
+        try await keychain.write(
             .cliToken(accessToken: "T2", refreshToken: "r2", expiresAt: .distantFuture),
             for: b.id
         )
@@ -971,19 +971,19 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         )
     }
 
-    func test_profileSwitch_codexWithoutSnapshot_refreshesEvenWhenLastFetchedAtIsFresh() throws {
+    func test_profileSwitch_codexWithoutSnapshot_refreshesEvenWhenLastFetchedAtIsFresh() async throws {
         // Codex profiles never write `lastSnapshot` (that field is the
         // Claude-only legacy snapshot type). If rebindHistory clears
         // `vm.summary` and then SWR-skips the refresh based on a fresh
         // `lastFetchedAt`, the Codex profile has nothing renderable —
         // resolveUsageChartState falls through to `.empty`. The gate
         // must therefore require a renderable fallback before skipping.
-        _ = try seedActiveProfile()
+        _ = try await seedActiveProfile()
         var b = Profile(name: "B-codex", authMethod: .cliSync, providerID: .codex, email: "b@codex.com")
         b.lastFetchedAt = clock.addingTimeInterval(-5)  // 5s ago — fresh by SWR-window standards
         // lastSnapshot is left nil — that's the whole point of this case.
         try profileStore.add(b)
-        try keychain.write(
+        try await keychain.write(
             .cliToken(accessToken: "T2", refreshToken: "r2", expiresAt: .distantFuture),
             for: b.id
         )
@@ -1024,12 +1024,12 @@ final class MenuBarViewModelRefreshGateTests: XCTestCase {
         }
     }
 
-    func test_profileSwitch_refreshes_whenProfileLastFetchedAtIsStale() throws {
-        _ = try seedActiveProfile()
+    func test_profileSwitch_refreshes_whenProfileLastFetchedAtIsStale() async throws {
+        _ = try await seedActiveProfile()
         var b = Profile(name: "B", authMethod: .cliSync, email: "b@x.com")
         b.lastFetchedAt = clock.addingTimeInterval(-120)  // 120s ago — SWR boundary
         try profileStore.add(b)
-        try keychain.write(
+        try await keychain.write(
             .cliToken(accessToken: "T2", refreshToken: "r2", expiresAt: .distantFuture),
             for: b.id
         )

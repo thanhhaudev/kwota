@@ -171,6 +171,11 @@ final class CodexAutoProfileCoordinator {
     /// the current `auth.json`. Skips the write when the stored access token
     /// is already up-to-date so we don't thrash the Keychain on every watcher
     /// emit.
+    ///
+    /// Fire-and-forget on purpose, mirroring `AutoProfileCoordinator.
+    /// seedOrUpdateKeychain`: `handle(_:)` stays synchronous (its dedup latch
+    /// must be set before any suspension), so the async keychain traffic is
+    /// pushed into a detached-in-spirit `Task` rather than awaited inline.
     private func seedKeychain(for profileId: UUID) {
         guard let auth = authReader.read() else { return }
         let credential = Credential.cliToken(
@@ -178,13 +183,16 @@ final class CodexAutoProfileCoordinator {
             refreshToken: auth.refreshToken ?? "",
             expiresAt: clock().addingTimeInterval(3600)
         )
-        // Only overwrite if the access token differs — avoids Keychain thrash.
-        if let existing = try? keychain.read(for: profileId),
-           case .cliToken(let oldAccess, _, _) = existing,
-           oldAccess == auth.accessToken {
-            return
+        Task { [weak self] in
+            guard let self else { return }
+            // Only overwrite if the access token differs — avoids Keychain thrash.
+            if let existing = try? await self.keychain.read(for: profileId),
+               case .cliToken(let oldAccess, _, _) = existing,
+               oldAccess == auth.accessToken {
+                return
+            }
+            try? await self.keychain.write(credential, for: profileId)
         }
-        try? keychain.write(credential, for: profileId)
     }
 
     private func demoteOtherCodexAutoProfiles(except activeId: UUID) {

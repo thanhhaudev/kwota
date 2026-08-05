@@ -120,7 +120,7 @@ final class MenuBarViewModelWebSessionTests: XCTestCase {
 
     func testFindMatchingProfileMatchesByEmailCaseInsensitive() async throws {
         let vm = makeVM()
-        try vm.addProfile(
+        try await vm.addProfile(
             name: "Work",
             credential: .sessionKey(value: "k"),
             authMethod: .sessionKey,
@@ -145,7 +145,7 @@ final class MenuBarViewModelWebSessionTests: XCTestCase {
         try vm.profileStore.add(webProfile)
 
         let cliCred = Credential.cliToken(accessToken: "tok", refreshToken: "ref", expiresAt: Date(timeIntervalSince1970: 2000000000))
-        let updated = try vm.replaceCredentials(
+        let updated = try await vm.replaceCredentials(
             profileId: webProfile.id,
             newCredential: cliCred,
             newAuthMethod: .cliSync,
@@ -180,7 +180,7 @@ final class MenuBarViewModelWebSessionTests: XCTestCase {
         try vm.profileStore.add(cliProfile)
         try vm.profileStore.setActive(id: cliProfile.id)
 
-        let updated = try vm.replaceCredentials(
+        let updated = try await vm.replaceCredentials(
             profileId: cliProfile.id,
             newCredential: .sessionKey(value: "sk-new"),
             newAuthMethod: .sessionKey,
@@ -205,7 +205,7 @@ final class MenuBarViewModelWebSessionTests: XCTestCase {
         try vm.profileStore.add(profile)
         try vm.profileStore.setActive(id: profile.id)
 
-        let updated = try vm.replaceCredentials(
+        let updated = try await vm.replaceCredentials(
             profileId: profile.id,
             newCredential: .sessionKey(value: "sk-new"),
             newAuthMethod: .sessionKey
@@ -430,7 +430,7 @@ final class MenuBarViewModelWebSessionTests: XCTestCase {
             organizationId: "org-abc",
             email: "alice@example.com"
         )
-        try keychain.write(
+        try await keychain.write(
             .cliToken(
                 accessToken: "OLD-TOKEN",
                 refreshToken: "r",
@@ -447,7 +447,7 @@ final class MenuBarViewModelWebSessionTests: XCTestCase {
 
         // Re-auth on the same profile — CLI token rotated. Without the fix,
         // no refresh fires because setActive(sameId) is filtered.
-        _ = try vm.replaceCredentials(
+        _ = try await vm.replaceCredentials(
             profileId: profile.id,
             newCredential: .cliToken(
                 accessToken: "NEW-TOKEN",
@@ -494,7 +494,7 @@ final class MenuBarViewModelWebSessionTests: XCTestCase {
         try vm.profileStore.add(profile)
         try vm.profileStore.setActive(id: profile.id)
 
-        let updated = try vm.replaceCredentials(
+        let updated = try await vm.replaceCredentials(
             profileId: profile.id,
             newCredential: .sessionKey(value: "sk"),
             newAuthMethod: .sessionKey,
@@ -520,7 +520,7 @@ final class MenuBarViewModelWebSessionTests: XCTestCase {
         try vm.profileStore.add(profile)
         try vm.profileStore.setActive(id: profile.id)
 
-        let updated = try vm.replaceCredentials(
+        let updated = try await vm.replaceCredentials(
             profileId: profile.id,
             newCredential: .sessionKey(value: "new"),
             newAuthMethod: .sessionKey

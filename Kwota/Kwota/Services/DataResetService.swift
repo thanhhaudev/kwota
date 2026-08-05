@@ -39,10 +39,10 @@ final class DataResetService {
         appSupportPath: URL = AppPaths.applicationSupportDirectory,
         userDefaults: UserDefaults = .standard,
         bundleIdentifier: String? = Bundle.main.bundleIdentifier
-    ) throws {
+    ) async throws {
         // 1. Keychain — first, and throws on failure so nothing else is touched.
         do {
-            try keychain.deleteAll()
+            try await keychain.deleteAll()
         } catch {
             throw WipeError.keychainFailed(error)
         }

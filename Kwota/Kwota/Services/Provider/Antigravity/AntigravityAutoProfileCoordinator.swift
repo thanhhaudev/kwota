@@ -43,6 +43,12 @@ final class AntigravityAutoProfileCoordinator {
     /// to read. We write a marker `.cliToken` whose access/refresh tokens
     /// are empty strings; AntigravityProvider.fetchUsage ignores the
     /// credential anyway and pulls CSRF + port from the live watcher.
+    ///
+    /// Fire-and-forget on purpose, mirroring `AutoProfileCoordinator.
+    /// seedOrUpdateKeychain` / `CodexAutoProfileCoordinator.seedKeychain`:
+    /// `handle(_:)` stays synchronous (its dedup latch must be set before any
+    /// suspension), so the async keychain write is pushed into a `Task`
+    /// rather than awaited inline.
     private func seedPlaceholderCredential(for profileId: UUID) {
         guard let keychain else { return }
         let placeholder = Credential.cliToken(
@@ -50,7 +56,9 @@ final class AntigravityAutoProfileCoordinator {
             refreshToken: "",
             expiresAt: .distantFuture
         )
-        try? keychain.write(placeholder, for: profileId)
+        Task {
+            try? await keychain.write(placeholder, for: profileId)
+        }
     }
 
     func start() {

@@ -13,23 +13,32 @@ import Security
 /// Production conformance is `KeychainCredentialStore`. Tests inject a stub
 /// to simulate Keychain failures without touching the real Keychain.
 protocol KeychainWiping {
-    func deleteAll() throws
+    func deleteAll() async throws
 }
 
-final class KeychainCredentialStore {
+/// `nonisolated`: none of the work below touches MainActor-only state —
+/// every call just awaits the (also `nonisolated`) gateway.
+nonisolated final class KeychainCredentialStore {
     enum KeychainError: Error, Equatable {
         case unexpectedStatus(OSStatus)
         case decodeFailed
+        /// The read needed a consent dialog and the caller did not permit one.
+        /// This means "unknown", never "the user signed out" — see
+        /// AutoProfileCoordinator and MenuBarViewModel for why that matters.
+        case interactionNotAllowed
+        case timedOut
     }
 
     static let productionService = "com.thanhhaudev.Kwota.credential"
 
     private let service: String
+    private let gateway: any KeychainGateways
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
-    init(service: String) {
+    init(service: String, gateway: any KeychainGateways = KeychainGateway.shared) {
         self.service = service
+        self.gateway = gateway
     }
 
     /// Production credential store — keyed under `productionService`.
@@ -39,80 +48,59 @@ final class KeychainCredentialStore {
         KeychainCredentialStore(service: productionService)
     }
 
-    func write(_ credential: Credential, for id: UUID) throws {
+    func write(_ credential: Credential, for id: UUID) async throws {
         let data = try encoder.encode(credential)
-        let account = id.uuidString
-
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-
-        let attributes: [String: Any] = [kSecValueData as String: data]
-
-        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        switch status {
-        case errSecSuccess:
-            return
-        case errSecItemNotFound:
-            var insert = query
-            insert[kSecValueData as String] = data
-            let addStatus = SecItemAdd(insert as CFDictionary, nil)
-            guard addStatus == errSecSuccess else { throw KeychainError.unexpectedStatus(addStatus) }
-        default:
-            throw KeychainError.unexpectedStatus(status)
+        do {
+            try await gateway.write(data, service: service, account: id.uuidString)
+        } catch let error as KeychainGatewayError {
+            throw Self.map(error)
         }
     }
 
-    func read(for id: UUID) throws -> Credential? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: id.uuidString,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        switch status {
-        case errSecSuccess:
-            guard let data = result as? Data else { throw KeychainError.decodeFailed }
-            return try decoder.decode(Credential.self, from: data)
-        case errSecItemNotFound:
-            return nil
-        default:
-            throw KeychainError.unexpectedStatus(status)
+    func read(
+        for id: UUID,
+        interaction: KeychainInteraction = .deny
+    ) async throws -> Credential? {
+        do {
+            guard let data = try await gateway.read(
+                service: service,
+                account: id.uuidString,
+                interaction: interaction
+            ) else { return nil }
+            do {
+                return try decoder.decode(Credential.self, from: data)
+            } catch {
+                throw KeychainError.decodeFailed
+            }
+        } catch let error as KeychainGatewayError {
+            throw Self.map(error)
         }
     }
 
-    func delete(for id: UUID) throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: id.uuidString
-        ]
-        let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw KeychainError.unexpectedStatus(status)
+    func delete(for id: UUID) async throws {
+        do {
+            try await gateway.delete(service: service, account: id.uuidString)
+        } catch let error as KeychainGatewayError {
+            throw Self.map(error)
         }
     }
 
     /// Wipes every entry under this service. Used by `DataResetService` for
     /// the nuclear "Reset all data" path, and by tests through UUID-namespaced
     /// services.
-    ///
-    /// `kSecMatchLimitAll` is required: without it, `SecItemDelete` on macOS
-    /// only removes one matching item, silently leaving the rest.
-    func deleteAll() throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecMatchLimit as String: kSecMatchLimitAll
-        ]
-        let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw KeychainError.unexpectedStatus(status)
+    func deleteAll() async throws {
+        do {
+            try await gateway.deleteAll(service: service)
+        } catch let error as KeychainGatewayError {
+            throw Self.map(error)
+        }
+    }
+
+    private static func map(_ error: KeychainGatewayError) -> KeychainError {
+        switch error {
+        case .interactionNotAllowed: return .interactionNotAllowed
+        case .timedOut: return .timedOut
+        case .status(let status): return .unexpectedStatus(status)
         }
     }
 }
@@ -124,6 +112,10 @@ extension KeychainCredentialStore.KeychainError: LocalizedError {
             return "Keychain error \(status)"
         case .decodeFailed:
             return "Credential data could not be decoded."
+        case .interactionNotAllowed:
+            return "Keychain access needs your approval."
+        case .timedOut:
+            return "The keychain did not respond in time."
         }
     }
 }

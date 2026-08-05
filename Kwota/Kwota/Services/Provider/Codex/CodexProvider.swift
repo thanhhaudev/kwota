@@ -142,7 +142,7 @@ final class CodexProvider: AccountProvider {
             throw IdentityMismatchError(profileEmail: targetEmail, onDiskEmail: onDiskEmail)
         }
 
-        let workingCredential = (try? tokenRefresher.freshen(
+        let workingCredential = (try? await tokenRefresher.freshen(
             profileId: profile.id,
             current: credential
         )) ?? credential
@@ -155,7 +155,7 @@ final class CodexProvider: AccountProvider {
                 "CodexProvider: 401 from wham/usage, attempting forceRefresh and retry",
                 level: .info
             )
-            if let retried = try? tokenRefresher.forceRefresh(
+            if let retried = try? await tokenRefresher.forceRefresh(
                 profileId: profile.id,
                 previous: workingCredential
             ) {

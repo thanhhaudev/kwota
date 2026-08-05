@@ -388,7 +388,7 @@ final class ProfileStore {
         onProfilesChange?()
     }
 
-    func remove(id: UUID) throws {
+    func remove(id: UUID) async throws {
         guard let idx = profiles.firstIndex(where: { $0.id == id }) else {
             throw StoreError.unknownProfile(id)
         }
@@ -405,7 +405,7 @@ final class ProfileStore {
         // the user's perspective regardless of what fails here.
         var keychainError: Error?
         var directoryError: Error?
-        do { try keychain.delete(for: id) } catch { keychainError = error }
+        do { try await keychain.delete(for: id) } catch { keychainError = error }
 
         let dir = profileDirectoryProvider(id)
         if FileManager.default.fileExists(atPath: dir.path) {

@@ -103,11 +103,11 @@ final class MenuBarViewModelProfilesTests: XCTestCase {
         XCTAssertTrue(vm.profileStore.profiles.isEmpty)
         XCTAssertNil(vm.profileStore.activeProfileId)
 
-        try vm.addProfile(name: "P1", credential: .sessionKey(value: "k1"), authMethod: .sessionKey)
+        try await vm.addProfile(name: "P1", credential: .sessionKey(value: "k1"), authMethod: .sessionKey)
         XCTAssertEqual(vm.profileStore.profiles.map(\.name), ["P1"])
         XCTAssertEqual(vm.profileStore.activeProfileId, vm.profileStore.profiles[0].id)
 
-        try vm.addProfile(name: "P2", credential: .sessionKey(value: "k2"), authMethod: .sessionKey)
+        try await vm.addProfile(name: "P2", credential: .sessionKey(value: "k2"), authMethod: .sessionKey)
         XCTAssertEqual(vm.profileStore.profiles.map(\.name), ["P1", "P2"])
         // After add, P2 becomes active (addProfile calls setActive on the new one).
         XCTAssertEqual(vm.profileStore.activeProfileId, vm.profileStore.profiles[1].id)
@@ -115,11 +115,11 @@ final class MenuBarViewModelProfilesTests: XCTestCase {
 
     func testRemovingActiveProfileAdvancesAndPersists() async throws {
         let vm = makeVM()
-        try vm.addProfile(name: "P1", credential: .sessionKey(value: "k1"), authMethod: .sessionKey)
-        try vm.addProfile(name: "P2", credential: .sessionKey(value: "k2"), authMethod: .sessionKey)
+        try await vm.addProfile(name: "P1", credential: .sessionKey(value: "k1"), authMethod: .sessionKey)
+        try await vm.addProfile(name: "P2", credential: .sessionKey(value: "k2"), authMethod: .sessionKey)
         let p2id = vm.profileStore.activeProfileId!
 
-        try vm.profileStore.remove(id: p2id)
+        try await vm.profileStore.remove(id: p2id)
         XCTAssertEqual(vm.profileStore.profiles.map(\.name), ["P1"])
         XCTAssertEqual(vm.profileStore.activeProfileId, vm.profileStore.profiles[0].id)
     }
@@ -149,7 +149,7 @@ final class MenuBarViewModelProfilesTests: XCTestCase {
     // release when EITHER snapshot or summary is non-nil.
     func testShowLoadingPlaceholder_falseWhenSummaryPopulatedAndRefreshing() async throws {
         let vm = makeVM()
-        try vm.addProfile(name: "P1", credential: .sessionKey(value: "k1"), authMethod: .sessionKey)
+        try await vm.addProfile(name: "P1", credential: .sessionKey(value: "k1"), authMethod: .sessionKey)
 
         // Wait for the auto-refresh kicked by addProfile to settle so
         // isSwitchingProfile clears (stubbed transport returns 401 → .expired).
@@ -176,7 +176,7 @@ final class MenuBarViewModelProfilesTests: XCTestCase {
 
     func testShowLoadingPlaceholder_trueWhenBothCachesEmptyAndRefreshing() async throws {
         let vm = makeVM()
-        try vm.addProfile(name: "P1", credential: .sessionKey(value: "k1"), authMethod: .sessionKey)
+        try await vm.addProfile(name: "P1", credential: .sessionKey(value: "k1"), authMethod: .sessionKey)
 
         await waitUntil(timeout: 3.0) { !vm.isSwitchingProfile }
 
@@ -219,7 +219,7 @@ final class MenuBarViewModelProfilesTests: XCTestCase {
 
     func testCanCommitSnapshot_acceptsAnyDataWhenNothingDisplayed() async throws {
         let vm = makeVM()
-        try vm.addProfile(name: "P1", credential: .sessionKey(value: "k"), authMethod: .sessionKey)
+        try await vm.addProfile(name: "P1", credential: .sessionKey(value: "k"), authMethod: .sessionKey)
         let id = vm.profileStore.activeProfileId!
 
         // Brand-new profile with no committed snapshot → any fetch wins.

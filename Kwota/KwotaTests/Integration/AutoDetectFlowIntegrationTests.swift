@@ -18,7 +18,7 @@ final class AutoDetectFlowIntegrationTests: XCTestCase {
         let temp = TempDirectory()
         let dataRoot = temp.url
         let keychain = KeychainCredentialStore(service: "com.thanhhaudev.Kwota.test.\(UUID())")
-        defer { try? keychain.deleteAll() }
+        defer { Task { try? await keychain.deleteAll() } }
         let store = ProfileStore(
             profilesFile: temp.file("profiles.json"),
             keychain: keychain,

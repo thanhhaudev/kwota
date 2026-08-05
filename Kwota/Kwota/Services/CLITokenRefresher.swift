@@ -138,7 +138,7 @@ final class CLITokenRefresher {
             lastFreshen = FreshenCache(profileId: profileId, credential: current, at: now())
             return current
         }
-        try store.write(result.credential, for: profileId)
+        try await store.write(result.credential, for: profileId)
         AppLog.shared.log(
             "CLITokenRefresher.freshen: CLI rotated, wrote new token to store",
             level: .debug
@@ -193,7 +193,7 @@ final class CLITokenRefresher {
             )
             return nil
         }
-        try store.write(result.credential, for: profileId)
+        try await store.write(result.credential, for: profileId)
         AppLog.shared.log(
             "CLITokenRefresher.forceRefresh: CLI rotated, wrote new token for retry",
             level: .info

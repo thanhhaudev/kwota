@@ -43,7 +43,7 @@ final class CodexTokenRefresher {
         profileId: UUID,
         current: Credential,
         minLifetime: TimeInterval = 60
-    ) throws -> Credential {
+    ) async throws -> Credential {
         guard case .cliToken(_, _, let expiresAt) = current else {
             return current
         }
@@ -81,7 +81,7 @@ final class CodexTokenRefresher {
             // lifetime expires, so anything > minLifetime works.
             expiresAt: now().addingTimeInterval(3600)
         )
-        try store.write(rotated, for: profileId)
+        try await store.write(rotated, for: profileId)
         lastFreshen = FreshenCache(profileId: profileId, credential: rotated, at: now())
         AppLog.shared.log("CodexTokenRefresher.freshen: rotated token written to store", level: .debug)
         return rotated
@@ -89,7 +89,7 @@ final class CodexTokenRefresher {
 
     /// Re-reads auth.json after a 401. Returns nil when the token on disk
     /// matches the failing one (retrying would just 401 again).
-    func forceRefresh(profileId: UUID, previous: Credential? = nil) throws -> Credential? {
+    func forceRefresh(profileId: UUID, previous: Credential? = nil) async throws -> Credential? {
         guard let auth = reader.read() else {
             AppLog.shared.log("CodexTokenRefresher.forceRefresh: auth.json unreadable", level: .warn)
             return nil
@@ -107,7 +107,7 @@ final class CodexTokenRefresher {
             refreshToken: auth.refreshToken ?? "",
             expiresAt: now().addingTimeInterval(3600)
         )
-        try store.write(rotated, for: profileId)
+        try await store.write(rotated, for: profileId)
         AppLog.shared.log("CodexTokenRefresher.forceRefresh: rotated token written to store", level: .info)
         return rotated
     }
