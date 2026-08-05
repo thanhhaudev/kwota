@@ -144,7 +144,8 @@ final class CodexProvider: AccountProvider {
 
         let workingCredential = (try? await tokenRefresher.freshen(
             profileId: profile.id,
-            current: credential
+            current: credential,
+            expectedEmail: profile.email
         )) ?? credential
 
         let snapshot: CodexUsageSnapshot
@@ -157,7 +158,8 @@ final class CodexProvider: AccountProvider {
             )
             if let retried = try? await tokenRefresher.forceRefresh(
                 profileId: profile.id,
-                previous: workingCredential
+                previous: workingCredential,
+                expectedEmail: profile.email
             ) {
                 snapshot = try await apiClient.fetchSnapshot(credential: retried)
             } else {

@@ -39,10 +39,29 @@ final class CodexTokenRefresher {
 
     /// Returns a credential whose access token is valid for at least
     /// `minLifetime` seconds. Cheap path returns `current` unchanged.
+    ///
+    /// `expectedEmail`, when non-nil, is compared against the on-disk
+    /// identity AFTER the `auth.json` read resolves and BEFORE the result is
+    /// written or used — closing the same race `CLITokenRefresher.freshen`
+    /// closes via its `identityCheck` gate. `CodexProvider.fetchUsage`
+    /// already checks the on-disk identity against `profile.email` before
+    /// calling this method, but that check and this method's own read of
+    /// `auth.json` are two separate reads: if the user runs `codex login` as
+    /// a different account in the window between them, the pre-check's
+    /// answer is stale by the time this method's read resolves, and without
+    /// this second check the new account's token would be written under the
+    /// old profile's id. `CodexAuthReader.Auth` (unlike Claude's
+    /// `CLICredentialReader.SyncResult`) already carries `email` alongside
+    /// the token, so no watcher indirection is needed — the check is simply
+    /// "does the email on the read I just did match the profile I'm about
+    /// to write to." `nil` means "no check possible" (either no expectation
+    /// was supplied, or the JWT carried no email claim) — proceed exactly as
+    /// before this fix so already-working profiles don't start failing.
     func freshen(
         profileId: UUID,
         current: Credential,
-        minLifetime: TimeInterval = 60
+        minLifetime: TimeInterval = 60,
+        expectedEmail: String? = nil
     ) async throws -> Credential {
         guard case .cliToken(_, _, let expiresAt) = current else {
             return current
@@ -65,6 +84,19 @@ final class CodexTokenRefresher {
         guard let auth = await OffMain.run({ reader.read() }) else {
             AppLog.shared.log(
                 "CodexTokenRefresher.freshen: auth.json unreadable; keeping supplied credential",
+                level: .warn
+            )
+            return current
+        }
+        // The account may have changed while the read above was outstanding.
+        // Treated like the unreadable-auth.json arm above: `current` is still
+        // the best token we have for *this* profile, and writing the other
+        // account's token here would be the cross-account misattribution
+        // this gate exists to prevent.
+        if let expectedEmail, let onDisk = auth.email,
+           onDisk.caseInsensitiveCompare(expectedEmail) != .orderedSame {
+            AppLog.shared.log(
+                "CodexTokenRefresher.freshen: CLI account (\(onDisk)) no longer matches profile \(profileId.uuidString.prefix(8)) after the auth.json read; keeping current token",
                 level: .warn
             )
             return current
@@ -93,10 +125,29 @@ final class CodexTokenRefresher {
 
     /// Re-reads auth.json after a 401. Returns nil when the token on disk
     /// matches the failing one (retrying would just 401 again).
-    func forceRefresh(profileId: UUID, previous: Credential? = nil) async throws -> Credential? {
+    ///
+    /// `expectedEmail` is the same post-read identity gate as `freshen`
+    /// above — see its doc comment. `nil` result here means "skip the retry,
+    /// surface .unauthorized," exactly like the existing same-token arm
+    /// below, since retrying with (or persisting) a token that isn't
+    /// provably this profile's account would be worse than surfacing the
+    /// original 401.
+    func forceRefresh(
+        profileId: UUID,
+        previous: Credential? = nil,
+        expectedEmail: String? = nil
+    ) async throws -> Credential? {
         let reader = self.reader
         guard let auth = await OffMain.run({ reader.read() }) else {
             AppLog.shared.log("CodexTokenRefresher.forceRefresh: auth.json unreadable", level: .warn)
+            return nil
+        }
+        if let expectedEmail, let onDisk = auth.email,
+           onDisk.caseInsensitiveCompare(expectedEmail) != .orderedSame {
+            AppLog.shared.log(
+                "CodexTokenRefresher.forceRefresh: CLI account (\(onDisk)) no longer matches profile \(profileId.uuidString.prefix(8)) after the auth.json read; skipping the retry",
+                level: .warn
+            )
             return nil
         }
         if case .cliToken(let oldAccess, _, _) = previous,
