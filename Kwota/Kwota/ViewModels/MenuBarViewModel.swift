@@ -2424,7 +2424,7 @@ final class MenuBarViewModel {
                     authState = .keychainAccessNeeded
                     return
                 }
-                try? await credentialStore.write(cliResult.credential, for: profile.id)
+                try await credentialStore.write(cliResult.credential, for: profile.id)
             }
             await refresh(profile: profile)
         } catch KeychainCredentialStore.KeychainError.interactionNotAllowed,

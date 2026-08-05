@@ -301,6 +301,66 @@ final class MenuBarViewModelGrantKeychainAccessTests: XCTestCase {
         XCTAssertFalse(vm.isGrantingKeychainAccess, "flag must clear once the in-flight attempt completes")
     }
 
+    // MARK: - Third adversarial-review round: write failure must not be swallowed
+
+    /// The actual bug: `grantKeychainAccess()` used `try?` on the write that
+    /// seeds the newly granted CLI token into Kwota's own store. If that
+    /// specific write fails, the old code fell through unchanged to
+    /// `refresh(profile:)`, which would proceed on whatever credential was
+    /// already stored (the old one) — clearing the Grant banner and giving
+    /// the user a false impression of success with no error shown, while the
+    /// actual granted token was never saved. This asserts the write failure
+    /// now propagates into the existing catch structure instead: a
+    /// `.timedOut` write failure must land back on `.keychainAccessNeeded`,
+    /// matching the same "stay on the Grant banner, let the user retry"
+    /// treatment other timeout/cancel paths already get — never a stale,
+    /// silently-successful-looking `refresh(profile:)`.
+    @MainActor
+    func test_grantKeychainAccess_writeFailure_doesNotSilentlySucceed() async throws {
+        let cliSpy = SpyCLICredentialReader(result: .success(
+            CLICredentialReader.SyncResult(
+                credential: .cliToken(accessToken: "granted-token", refreshToken: "r", expiresAt: .distantFuture),
+                subscriptionPlan: nil
+            )
+        ))
+        let failingGateway = WriteFailingKeychainGateway(writeError: .timedOut)
+        let vm = makeVM(gateway: failingGateway, cliCredentialReader: cliSpy)
+        let profile = Profile(name: "P", authMethod: .cliSync)
+        try? vm.profileStore.add(profile)
+
+        await vm.grantKeychainAccess()
+
+        XCTAssertEqual(cliSpy.callCount, 1, "the CLI read itself must still happen")
+        XCTAssertEqual(failingGateway.writeCount, 1, "the write must actually have been attempted")
+        XCTAssertEqual(vm.authState, .keychainAccessNeeded,
+                       "a write failure must not be swallowed into a stale-but-successful-looking refresh")
+    }
+
+    /// Same failure, but a genuinely unexpected status (not a timeout/cancel
+    /// shape) — must surface as a real error via the existing catch-all,
+    /// exactly like any other genuinely unexpected Keychain failure does
+    /// elsewhere in this function.
+    @MainActor
+    func test_grantKeychainAccess_writeFailure_withUnexpectedStatus_surfacesAsError() async throws {
+        let cliSpy = SpyCLICredentialReader(result: .success(
+            CLICredentialReader.SyncResult(
+                credential: .cliToken(accessToken: "granted-token", refreshToken: "r", expiresAt: .distantFuture),
+                subscriptionPlan: nil
+            )
+        ))
+        let failingGateway = WriteFailingKeychainGateway(writeError: .status(errSecParam))
+        let vm = makeVM(gateway: failingGateway, cliCredentialReader: cliSpy)
+        let profile = Profile(name: "P", authMethod: .cliSync)
+        try? vm.profileStore.add(profile)
+
+        await vm.grantKeychainAccess()
+
+        XCTAssertEqual(failingGateway.writeCount, 1, "the write must actually have been attempted")
+        guard case .error = vm.authState else {
+            return XCTFail("expected .error, got \(vm.authState)")
+        }
+    }
+
     // MARK: - Fixture
 
     /// Minimal hermetic `MenuBarViewModel` fixture. Unlike
@@ -431,6 +491,29 @@ private final class RecordingKeychainGateway: KeychainGateways, @unchecked Senda
     func deleteAll(service: String) async throws {
         lock.lock(); storage.removeAll(); lock.unlock()
     }
+}
+
+/// A `KeychainGateways` double whose `read` always succeeds (so the flow
+/// reaches the CLI credential path) but whose `write` always fails with a
+/// configurable `KeychainGatewayError` — the seam the write-failure-swallowed
+/// regression test needs, distinct from `ThrowingKeychainGateway` (which
+/// fails every call, never reaching the CLI path at all).
+private final class WriteFailingKeychainGateway: KeychainGateways, @unchecked Sendable {
+    private let writeError: KeychainGatewayError
+    private let lock = NSLock()
+    private var _writeCount = 0
+
+    var writeCount: Int { lock.lock(); defer { lock.unlock() }; return _writeCount }
+
+    init(writeError: KeychainGatewayError) { self.writeError = writeError }
+
+    func read(service: String, account: String?, interaction: KeychainInteraction) async throws -> Data? { nil }
+    func write(_ data: Data, service: String, account: String) async throws {
+        lock.lock(); _writeCount += 1; lock.unlock()
+        throw writeError
+    }
+    func delete(service: String, account: String) async throws {}
+    func deleteAll(service: String) async throws {}
 }
 
 /// A `CLICredentialReading` double that records the interaction it was
