@@ -73,12 +73,18 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.thanhhaudev.kwota.keychain")
     private let primitives: KeychainPrimitives
     private let timeout: TimeInterval
+    /// Deadline for `.allow` calls only. A real consent dialog routinely
+    /// takes longer than the background `timeout` to answer — a human has to
+    /// notice and click it — so `.allow` gets a much longer, separate budget
+    /// rather than sharing the tight background deadline.
+    private let allowTimeout: TimeInterval
     private let lock = NSLock()
     private var wedged = false
 
-    init(primitives: KeychainPrimitives = .live, timeout: TimeInterval = 10) {
+    init(primitives: KeychainPrimitives = .live, timeout: TimeInterval = 10, allowTimeout: TimeInterval = 120) {
         self.primitives = primitives
         self.timeout = timeout
+        self.allowTimeout = allowTimeout
     }
 
     func read(service: String, account: String?, interaction: KeychainInteraction) async throws -> Data? {
@@ -95,7 +101,16 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
             switch status {
             case errSecSuccess: return result as? Data
             case errSecItemNotFound: return nil
-            case errSecInteractionNotAllowed, errSecUserCanceled:
+            // errSecAuthFailed (-25293) is what the legacy suppression API
+            // (`SecKeychainSetUserInteractionAllowed(false)`) actually returns
+            // for a denied/untrusted read in production — NOT
+            // errSecInteractionNotAllowed (-25308), which is the modern API's
+            // shape. See docs/findings/F-005-keychain-interaction-suppression.md:
+            // wire-measured on 2026-08-05 (`mode=legacy status=-25293`).
+            // Without this case a real-world denial falls through to the
+            // generic `.status` branch below and every denial-vs-absence
+            // consumer (Grant banner, cache preservation) never activates.
+            case errSecInteractionNotAllowed, errSecUserCanceled, errSecAuthFailed:
                 throw KeychainGatewayError.interactionNotAllowed
             default: throw KeychainGatewayError.status(status)
             }
@@ -123,7 +138,9 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
                 guard addStatus == errSecSuccess else {
                     throw KeychainGatewayError.status(addStatus)
                 }
-            case errSecInteractionNotAllowed, errSecUserCanceled:
+            // See the matching comment in `read()` — errSecAuthFailed is the
+            // real-world denial status under legacy suppression (F-005).
+            case errSecInteractionNotAllowed, errSecUserCanceled, errSecAuthFailed:
                 throw KeychainGatewayError.interactionNotAllowed
             default: throw KeychainGatewayError.status(status)
             }
@@ -175,7 +192,7 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
         if isWedged { throw KeychainGatewayError.timedOut }
 
         let primitives = self.primitives
-        let deadline = timeout
+        let deadline = interaction == .allow ? allowTimeout : timeout
         return try await withCheckedThrowingContinuation { continuation in
             let settled = Settled()
             queue.async { [weak self] in
@@ -189,9 +206,18 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
             }
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + deadline) { [weak self] in
                 guard settled.claim() else { return }
-                self?.lock.lock()
-                self?.wedged = true
-                self?.lock.unlock()
+                // `wedged` exists to protect background callers from a
+                // background probe nobody is watching. A parked `.allow`
+                // call is the opposite: a human is actively looking at the
+                // dialog it raised. Punishing every other background caller
+                // (token refreshes, deletes, reads) while that dialog is
+                // still open is the defect this guard exists to avoid —
+                // so only a `.deny` call arms `wedged`.
+                if interaction == .deny {
+                    self?.lock.lock()
+                    self?.wedged = true
+                    self?.lock.unlock()
+                }
                 continuation.resume(throwing: KeychainGatewayError.timedOut)
             }
         }
