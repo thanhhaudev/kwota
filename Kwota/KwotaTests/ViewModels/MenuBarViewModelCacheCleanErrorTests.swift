@@ -57,7 +57,7 @@ final class MenuBarViewModelCacheCleanErrorTests: XCTestCase {
         let stubRefresher = CLITokenRefresher(
             reader: CLICredentialReader(
                 credentialsFile: temp.file("missing-credentials.json"),
-                keychainProbe: { nil }
+                gateway: StubKeychainGateway(read: { nil })
             ),
             store: keychain
         )

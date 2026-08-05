@@ -117,7 +117,7 @@ struct KwotaApp: App {
         })
         let cliReader = CLICredentialReader(
             credentialsFile: root.appendingPathComponent("missing-credentials.json"),
-            keychainProbe: { nil }
+            gateway: EmptyKeychainGateway()
         )
         let cachedCLIReader = CachedCLICredentialReader(reader: cliReader)
         let cliRefresher = CLITokenRefresher(reader: cachedCLIReader, store: keychain)
@@ -207,6 +207,15 @@ private final class NoopProcessHandle: ProcessHandle {
     var isRunning: Bool { false }
     func terminate() {}
     func onTermination(_ handler: @escaping @MainActor () -> Void) {}
+}
+
+/// Test-mode wiring: a gateway that answers "no such item" without touching
+/// the real Keychain, so hosted runs never probe the user's credentials.
+private nonisolated struct EmptyKeychainGateway: KeychainGateways {
+    func read(service: String, account: String?, interaction: KeychainInteraction) async throws -> Data? { nil }
+    func write(_ data: Data, service: String, account: String) async throws {}
+    func delete(service: String, account: String) async throws {}
+    func deleteAll(service: String) async throws {}
 }
 
 @MainActor

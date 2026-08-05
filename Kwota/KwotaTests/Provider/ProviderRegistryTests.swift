@@ -12,7 +12,7 @@ final class ProviderRegistryTests: XCTestCase {
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent("kwota-tests-\(UUID().uuidString)")
             .appendingPathComponent("missing-credentials.json")
-        return CLICredentialReader(credentialsFile: file, keychainProbe: { nil })
+        return CLICredentialReader(credentialsFile: file, gateway: StubKeychainGateway(read: { nil }))
     }
 
     private func makeAccountReader() -> OAuthAccountReader {

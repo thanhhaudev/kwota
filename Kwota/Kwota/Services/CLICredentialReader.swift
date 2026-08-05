@@ -11,17 +11,15 @@
 //
 
 import Foundation
-import Security
 
 /// Seam that lets tests and higher-level services inject a CLI credential
 /// source without touching `CLICredentialReader`'s real Keychain and
 /// filesystem paths.
 ///
-/// Both methods are `async` and run their blocking `SecItemCopyMatching` off
-/// the main thread. Keeping a synchronous variant would leave the trap armed
-/// for the next call site: a consent dialog for another app's Keychain item
-/// blocks whatever thread asks, and on the main thread that freezes every
-/// keep-awake release path at once.
+/// Both methods are `async`. The Keychain read goes through `KeychainGateway`,
+/// which already leaves the main thread and bounds the wait — a consent
+/// dialog for another app's Keychain item blocks whatever thread asks, and on
+/// the main thread that freezes every keep-awake release path at once.
 protocol CLICredentialReading: Sendable {
     func read() async throws -> CLICredentialReader.SyncResult
     func readFresh() async throws -> CLICredentialReader.SyncResult
@@ -39,27 +37,15 @@ extension CLICredentialReading {
 nonisolated struct CLICredentialTimeout: Error {}
 
 nonisolated struct CLICredentialReader {
-    typealias KeychainProbe = () -> Data?
-
     let credentialsFile: URL
-    // `nonisolated(unsafe)`: the reader is `Sendable` (it crosses onto a global
-    // queue in `read()`) but `KeychainProbe` deliberately is not — the test
-    // seams inject closures over captured state, and a `@Sendable` probe type
-    // would outlaw them.
-    //
-    // What makes the escape hatch sound is the *production* probe, not the
-    // `let`: `defaultKeychainProbe` closes over nothing mutable — it builds a
-    // fresh query dictionary and calls `SecItemCopyMatching`, so there is no
-    // shared state to race when it is invoked from the GCD worker. Injected
-    // test probes that do capture mutable state own their own synchronisation.
-    private nonisolated(unsafe) let keychainProbe: KeychainProbe
+    private let gateway: any KeychainGateways
 
     init(
         credentialsFile: URL = CLICredentialReader.defaultPath,
-        keychainProbe: @escaping KeychainProbe = CLICredentialReader.defaultKeychainProbe
+        gateway: any KeychainGateways = KeychainGateway.shared
     ) {
         self.credentialsFile = credentialsFile
-        self.keychainProbe = keychainProbe
+        self.gateway = gateway
     }
 
     static var defaultPath: URL {
@@ -68,19 +54,6 @@ nonisolated struct CLICredentialReader {
     }
 
     static let keychainService = "Claude Code-credentials"
-
-    static let defaultKeychainProbe: KeychainProbe = {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data else { return nil }
-        return data
-    }
 
     /// True when Claude Code's legacy credentials file exists. Intentionally
     /// does NOT probe the Keychain — a probe would trigger the cross-app
@@ -107,31 +80,29 @@ nonisolated struct CLICredentialReader {
         enum CodingKeys: String, CodingKey { case claudeAiOauth }
     }
 
-    /// Runs the whole read — Keychain probe, legacy-file fallback, decode — on a
-    /// GCD global queue via `OffMain.run`. `Task.detached` would not do: this
-    /// target builds with `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, so a
-    /// detached closure body is still `@MainActor` and would leave the blocking
-    /// `SecItemCopyMatching` exactly where F-003 found it.
-    func read() async throws -> SyncResult {
-        // Snapshot the two stored properties into locals so the `@Sendable`
-        // closure captures values instead of `self`.
-        let probe = keychainProbe
-        let file = credentialsFile
-        return try await OffMain.run {
-            if let data = probe(), let result = Self.decodeKeychainPayload(data) {
-                return result
-            }
-            let data = try Data(contentsOf: file)
-            let payload = try Self.decoder().decode(Payload.self, from: data)
-            return SyncResult(
-                credential: .cliToken(
-                    accessToken: payload.accessToken,
-                    refreshToken: payload.refreshToken,
-                    expiresAt: payload.expiresAt
-                ),
-                subscriptionPlan: payload.subscriptionType
-            )
+    /// The gateway already leaves the main thread and bounds the wait, so this
+    /// no longer wraps anything in `OffMain.run`. The legacy-file fallback is
+    /// small and local, so it stays on the caller's executor.
+    func read(interaction: KeychainInteraction = .deny) async throws -> SyncResult {
+        if let data = try? await gateway.read(
+            service: Self.keychainService,
+            account: nil,
+            interaction: interaction
+        ), let result = Self.decodeKeychainPayload(data) {
+            return result
         }
+        let file = credentialsFile
+        let data = try await OffMain.run { try? Data(contentsOf: file) }
+        guard let data else { throw CocoaError(.fileNoSuchFile) }
+        let payload = try Self.decoder().decode(Payload.self, from: data)
+        return SyncResult(
+            credential: .cliToken(
+                accessToken: payload.accessToken,
+                refreshToken: payload.refreshToken,
+                expiresAt: payload.expiresAt
+            ),
+            subscriptionPlan: payload.subscriptionType
+        )
     }
 
     // `static` on purpose: these run inside the `@Sendable` closure above, and
@@ -177,14 +148,17 @@ nonisolated struct CLICredentialReader {
 }
 
 extension CLICredentialReader: CLICredentialReading {
+    /// Spelled out explicitly (rather than relying on the default-parameter
+    /// overload to satisfy the protocol requirement) so witness matching is
+    /// unambiguous.
+    func read() async throws -> SyncResult { try await read(interaction: .deny) }
+
     /// `CLICredentialReader.read()` is always a live Keychain probe, so a fresh
     /// read is just another read. Spelled out explicitly (rather than inheriting
     /// the protocol default) so the "always live" contract stays local: if a
     /// caching layer is ever added to `read()`, this must stay uncached to keep
     /// 401 recovery working.
-    func readFresh() async throws -> SyncResult {
-        try await read()
-    }
+    func readFresh() async throws -> SyncResult { try await read(interaction: .deny) }
 }
 
 /// Short-lived shared cache around Claude Code credential reads. The real read

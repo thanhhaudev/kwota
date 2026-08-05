@@ -28,7 +28,7 @@ final class CLITokenRefresherTests: XCTestCase {
     private func makeReader(_ probeJSON: String?) -> CLICredentialReader {
         CLICredentialReader(
             credentialsFile: temp.file("missing.json"),
-            keychainProbe: { probeJSON.map { Data($0.utf8) } }
+            gateway: StubKeychainGateway(read: { probeJSON.map { Data($0.utf8) } })
         )
     }
 
@@ -45,19 +45,16 @@ final class CLITokenRefresherTests: XCTestCase {
         let stored = cliToken(access: "stored", expiresAt: baseDate.addingTimeInterval(120))
         try await store.write(stored, for: id)
 
-        var probeCalled = false
+        let gateway = StubKeychainGateway(read: { nil })
         let reader = CLICredentialReader(
             credentialsFile: temp.file("missing.json"),
-            keychainProbe: {
-                probeCalled = true
-                return nil
-            }
+            gateway: gateway
         )
         let refresher = makeRefresher(reader: reader, now: baseDate)
 
         let result = try await refresher.freshen(profileId: id, current: stored, minLifetime: 60)
         XCTAssertEqual(result, stored)
-        XCTAssertFalse(probeCalled, "Probe must not be touched when stored token still has lifetime headroom")
+        XCTAssertEqual(gateway.readCount, 0, "Probe must not be touched when stored token still has lifetime headroom")
     }
 
     func testFreshenReadsCLIWhenTokenIsWithinMinLifetime() async throws {
@@ -119,7 +116,7 @@ final class CLITokenRefresherTests: XCTestCase {
         // Empty file path + nil keychain probe → reader.read() throws.
         let reader = CLICredentialReader(
             credentialsFile: temp.file("missing.json"),
-            keychainProbe: { nil }
+            gateway: StubKeychainGateway(read: { nil })
         )
         let refresher = makeRefresher(reader: reader, now: baseDate)
 
@@ -135,19 +132,16 @@ final class CLITokenRefresherTests: XCTestCase {
         let id = UUID()
         let stored: Credential = .sessionKey(value: "sk-xyz")
 
-        var probeCalled = false
+        let gateway = StubKeychainGateway(read: { nil })
         let reader = CLICredentialReader(
             credentialsFile: temp.file("missing.json"),
-            keychainProbe: {
-                probeCalled = true
-                return nil
-            }
+            gateway: gateway
         )
         let refresher = makeRefresher(reader: reader, now: baseDate)
 
         let result = try await refresher.freshen(profileId: id, current: stored, minLifetime: 60)
         XCTAssertEqual(result, stored)
-        XCTAssertFalse(probeCalled)
+        XCTAssertEqual(gateway.readCount, 0)
     }
 
     func testForceRefreshReadsAndWritesWhenNoPreviousProvided() async throws {
@@ -173,7 +167,7 @@ final class CLITokenRefresherTests: XCTestCase {
         let id = UUID()
         let reader = CLICredentialReader(
             credentialsFile: temp.file("missing.json"),
-            keychainProbe: { nil }
+            gateway: StubKeychainGateway(read: { nil })
         )
         let refresher = makeRefresher(reader: reader, now: baseDate)
 
@@ -214,13 +208,10 @@ final class CLITokenRefresherTests: XCTestCase {
         let kcJSON = #"""
         {"accessToken":"fresh","refreshToken":"r","expiresAt":"2030-01-01T00:00:00Z"}
         """#
-        var readCallCount = 0
+        let gateway = StubKeychainGateway(read: { Data(kcJSON.utf8) })
         let reader = CLICredentialReader(
             credentialsFile: temp.file("missing.json"),
-            keychainProbe: {
-                readCallCount += 1
-                return Data(kcJSON.utf8)
-            }
+            gateway: gateway
         )
         let refresher = makeRefresher(reader: reader, now: baseDate)
 
@@ -230,7 +221,7 @@ final class CLITokenRefresherTests: XCTestCase {
         let r2 = try await refresher.freshen(profileId: id, current: stored, minLifetime: 60)
         let r3 = try await refresher.freshen(profileId: id, current: stored, minLifetime: 60)
 
-        XCTAssertEqual(readCallCount, 1, "Subsequent freshen calls within TTL must reuse cached credential")
+        XCTAssertEqual(gateway.readCount, 1, "Subsequent freshen calls within TTL must reuse cached credential")
         guard case .cliToken(let a1, _, _) = r1,
               case .cliToken(let a2, _, _) = r2,
               case .cliToken(let a3, _, _) = r3 else {
@@ -250,25 +241,22 @@ final class CLITokenRefresherTests: XCTestCase {
         let kcJSON = #"""
         {"accessToken":"fresh","refreshToken":"r","expiresAt":"2030-01-01T00:00:00Z"}
         """#
-        var readCallCount = 0
+        let gateway = StubKeychainGateway(read: { Data(kcJSON.utf8) })
         let reader = CLICredentialReader(
             credentialsFile: temp.file("missing.json"),
-            keychainProbe: {
-                readCallCount += 1
-                return Data(kcJSON.utf8)
-            }
+            gateway: gateway
         )
         // now() cần advance qua TTL (10s) cho lần gọi thứ 2.
         var currentNow = baseDate
         let refresher = CLITokenRefresher(reader: reader, store: store, now: { currentNow })
 
         _ = try await refresher.freshen(profileId: id, current: stored, minLifetime: 60)
-        XCTAssertEqual(readCallCount, 1)
+        XCTAssertEqual(gateway.readCount, 1)
 
         // Advance past TTL.
         currentNow = baseDate.addingTimeInterval(15)
         _ = try await refresher.freshen(profileId: id, current: stored, minLifetime: 60)
-        XCTAssertEqual(readCallCount, 2, "After cache TTL, reader must be re-consulted")
+        XCTAssertEqual(gateway.readCount, 2, "After cache TTL, reader must be re-consulted")
     }
 
     func testForceRefreshWritesAndReturnsRotatedTokenWhenPreviousDiffers() async throws {
@@ -309,10 +297,10 @@ final class CLITokenRefresherTests: XCTestCase {
         var identityStillMatches = true
         let reader = CLICredentialReader(
             credentialsFile: temp.file("missing.json"),
-            keychainProbe: {
+            gateway: StubKeychainGateway(read: {
                 identityStillMatches = false
                 return Data(kcJSON.utf8)
-            }
+            })
         )
         let refresher = CLITokenRefresher(
             reader: reader, store: store, now: { self.baseDate },
@@ -363,10 +351,10 @@ final class CLITokenRefresherTests: XCTestCase {
         var identityStillMatches = true
         let reader = CLICredentialReader(
             credentialsFile: temp.file("missing.json"),
-            keychainProbe: {
+            gateway: StubKeychainGateway(read: {
                 identityStillMatches = false
                 return Data(kcJSON.utf8)
-            }
+            })
         )
         let refresher = CLITokenRefresher(
             reader: reader, store: store, now: { self.baseDate },

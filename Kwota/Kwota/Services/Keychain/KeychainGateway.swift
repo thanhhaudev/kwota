@@ -25,7 +25,7 @@
 import Foundation
 import Security
 
-nonisolated enum KeychainInteraction: Sendable {
+nonisolated enum KeychainInteraction: Sendable, Equatable {
     /// Background paths. A consent dialog is a defect here, not a prompt.
     case deny
     /// User-initiated paths only — the person is at the machine to answer.

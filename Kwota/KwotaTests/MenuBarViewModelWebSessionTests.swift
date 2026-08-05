@@ -94,7 +94,7 @@ final class MenuBarViewModelWebSessionTests: XCTestCase {
         let stubRefresher = CLITokenRefresher(
             reader: CLICredentialReader(
                 credentialsFile: temp.file("missing-credentials.json"),
-                keychainProbe: { nil }
+                gateway: StubKeychainGateway(read: { nil })
             ),
             store: keychain
         )
@@ -374,7 +374,7 @@ final class MenuBarViewModelWebSessionTests: XCTestCase {
         let refresher = CLITokenRefresher(
             reader: CLICredentialReader(
                 credentialsFile: temp.file("missing.json"),
-                keychainProbe: { Data(kcJSON.utf8) }
+                gateway: StubKeychainGateway(read: { Data(kcJSON.utf8) })
             ),
             store: keychain
         )

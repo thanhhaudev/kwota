@@ -17,7 +17,7 @@ final class CLICredentialReaderTests: XCTestCase {
     func testIsAvailableFalseWhenNeitherSourceExists() {
         let reader = CLICredentialReader(
             credentialsFile: temp.file("missing.json"),
-            keychainProbe: { nil }
+            gateway: StubKeychainGateway(read: { nil })
         )
         XCTAssertFalse(reader.isAvailable)
     }
@@ -25,7 +25,7 @@ final class CLICredentialReaderTests: XCTestCase {
     func testIsAvailableTrueWhenFileExists() throws {
         let url = temp.file("creds.json")
         try Data("{}".utf8).write(to: url)
-        let reader = CLICredentialReader(credentialsFile: url, keychainProbe: { nil })
+        let reader = CLICredentialReader(credentialsFile: url, gateway: StubKeychainGateway(read: { nil }))
         XCTAssertTrue(reader.isAvailable)
     }
 
@@ -33,19 +33,19 @@ final class CLICredentialReaderTests: XCTestCase {
         // isAvailable is file-only — a Keychain payload alone does not count.
         let reader = CLICredentialReader(
             credentialsFile: temp.file("missing.json"),
-            keychainProbe: { Data("{}".utf8) }
+            gateway: StubKeychainGateway(read: { Data("{}".utf8) })
         )
         XCTAssertFalse(reader.isAvailable)
     }
 
     func test_isAvailable_doesNotProbeKeychain() {
-        var probed = false
+        let gateway = StubKeychainGateway(read: { Data("x".utf8) })
         let reader = CLICredentialReader(
             credentialsFile: URL(fileURLWithPath: "/nonexistent/.credentials.json"),
-            keychainProbe: { probed = true; return Data("x".utf8) }
+            gateway: gateway
         )
         _ = reader.isAvailable
-        XCTAssertFalse(probed, "isAvailable must not read the Keychain")
+        XCTAssertEqual(gateway.readCount, 0, "isAvailable must not read the Keychain")
         XCTAssertFalse(reader.isAvailable, "no file present → not available")
     }
 
@@ -55,7 +55,7 @@ final class CLICredentialReaderTests: XCTestCase {
         {"accessToken":"a-token","refreshToken":"r-token","expiresAt":"2030-01-01T00:00:00Z"}
         """#
         try Data(json.utf8).write(to: url)
-        let reader = CLICredentialReader(credentialsFile: url, keychainProbe: { nil })
+        let reader = CLICredentialReader(credentialsFile: url, gateway: StubKeychainGateway(read: { nil }))
         let result = try await reader.read()
         guard case .cliToken(let access, let refresh, let expires) = result.credential else {
             return XCTFail("expected cliToken")
@@ -78,7 +78,7 @@ final class CLICredentialReaderTests: XCTestCase {
         """#
         let reader = CLICredentialReader(
             credentialsFile: url,
-            keychainProbe: { Data(kcJSON.utf8) }
+            gateway: StubKeychainGateway(read: { Data(kcJSON.utf8) })
         )
         let result = try await reader.read()
         guard case .cliToken(let access, _, _) = result.credential else { return XCTFail("expected cliToken") }
@@ -92,7 +92,7 @@ final class CLICredentialReaderTests: XCTestCase {
         """#
         let reader = CLICredentialReader(
             credentialsFile: temp.file("missing.json"),
-            keychainProbe: { Data(kcJSON.utf8) }
+            gateway: StubKeychainGateway(read: { Data(kcJSON.utf8) })
         )
         let result = try await reader.read()
         guard case .cliToken(let access, _, _) = result.credential else { return XCTFail("expected cliToken") }
@@ -102,7 +102,7 @@ final class CLICredentialReaderTests: XCTestCase {
     func testReadThrowsWhenFileMalformedAndKeychainEmpty() async throws {
         let url = temp.file("creds.json")
         try Data("not json".utf8).write(to: url)
-        let reader = CLICredentialReader(credentialsFile: url, keychainProbe: { nil })
+        let reader = CLICredentialReader(credentialsFile: url, gateway: StubKeychainGateway(read: { nil }))
         await assertThrows { _ = try await reader.read() }
     }
 
@@ -159,11 +159,11 @@ final class CLICredentialReaderTests: XCTestCase {
         let started = DispatchSemaphore(value: 0)
         let reader = CLICredentialReader(
             credentialsFile: URL(fileURLWithPath: "/nonexistent"),
-            keychainProbe: {
+            gateway: StubKeychainGateway(read: {
                 started.signal()
                 Thread.sleep(forTimeInterval: 0.5)
                 return nil
-            }
+            })
         )
 
         let task = Task { try? await reader.read() }
@@ -187,11 +187,11 @@ final class CLICredentialReaderTests: XCTestCase {
         let reader = CachedCLICredentialReader(
             reader: CLICredentialReader(
                 credentialsFile: URL(fileURLWithPath: "/nonexistent"),
-                keychainProbe: {
+                gateway: StubKeychainGateway(read: {
                     probeCount.lock(); probes += 1; probeCount.unlock()
                     Thread.sleep(forTimeInterval: 2.0)   // longer than the timeout below
                     return nil
-                }
+                })
             ),
             timeout: 0.2
         )
@@ -298,10 +298,10 @@ final class CLICredentialReaderTests: XCTestCase {
         let reader = CachedCLICredentialReader(
             reader: CLICredentialReader(
                 credentialsFile: URL(fileURLWithPath: "/nonexistent"),
-                keychainProbe: {
+                gateway: StubKeychainGateway(read: {
                     Thread.sleep(forTimeInterval: 0.4)
                     return nil
-                }
+                })
             ),
             timeout: 0.1
         )
@@ -346,6 +346,31 @@ final class CLICredentialReaderTests: XCTestCase {
     private func accessToken(_ credential: Credential) -> String? {
         guard case .cliToken(let access, _, _) = credential else { return nil }
         return access
+    }
+
+    func test_readDoesNotPromptOnBackgroundPaths() async throws {
+        let recorded = InteractionRecorder()
+        let reader = CLICredentialReader(
+            credentialsFile: URL(fileURLWithPath: "/nonexistent/.credentials.json"),
+            gateway: recorded
+        )
+        _ = try? await reader.read()
+        XCTAssertEqual(recorded.lastInteraction, .deny)
+    }
+
+    private final class InteractionRecorder: KeychainGateways, @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: KeychainInteraction?
+        var lastInteraction: KeychainInteraction? {
+            lock.lock(); defer { lock.unlock() }; return storage
+        }
+        func read(service: String, account: String?, interaction: KeychainInteraction) async throws -> Data? {
+            lock.lock(); storage = interaction; lock.unlock()
+            return nil
+        }
+        func write(_ data: Data, service: String, account: String) async throws {}
+        func delete(service: String, account: String) async throws {}
+        func deleteAll(service: String) async throws {}
     }
 }
 

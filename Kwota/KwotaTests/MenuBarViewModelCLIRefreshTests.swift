@@ -71,7 +71,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
     private func makeReader(_ probeJSON: String?) -> CLICredentialReader {
         CLICredentialReader(
             credentialsFile: temp.file("missing.json"),
-            keychainProbe: { probeJSON.map { Data($0.utf8) } }
+            gateway: StubKeychainGateway(read: { probeJSON.map { Data($0.utf8) } })
         )
     }
 
@@ -338,7 +338,7 @@ final class MenuBarViewModelCLIRefreshTests: XCTestCase {
         // Reader has neither file nor keychain probe payload → throws.
         let reader = CLICredentialReader(
             credentialsFile: temp.file("missing.json"),
-            keychainProbe: { nil }
+            gateway: StubKeychainGateway(read: { nil })
         )
         let refresher = CLITokenRefresher(reader: reader, store: keychain)
 

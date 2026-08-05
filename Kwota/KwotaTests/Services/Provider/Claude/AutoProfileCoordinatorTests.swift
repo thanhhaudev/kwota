@@ -45,7 +45,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
             keychain: keychain ?? KeychainCredentialStore(service: "com.thanhhaudev.Kwota.test.\(UUID())"),
             credentialReader: credentialReader ?? CLICredentialReader(
                 credentialsFile: URL(fileURLWithPath: "/nonexistent"),
-                keychainProbe: { nil }
+                gateway: StubKeychainGateway(read: { nil })
             ),
             profileFetcher: profileFetcher,
             clock: clock,
@@ -612,12 +612,12 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         let keychain = KeychainCredentialStore(service: keychainService)
         let credReader = CLICredentialReader(
             credentialsFile: URL(fileURLWithPath: "/nonexistent"),
-            keychainProbe: {
+            gateway: StubKeychainGateway(read: {
                 let payload = """
                 {"claudeAiOauth":{"accessToken":"seed-tok","refreshToken":"r","expiresAt":99999999999}}
                 """
                 return Data(payload.utf8)
-            }
+            })
         )
         let watcher = FakeWatcher()
         let coord = makeCoordinator(
@@ -656,12 +656,12 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         try store.add(existing)
         let credReader = CLICredentialReader(
             credentialsFile: URL(fileURLWithPath: "/nonexistent"),
-            keychainProbe: {
+            gateway: StubKeychainGateway(read: {
                 let payload = """
                 {"claudeAiOauth":{"accessToken":"heal-tok","refreshToken":"r","expiresAt":99999999999}}
                 """
                 return Data(payload.utf8)
-            }
+            })
         )
         let watcher = FakeWatcher()
         let coord = makeCoordinator(
@@ -1021,10 +1021,10 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                                               expiresAt: .distantFuture)
         try await kwotaKeychain.write(storedToken, for: profile.id)
 
-        var readerCallCount = 0
+        let gateway = StubKeychainGateway(read: { nil })
         let reader = CLICredentialReader(
             credentialsFile: URL(fileURLWithPath: "/nonexistent"),
-            keychainProbe: { readerCallCount += 1; return nil }
+            gateway: gateway
         )
         let watcher = FakeWatcher()
         let coord = makeCoordinator(
@@ -1040,7 +1040,7 @@ final class AutoProfileCoordinatorTests: XCTestCase {
                                   credentialFingerprint: "ff"))
 
         await settleSeedTask()
-        XCTAssertEqual(readerCallCount, 0,
+        XCTAssertEqual(gateway.readCount, 0,
             "a valid stored credential must short-circuit before reading Claude Code's Keychain — including the startup baseline emit")
     }
 
@@ -1307,12 +1307,12 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         let kc = KeychainCredentialStore(service: "com.thanhhaudev.Kwota.test.\(UUID())")
         let credReader = CLICredentialReader(
             credentialsFile: URL(fileURLWithPath: "/nonexistent"),
-            keychainProbe: {
+            gateway: StubKeychainGateway(read: {
                 let payload = """
                 {"claudeAiOauth":{"accessToken":"seed-tok","refreshToken":"r","expiresAt":99999999999}}
                 """
                 return Data(payload.utf8)
-            }
+            })
         )
         let stub = StubOAuthProfileFetcher()
         stub.outcome = .success(.init(
