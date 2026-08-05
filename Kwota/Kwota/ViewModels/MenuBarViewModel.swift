@@ -2339,6 +2339,20 @@ final class MenuBarViewModel {
         }
     }
 
+    /// The one place allowed to raise a Keychain consent dialog on the
+    /// credential path: the user pressed a button, so they are present to
+    /// answer it. Everything scheduled runs with `.deny`.
+    func grantKeychainAccess() async {
+        guard let profile = profileStore.activeProfile else { return }
+        do {
+            _ = try await credentialStore.read(for: profile.id, interaction: .allow)
+            await refresh(profile: profile)
+        } catch {
+            AppLog.shared.log("grantKeychainAccess failed: \(error)", level: .warn)
+            authState = .error(error.localizedDescription)
+        }
+    }
+
     /// A successful fetch proves the provider's throttle has cleared —
     /// drop every piece of rate-limit state in lockstep: the banner
     /// window, the silent-429 counter, AND the coordinator's verbatim
