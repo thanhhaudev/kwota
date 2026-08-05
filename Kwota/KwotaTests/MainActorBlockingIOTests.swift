@@ -72,9 +72,17 @@ final class MainActorBlockingIOTests: XCTestCase {
         ],
         "Services/Awake/ProviderActivityScanner.swift": [
             // ProviderActivityBackfill enum is now nonisolated (F-006
-            // declaration-hygiene fix); scanUntracked's read is only ever
-            // invoked from CodexActivitySource/AntigravityActivitySource call
-            // sites that already wrap it in OffMain.run (F-006 already-safe).
+            // declaration-hygiene fix).
+            // Data(contentsOf lives in scanUntracked(), whose only call
+            // sites (CodexActivitySource/AntigravityActivitySource) already
+            // wrap it in OffMain.run (F-006 already-safe).
+            // String(contentsOf lives in the *different* function scan(),
+            // reached synchronously and unwrapped only through the dead
+            // ActivityHistorian.backfillProviders(_:) — zero production
+            // callers today (grep-confirmed; only backfillProvidersAsync()
+            // is used, and that path is OffMain.run-wrapped). Not proven
+            // off-main; tolerated because it's dead-code-shaped, not a live
+            // blocking-IO bug (F-006 escalated).
             "Data(contentsOf", "String(contentsOf",
         ],
         "Services/Awake/WatchdogEvidenceWriter.swift": [
