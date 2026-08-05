@@ -361,6 +361,91 @@ final class MenuBarViewModelGrantKeychainAccessTests: XCTestCase {
         }
     }
 
+    // MARK: - A third adversarial-review round (round 6), Finding 3: per-profile scoping
+
+    /// The actual bug: `isGrantingKeychainAccess` and the captured `profile`
+    /// were both scoped to the whole view model, not to a specific Grant
+    /// attempt. If profile A's attempt is still parked (waiting on the CLI's
+    /// `.allow` read, up to `allowTimeout`/120s) when the user switches the
+    /// active profile to B: (a) A's eventual resolution must not clobber
+    /// `authState` — a single, VM-global property representing the
+    /// CURRENTLY DISPLAYED profile's auth state — with stale information
+    /// about A once B is active, and (b) B must be able to start its OWN
+    /// Grant attempt rather than have the re-entry guard silently no-op it
+    /// because A's attempt is still in flight.
+    ///
+    /// Setup: A and B are both `.cliSync` profiles, sharing the VM's single
+    /// `cliCredentialReader`. A's `grantKeychainAccess()` call parks on the
+    /// first CLI read; the test switches the active profile to B and
+    /// starts B's OWN `grantKeychainAccess()` call, which must reach the
+    /// CLI reader too (not be blocked by A's still-in-flight attempt) and
+    /// parks on the SECOND read. B's read is released and resolves FIRST,
+    /// landing its own (distinguishable) outcome in `authState`. THEN A's
+    /// stale read is released and resolves — its outcome must NOT overwrite
+    /// what B already landed.
+    @MainActor
+    func test_grantKeychainAccess_staleAttemptForInactiveProfile_doesNotClobberNewlyActiveProfilesAuthState() async throws {
+        let gate = TwoCallGate()
+        let recordingGateway = RecordingKeychainGateway()
+        // A's eventual outcome (a genuinely unexpected status) and B's
+        // (a cancel/timeout shape) are deliberately DIFFERENT `authState`
+        // shapes so the test can tell whose outcome actually landed.
+        let cliReader = TwoCallCLICredentialReader(
+            gate: gate,
+            firstResult: .failure(KeychainGatewayError.status(errSecParam)),
+            secondResult: .failure(KeychainGatewayError.interactionNotAllowed)
+        )
+        let vm = makeVM(gateway: recordingGateway, cliCredentialReader: cliReader)
+        let profileA = Profile(name: "A", authMethod: .cliSync)
+        let profileB = Profile(name: "B", authMethod: .cliSync)
+        try? vm.profileStore.add(profileA)
+        try? vm.profileStore.add(profileB)
+        // `add` makes the FIRST profile active by default; pin it explicitly.
+        try? vm.profileStore.setActive(id: profileA.id)
+
+        let taskA = Task { @MainActor in await vm.grantKeychainAccess() }
+
+        var deadline = Date().addingTimeInterval(5.0)
+        while Date() < deadline {
+            if await gate.callCount >= 1 { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let callCountAfterA = await gate.callCount
+        XCTAssertEqual(callCountAfterA, 1, "precondition: A's attempt must be parked in the CLI read")
+        XCTAssertTrue(vm.isGrantingKeychainAccess, "A's attempt is in flight and A is the active profile")
+
+        // Switch the active profile to B while A's attempt is still parked.
+        try? vm.profileStore.setActive(id: profileB.id)
+        XCTAssertFalse(vm.isGrantingKeychainAccess,
+                       "B has no in-flight attempt of its own yet — isGrantingKeychainAccess tracks the ACTIVE profile")
+
+        // B's OWN Grant attempt must not be blocked by A's still-in-flight one.
+        let taskB = Task { @MainActor in await vm.grantKeychainAccess() }
+        deadline = Date().addingTimeInterval(5.0)
+        while Date() < deadline {
+            if await gate.callCount >= 2 { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let callCountAfterB = await gate.callCount
+        XCTAssertEqual(callCountAfterB, 2,
+                       "B's Grant attempt must reach the CLI read — not be blocked by A's still-in-flight attempt")
+        XCTAssertTrue(vm.isGrantingKeychainAccess, "B's own attempt is now in flight and B is the active profile")
+
+        // Resolve B first — its own outcome must land normally.
+        await gate.releaseSecond()
+        await taskB.value
+        XCTAssertEqual(vm.authState, .keychainAccessNeeded, "B's own outcome must land in authState")
+        XCTAssertFalse(vm.isGrantingKeychainAccess, "B's attempt has finished")
+
+        // NOW resolve A's stale attempt. If profile-scoping is missing,
+        // A's genuine-error outcome would clobber `authState` here.
+        await gate.releaseFirst()
+        await taskA.value
+        XCTAssertEqual(vm.authState, .keychainAccessNeeded,
+                       "A's stale outcome, resolving after the active profile moved to B, must not clobber B's authState")
+        XCTAssertFalse(vm.isGrantingKeychainAccess, "both attempts have finished; the active profile (B) has none in flight")
+    }
+
     // MARK: - Fixture
 
     /// Minimal hermetic `MenuBarViewModel` fixture. Unlike
@@ -627,5 +712,79 @@ private final class GatedSpyCLICredentialReader: CLICredentialReading, @unchecke
         _ = await gate.register()
         await gate.parkUntilReleased()
         return try result.get()
+    }
+}
+
+// MARK: - Round 6, Finding 3 fixtures
+
+/// Parks the FIRST `readFresh` call until `releaseFirst()`, and the SECOND
+/// call (from a different `grantKeychainAccess()` invocation, for a
+/// different profile) until `releaseSecond()` — independently. Lets the
+/// stale-attempt test resolve the two calls in a specific, controlled
+/// order (second/newer one first, first/stale one last) to prove the
+/// stale one doesn't clobber `authState` once it finally resolves.
+private actor TwoCallGate {
+    private(set) var callCount = 0
+    private var releasedFirst = false
+    private var releasedSecond = false
+    private var parkedFirst: [CheckedContinuation<Void, Never>] = []
+    private var parkedSecond: [CheckedContinuation<Void, Never>] = []
+
+    /// Registers a call and returns which slot (1 or 2) it occupies, then
+    /// parks it on that slot's own gate.
+    func registerAndPark() async -> Int {
+        callCount += 1
+        let index = callCount
+        if index == 1 {
+            if !releasedFirst {
+                await withCheckedContinuation { parkedFirst.append($0) }
+            }
+        } else {
+            if !releasedSecond {
+                await withCheckedContinuation { parkedSecond.append($0) }
+            }
+        }
+        return index
+    }
+
+    func releaseFirst() {
+        releasedFirst = true
+        parkedFirst.forEach { $0.resume() }
+        parkedFirst.removeAll()
+    }
+
+    func releaseSecond() {
+        releasedSecond = true
+        parkedSecond.forEach { $0.resume() }
+        parkedSecond.removeAll()
+    }
+}
+
+/// A `CLICredentialReading` double whose first `readFresh` call parks on
+/// `gate`'s first slot and resolves with `firstResult`; every subsequent
+/// call parks on the second slot and resolves with `secondResult`. Stands
+/// in for two independent `grantKeychainAccess()` attempts (one per
+/// profile) sharing the VM's single `cliCredentialReader`, each resolvable
+/// independently by the test.
+private final class TwoCallCLICredentialReader: CLICredentialReading, @unchecked Sendable {
+    private let gate: TwoCallGate
+    private let firstResult: Result<CLICredentialReader.SyncResult, Error>
+    private let secondResult: Result<CLICredentialReader.SyncResult, Error>
+
+    init(
+        gate: TwoCallGate,
+        firstResult: Result<CLICredentialReader.SyncResult, Error>,
+        secondResult: Result<CLICredentialReader.SyncResult, Error>
+    ) {
+        self.gate = gate
+        self.firstResult = firstResult
+        self.secondResult = secondResult
+    }
+
+    func read() async throws -> CLICredentialReader.SyncResult { try firstResult.get() }
+
+    func readFresh(interaction: KeychainInteraction) async throws -> CLICredentialReader.SyncResult {
+        let index = await gate.registerAndPark()
+        return index == 1 ? try firstResult.get() : try secondResult.get()
     }
 }

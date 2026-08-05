@@ -70,15 +70,31 @@ final class MenuBarViewModel {
     private(set) var lastFetchedAt: Date?
     private(set) var lastError: String?
     private(set) var isSwitchingProfile: Bool = false
-    /// True while `grantKeychainAccess()` is in flight. Each `.allow` read
-    /// inside it can take up to `allowTimeout` (120s) waiting on a real
-    /// consent dialog, and `readFresh(interaction:)` deliberately bypasses
-    /// the CLI reader's cache/in-flight dedup for `.allow`, so without this
-    /// guard repeated Grant-button taps would each queue another up-to-120s
-    /// probe on the serial Keychain gateway. Threaded into
-    /// `KeychainAccessBanner`'s `isBusy` to disable the button and show a
-    /// spinner instead, matching `RateLimitBanner.isProbing`'s shape.
-    private(set) var isGrantingKeychainAccess: Bool = false
+    /// Profile ids with a `grantKeychainAccess()` attempt currently in
+    /// flight. Scoped per-profile (not a single process-wide Bool) so a
+    /// still-draining attempt for one profile — it can wait up to
+    /// `allowTimeout` (120s) on a real consent dialog — does not block a
+    /// DIFFERENT profile's Grant button from working. See Finding 3 (round
+    /// 6 of this evening's KeychainGateway/grant fixes).
+    private(set) var grantingProfileIDs: Set<UUID> = []
+    /// True while `grantKeychainAccess()` is in flight FOR THE CURRENTLY
+    /// ACTIVE PROFILE specifically — not merely "some profile, possibly a
+    /// stale one the user switched away from." Each `.allow` read inside
+    /// it can take up to `allowTimeout` (120s) waiting on a real consent
+    /// dialog, and `readFresh(interaction:)` deliberately bypasses the CLI
+    /// reader's cache/in-flight dedup for `.allow`, so without the
+    /// per-profile guard behind this, repeated Grant-button taps for the
+    /// SAME profile would each queue another up-to-120s probe on the
+    /// serial Keychain gateway. Threaded into `KeychainAccessBanner`'s
+    /// `isBusy` to disable the button and show a spinner instead, matching
+    /// `RateLimitBanner.isProbing`'s shape — but that banner always
+    /// renders for whichever profile is currently displayed, so a
+    /// still-in-flight attempt for a DIFFERENT (now inactive) profile must
+    /// not disable ITS banner.
+    var isGrantingKeychainAccess: Bool {
+        guard let activeID = profileStore.activeProfile?.id else { return false }
+        return grantingProfileIDs.contains(activeID)
+    }
 
     // MARK: - Usage tab chart-region resolution
 
@@ -2389,15 +2405,21 @@ final class MenuBarViewModel {
     /// profiles fall through to the Kwota-own-store-only path below, same
     /// as `.sessionKey` profiles.
     func grantKeychainAccess() async {
-        // Re-entry guard: each `.allow` read below can take up to
-        // `allowTimeout` (120s) waiting on a real dialog, and the CLI read
-        // deliberately bypasses its normal in-flight dedup for `.allow` — so
-        // without this, repeated taps on the Grant banner would each queue
-        // another up-to-120s probe on the serial gateway behind the first.
-        guard !isGrantingKeychainAccess else { return }
         guard let profile = profileStore.activeProfile else { return }
-        isGrantingKeychainAccess = true
-        defer { isGrantingKeychainAccess = false }
+        // Re-entry guard, scoped to THIS profile (Finding 3, round 6): each
+        // `.allow` read below can take up to `allowTimeout` (120s) waiting
+        // on a real dialog, and the CLI read deliberately bypasses its
+        // normal in-flight dedup for `.allow` — so without this, repeated
+        // taps on the Grant banner for the SAME profile would each queue
+        // another up-to-120s probe on the serial gateway behind the first.
+        // Scoped per-profile-id (`grantingProfileIDs`, not a single
+        // process-wide Bool) so a still-in-flight attempt for one profile
+        // does not block a DIFFERENT profile's Grant button — the old
+        // single-Bool guard would silently no-op profile B's tap while
+        // profile A's attempt was still draining in the background.
+        guard !grantingProfileIDs.contains(profile.id) else { return }
+        grantingProfileIDs.insert(profile.id)
+        defer { grantingProfileIDs.remove(profile.id) }
         do {
             _ = try await credentialStore.read(for: profile.id, interaction: .allow)
             if profile.authMethod == .cliSync && profile.providerID == .claude {
@@ -2413,7 +2435,12 @@ final class MenuBarViewModel {
                 // `guardRefresh` is the same identity gate `CLITokenRefresher`
                 // uses in production (see its wiring in `init` above) — it
                 // re-reads the CLI's current identity rather than trusting
-                // whatever was true when this function started.
+                // whatever was true when this function started. This check
+                // is necessary but not sufficient for Finding 3: it guards
+                // against a removed profile or a CLI account switch, not
+                // against the user having simply switched to a DIFFERENT,
+                // still-valid active profile — `setKeychainAccessNeededIfStillActive`
+                // below covers that.
                 guard profileStore.profiles.contains(where: { $0.id == profile.id }),
                       autoProfileCoordinator.guardRefresh(profile: profile)
                 else {
@@ -2421,11 +2448,25 @@ final class MenuBarViewModel {
                         "grantKeychainAccess: profile \(profile.id.uuidString.prefix(8)) no longer valid after the CLI grant read resolved — skipping the write",
                         level: .warn
                     )
-                    authState = .keychainAccessNeeded
+                    setKeychainAccessNeededIfStillActive(profile)
                     return
                 }
+                // The write itself is scoped to `profile.id`'s own Keychain
+                // entry — it persists profile A's own freshly-granted
+                // credential under A's own slot, which is legitimate and
+                // useful for A's next activation/background refresh
+                // regardless of which profile is currently displayed. Not
+                // gated on "still active": unlike `authState` (a single,
+                // VM-global property representing the DISPLAYED profile),
+                // this write cannot clobber a different profile's state.
                 try await credentialStore.write(cliResult.credential, for: profile.id)
             }
+            // `refresh(profile:)` already self-guards its own `authState`
+            // writes via `canCommitToUI()` (profile.id == activeProfileId),
+            // so calling it unconditionally here for a since-deactivated
+            // profile is harmless — it still refreshes that profile's own
+            // background summary/history, matching the app's existing
+            // pattern of fetching non-active profiles in the background.
             await refresh(profile: profile)
         } catch KeychainCredentialStore.KeychainError.interactionNotAllowed,
                 KeychainCredentialStore.KeychainError.timedOut,
@@ -2436,11 +2477,49 @@ final class MenuBarViewModel {
             // Nothing is actually wrong with the account — leave the Grant
             // banner in place for another attempt rather than claiming the
             // session expired.
-            authState = .keychainAccessNeeded
+            setKeychainAccessNeededIfStillActive(profile)
         } catch {
             AppLog.shared.log("grantKeychainAccess failed: \(error)", level: .warn)
+            // Only skip when a DIFFERENT, still-valid profile is now
+            // active — if there is no active profile at all (e.g. `profile`
+            // was the last one and just got removed), there's no other
+            // currently-displayed profile whose state this would clobber,
+            // so the pre-existing behavior of surfacing the error still
+            // applies.
+            if let activeID = profileStore.activeProfile?.id, activeID != profile.id {
+                AppLog.shared.log(
+                    "grantKeychainAccess: profile \(profile.id.uuidString.prefix(8)) failed with a genuine error after the active profile changed away from it — not clobbering the now-active profile's authState",
+                    level: .info
+                )
+                return
+            }
             authState = .error(error.localizedDescription)
         }
+    }
+
+    /// Sets `authState = .keychainAccessNeeded` only if `profile` is still
+    /// the active one (Finding 3, round 6). `grantKeychainAccess()` can
+    /// wait up to `allowTimeout` (120s) on a real dialog, during which the
+    /// user is free to switch the active profile; `authState` is a single,
+    /// VM-global property representing the CURRENTLY DISPLAYED profile's
+    /// auth state, so an attempt that resolves after the user moved on
+    /// must not silently clobber it with stale information about a profile
+    /// they're no longer looking at.
+    private func setKeychainAccessNeededIfStillActive(_ profile: Profile) {
+        // Only skip when a DIFFERENT, still-valid profile is now active —
+        // if there is no active profile at all (e.g. `profile` was the
+        // last one and just got removed), there's no other
+        // currently-displayed profile whose state this would clobber, so
+        // the pre-existing behavior of landing on the Grant banner still
+        // applies.
+        if let activeID = profileStore.activeProfile?.id, activeID != profile.id {
+            AppLog.shared.log(
+                "grantKeychainAccess: profile \(profile.id.uuidString.prefix(8)) resolved to keychainAccessNeeded after the active profile changed away from it — not clobbering the now-active profile's authState",
+                level: .info
+            )
+            return
+        }
+        authState = .keychainAccessNeeded
     }
 
     /// A successful fetch proves the provider's throttle has cleared —
