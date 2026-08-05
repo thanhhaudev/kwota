@@ -222,6 +222,7 @@ final class KeychainGatewayTests: XCTestCase {
         _ = try? await gateway.read(service: "s", account: "a", interaction: .deny)
 
         // A `.deny` call must still fail fast while wedged — unchanged.
+        let denyStarted = Date()
         do {
             _ = try await gateway.read(service: "s", account: "b", interaction: .deny)
             XCTFail("expected timedOut")
@@ -230,6 +231,8 @@ final class KeychainGatewayTests: XCTestCase {
         } catch {
             XCTFail("wrong error type: \(error)")
         }
+        XCTAssertLessThan(Date().timeIntervalSince(denyStarted), 0.15,
+                          "a wedged gateway must fail a .deny call fast, not wait out its own deadline")
 
         // An `.allow` call must reach the primitives and get the real
         // second-call answer — NOT an immediate `.timedOut` the way `.deny`
@@ -242,6 +245,111 @@ final class KeychainGatewayTests: XCTestCase {
                        "a wedged gateway must still let .allow reach a real answer via the escape hatch")
         XCTAssertLessThan(Date().timeIntervalSince(started), 1.0,
                           "the escape-hatch queue must not be blocked by the parked primary-queue closure")
+    }
+
+    /// Closes the wedge-clear boundary race a second review round found in
+    /// the escape hatch above: `wedged` clearing and an escape `.allow`
+    /// closure finishing are two independent events (the original stuck
+    /// probe finally answering has nothing to do with when a human answers
+    /// the Grant dialog). The original fix only gated `.deny` on `wedged`,
+    /// so a `.deny` call freed by `wedged` clearing could resume on the
+    /// primary queue while an escape closure was still draining on
+    /// `allowEscapeQueue` — two lanes free to write the shared interaction
+    /// flag at once, exactly what the single serial queue exists to
+    /// prevent.
+    ///
+    /// Setup: call 0 (the wedge-arming probe) and call 1 (the Grant escape
+    /// call) each block on their own semaphore so the test controls exactly
+    /// when each "finally answers." Any further call reaching `copyMatching`
+    /// (case `default`) would prove a `.deny` call snuck through while the
+    /// escape call was still draining.
+    func test_denyFailsFast_whileAnEscapeAllowCallStillDrains_evenAfterWedgeClears() async throws {
+        let callIndex = UncheckedBox<Int>(0)
+        let probeGate = DispatchSemaphore(value: 0)
+        let escapeGate = DispatchSemaphore(value: 0)
+
+        let gateway = KeychainGateway(
+            primitives: primitives(copyMatching: { _ in
+                var index = -1
+                callIndex.mutate { count in
+                    index = count
+                    count += 1
+                }
+                switch index {
+                case 0:
+                    probeGate.wait()  // "the stuck probe finally answers" — test-controlled
+                    return (errSecSuccess, nil)
+                case 1:
+                    escapeGate.wait()  // the still-unanswered Grant dialog
+                    return (errSecSuccess, Data("granted".utf8) as AnyObject)
+                default:
+                    // Must never be reached by a NEW .deny call while
+                    // escapeGate is still held — that's the bug.
+                    return (errSecSuccess, nil)
+                }
+            }),
+            timeout: 0.2,
+            allowTimeout: 5
+        )
+
+        // Arm `wedged`. Unlike the other wedge tests, this probe is
+        // release-controlled (not parked forever) so the test can later
+        // simulate it finally returning.
+        _ = try? await gateway.read(service: "s", account: "probe", interaction: .deny)
+
+        // Start the Grant escape call; `wedged` routes it to
+        // `allowEscapeQueue`, where it blocks inside `copyMatching`,
+        // standing in for an unanswered dialog.
+        let escapeTask = Task {
+            try? await gateway.read(service: "s", account: "escape", interaction: .allow)
+        }
+
+        // Wait for both the probe and the escape call to actually reach
+        // copyMatching (and park there) before proceeding.
+        let readyDeadline = Date().addingTimeInterval(5.0)
+        while Date() < readyDeadline, callIndex.value < 2 {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(callIndex.value, 2,
+                       "precondition: both the probe and the escape call must have reached copyMatching")
+
+        // Release the original probe — "the stuck probe finally answers,"
+        // independent of the still-open Grant dialog. Its queue closure
+        // will clear `wedged` once it finishes running.
+        probeGate.signal()
+
+        // Across the window where `wedged` transitions from true to false,
+        // a NEW `.deny` call must keep failing fast — proving it never
+        // resumes on the primary queue while the escape call above is
+        // still draining, regardless of which guard (`wedged` or
+        // `escapeCallsInFlight`) is currently the one stopping it.
+        for _ in 0..<15 {
+            let started = Date()
+            do {
+                _ = try await gateway.read(service: "s", account: "new-deny-\(UUID())", interaction: .deny)
+                XCTFail("a .deny call must not succeed while the escape call is still draining")
+            } catch let error as KeychainGatewayError {
+                XCTAssertEqual(error, .timedOut)
+            } catch {
+                XCTFail("wrong error type: \(error)")
+            }
+            XCTAssertLessThan(Date().timeIntervalSince(started), 0.15,
+                              "a .deny call must fail fast, not wait out its own deadline, while an escape call is still draining")
+            try? await Task.sleep(nanoseconds: 60_000_000)
+        }
+        XCTAssertEqual(callIndex.value, 2,
+                       "no .deny call must ever reach copyMatching while the escape call above is still draining")
+
+        // Release the still-parked Grant dialog and let the escape call
+        // finish, then confirm the gateway is genuinely usable again — the
+        // fix must not turn into a permanent lockout of its own.
+        escapeGate.signal()
+        _ = await escapeTask.value
+
+        let recoveredStarted = Date()
+        _ = try await gateway.read(service: "s", account: "after-recovery", interaction: .deny)
+        XCTAssertLessThan(Date().timeIntervalSince(recoveredStarted), 1.0,
+                          "once the escape call has finished draining, .deny must work normally again")
     }
 }
 

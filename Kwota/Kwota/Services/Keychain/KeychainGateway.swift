@@ -30,6 +30,18 @@
 //  See `run(interaction:_:)` for the escape hatch that keeps `.allow`
 //  reachable once wedged, and why it's safe.
 //
+//  That escape hatch runs `.allow` on a second queue while wedged, which
+//  means for a while there can be TWO closures alive that are each allowed
+//  to write the process-global interaction flag: the original parked probe
+//  on `queue`, and the escape closure on `allowEscapeQueue`. `.deny` failing
+//  fast whenever `wedged` is true keeps that safe — but `wedged` clearing
+//  (the parked probe finally answering) and the escape closure finishing
+//  (a human finally answering the Grant dialog) are two independent events;
+//  the first can happen while the second hasn't. `escapeCallsInFlight`
+//  covers that gap: `.deny` fails fast whenever it's non-zero too, even
+//  after `wedged` itself has cleared, so a fresh `.deny` call can never
+//  resume on the primary queue while an escape closure is still draining.
+//
 
 import Foundation
 import Security
@@ -96,6 +108,17 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
     private let allowTimeout: TimeInterval
     private let lock = NSLock()
     private var wedged = false
+    /// Count of `.allow` escape-queue closures (see `run(interaction:_:)`)
+    /// currently between "dispatched" and "finished running its own body,
+    /// including its own post-work interaction-flag reset" — NOT the same
+    /// window as the `async` call awaiting it, which can give up at its own
+    /// deadline while the underlying `SecItemCopyMatching` call keeps
+    /// running in the background (it isn't cancellable). `.deny` must fail
+    /// fast whenever this is non-zero, exactly like it does while `wedged`
+    /// — otherwise a `.deny` call freed by `wedged` clearing could resume on
+    /// the primary `queue` while a still-draining escape closure is also
+    /// live, and the two would race writes to the shared interaction flag.
+    private var escapeCallsInFlight = 0
 
     init(primitives: KeychainPrimitives = .live, timeout: TimeInterval = 10, allowTimeout: TimeInterval = 120) {
         self.primitives = primitives
@@ -212,14 +235,26 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
     /// `SecItemCopyMatching`, past the point where it already read the
     /// process-global interaction flag for its own call — a second queue
     /// changing that flag afterward cannot affect a call already in flight,
-    /// only calls that haven't started yet. And while wedged, a `.deny`
-    /// call never starts — it fails fast above, before ever touching the
-    /// flag — so there is no `.deny` call left for a concurrent `.allow`
-    /// call to corrupt. `allowEscapeQueue` is itself serial, so multiple
-    /// `.allow` calls racing this path still serialize against each other.
-    /// This reasoning holds ONLY while wedged; the moment the parked
-    /// closure on `queue` finally answers, `wedged` clears and every call —
-    /// `.deny` included — goes back through the single primary `queue`.
+    /// only calls that haven't started yet. And a `.deny` call never starts
+    /// while `wedged` OR `escapeCallsInFlight` is non-zero — it fails fast
+    /// below, before ever touching the flag — so there is never a live
+    /// `.deny` call for a concurrent `.allow` call to corrupt. `allowEscapeQueue`
+    /// is itself serial, so multiple `.allow` calls racing this path still
+    /// serialize against each other.
+    ///
+    /// The two guards cover two different windows, and BOTH are required:
+    /// `wedged` covers "the original probe is still stuck," and
+    /// `escapeCallsInFlight` covers "an escape closure is still draining" —
+    /// these clear at different, independent times (the stuck probe
+    /// finally answering has nothing to do with when the human answers the
+    /// Grant dialog), so gating on `wedged` alone would let a `.deny` call
+    /// resume on the primary queue the instant the probe returns, even
+    /// while an escape closure was still live and free to write the same
+    /// flag a moment later. `escapeCallsInFlight` tracks the escape
+    /// closure's own body — dispatched through its final
+    /// `setInteractionAllowed(true)` reset — not the `async` call awaiting
+    /// it, which can give up at its own deadline while the closure keeps
+    /// running in the background.
     ///
     /// `allowEscapeQueue` work deliberately does NOT clear `wedged` on
     /// completion: its success or failure says nothing about whether the
@@ -232,22 +267,33 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
     ) async throws -> T {
         lock.lock()
         let isWedged = wedged
+        let hasDrainingEscapeCalls = escapeCallsInFlight > 0
         lock.unlock()
 
-        if isWedged {
-            guard interaction == .allow else { throw KeychainGatewayError.timedOut }
-            return try await enqueue(on: allowEscapeQueue, interaction: interaction, clearsWedgeOnCompletion: false, work)
+        if interaction == .deny, isWedged || hasDrainingEscapeCalls {
+            throw KeychainGatewayError.timedOut
         }
 
-        return try await enqueue(on: queue, interaction: interaction, clearsWedgeOnCompletion: true, work)
+        if isWedged {
+            // `.deny` already threw above — only `.allow` reaches here.
+            return try await enqueue(on: allowEscapeQueue, interaction: interaction, clearsWedgeOnCompletion: false, tracksEscapeInFlight: true, work)
+        }
+
+        return try await enqueue(on: queue, interaction: interaction, clearsWedgeOnCompletion: true, tracksEscapeInFlight: false, work)
     }
 
     private func enqueue<T: Sendable>(
         on targetQueue: DispatchQueue,
         interaction: KeychainInteraction,
         clearsWedgeOnCompletion: Bool,
+        tracksEscapeInFlight: Bool,
         _ work: @escaping @Sendable () throws -> T
     ) async throws -> T {
+        if tracksEscapeInFlight {
+            lock.lock()
+            escapeCallsInFlight += 1
+            lock.unlock()
+        }
         let primitives = self.primitives
         let deadline = interaction == .allow ? allowTimeout : timeout
         return try await withCheckedThrowingContinuation { continuation in
@@ -259,6 +305,17 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
                 if clearsWedgeOnCompletion {
                     self?.lock.lock()
                     self?.wedged = false
+                    self?.lock.unlock()
+                }
+                // Decremented unconditionally here — on the closure's own
+                // completion, not on whether the `async` caller already
+                // gave up at its deadline (`settled.claim()` below). Those
+                // are different events: this decrement is what closes the
+                // wedge-clear boundary race, so it must track when the
+                // underlying `SecItemCopyMatching` call actually returns.
+                if tracksEscapeInFlight {
+                    self?.lock.lock()
+                    self?.escapeCallsInFlight -= 1
                     self?.lock.unlock()
                 }
                 if settled.claim() { continuation.resume(with: outcome) }
