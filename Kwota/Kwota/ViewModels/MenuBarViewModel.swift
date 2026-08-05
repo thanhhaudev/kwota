@@ -217,6 +217,16 @@ final class MenuBarViewModel {
     let profileStore: ProfileStore
     let registry: ProviderRegistry
     let credentialStore: KeychainCredentialStore
+    /// Read-only seam consulted by `refresh(profile:)` for the credential
+    /// read, kept distinct from `credentialStore` (which stays concrete —
+    /// AutoProfileCoordinator/CodexAutoProfileCoordinator/
+    /// AntigravityAutoProfileCoordinator and `ResetEverythingCard` all need
+    /// the write/delete surface a bare `CredentialReading` doesn't have).
+    /// Defaults to `credentialStore` itself, which already conforms to
+    /// `CredentialReading`. Tests override this seam alone to simulate a
+    /// denied/timed-out keychain read without swapping the concrete store
+    /// every other collaborator was constructed with.
+    private let credentialReader: any CredentialReading
     /// Lazy fetcher used by ProfileSwitcherCard to populate per-row
     /// utilization bars on expand. Default-live; tests pass a mock that
     /// satisfies `ProfileUsageFetching` directly so coordinator unit tests
@@ -608,6 +618,7 @@ final class MenuBarViewModel {
         cachePersistence: CachePersistenceStore? = nil,
         profileStore: ProfileStore? = nil,
         credentialStore: KeychainCredentialStore? = nil,
+        credentialReader: (any CredentialReading)? = nil,
         profileUsageFetcher: (any ProfileUsageFetching)? = nil,
         apiClient: ClaudeAPIClient? = nil,
         cliRefresher: CLITokenRefresher? = nil,
@@ -679,6 +690,7 @@ final class MenuBarViewModel {
         self.profileStore = profileStore ?? ProfileStore.live()
         let resolvedCredentialStore = credentialStore ?? KeychainCredentialStore.live()
         self.credentialStore = resolvedCredentialStore
+        self.credentialReader = credentialReader ?? resolvedCredentialStore
         let resolvedAPIClient = apiClient ?? ClaudeAPIClient.live()
         self.apiClient = resolvedAPIClient
         let resolvedCLICredentialReader = CachedCLICredentialReader()
@@ -1958,7 +1970,7 @@ final class MenuBarViewModel {
         )
     }
 
-    private func refresh(profile: Profile) async {
+    func refresh(profile: Profile) async {
         let historyStore = historyStoreForRefresh(profile: profile)
         let generation = refreshGeneration
 
@@ -1997,7 +2009,20 @@ final class MenuBarViewModel {
         }
 
         do {
-            guard let credential = try await credentialStore.read(for: profile.id) else {
+            let stored: Credential?
+            do {
+                stored = try await credentialReader.read(for: profile.id, interaction: .deny)
+            } catch KeychainCredentialStore.KeychainError.interactionNotAllowed,
+                    KeychainCredentialStore.KeychainError.timedOut {
+                if canCommitToUI() {
+                    authState = .keychainAccessNeeded
+                    isSwitchingProfile = false
+                }
+                // Deliberately leaves `summary` alone: the last known figures
+                // stay on screen rather than blanking on a permissions problem.
+                return
+            }
+            guard let credential = stored else {
                 if canCommitToUI() {
                     authState = .expired
                     isSwitchingProfile = false

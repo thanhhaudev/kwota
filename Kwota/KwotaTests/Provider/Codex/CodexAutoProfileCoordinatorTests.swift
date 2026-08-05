@@ -85,6 +85,38 @@ final class CodexAutoProfileCoordinatorTests: XCTestCase {
         }
     }
 
+    /// Task 6 regression, mirroring `AutoProfileCoordinatorTests.
+    /// test_seedOrUpdateKeychain_doesNotImport_whenStoredReadIsDenied`: a
+    /// denied read of Kwota's own Keychain item inside `seedKeychain` must
+    /// short-circuit rather than fall through to an unconditional write —
+    /// the read exists specifically to decide "identical, skip" vs "differs,
+    /// write"; on an unknown answer neither conclusion is safe to assume.
+    func test_seedKeychain_doesNotWrite_whenStoredReadIsDenied() async throws {
+        let watcher = StubCodexAccountWatcher()
+        let denyingGateway = AlwaysDenyingGateway()
+        let denyingKeychain = KeychainCredentialStore(
+            service: "com.thanhhaudev.Kwota.test.\(UUID())",
+            gateway: denyingGateway
+        )
+        let coord = CodexAutoProfileCoordinator(
+            watcher: watcher,
+            profileStore: profileStore,
+            keychain: denyingKeychain,
+            authReader: StubCodexAuthReaderForCoord(token: "test-token"),
+            clock: { Date() }
+        )
+        coord.start()
+
+        watcher.emit(CodexIdentity(email: "u@x.com", accountId: "acct-1", credentialFingerprint: "fp"))
+
+        // Give the fire-and-forget seedKeychain Task a chance to run and,
+        // if the fix regressed, to complete its write.
+        try? await Task.sleep(nanoseconds: 250_000_000)  // 250ms
+
+        XCTAssertEqual(denyingGateway.writeCount, 0,
+            "a denied read must short-circuit seedKeychain — never fall through to an unconditional write")
+    }
+
     func test_signOut_demotesCodexAndPreservesClaude() throws {
         // Pre-seed a Claude .auto profile so the smart-clearActive branch
         // sees an other-provider live profile.

@@ -58,6 +58,25 @@ enum ProfileUsageFetcherError: Error, Equatable {
     /// usage to the old profile and (for Claude) silently overwriting
     /// the stored credential with the live CLI token. We fail closed.
     case cliIdentityMismatch(profileID: UUID)
+
+    /// The credential exists but reading it needs consent Kwota deliberately
+    /// did not ask for on a background path. This is "unknown", not "absent".
+    case keychainAccessNeeded(profileID: UUID)
+
+    /// True for the cases that mean "this profile's credential is
+    /// genuinely gone or wrong" — safe to evict a cached summary over.
+    /// `.keychainAccessNeeded` is deliberately `false`: it means the read
+    /// was refused, not that the credential is absent, so callers (e.g.
+    /// `ProfileSwitcherFetchCoordinator`) must not treat it the same way
+    /// or a denied background read would wipe a perfectly good cached row.
+    var isTrustBoundaryFailure: Bool {
+        switch self {
+        case .missingCredential, .missingProvider, .cliIdentityMismatch:
+            return true
+        case .keychainAccessNeeded:
+            return false
+        }
+    }
 }
 
 @MainActor
@@ -77,8 +96,15 @@ final class LiveProfileUsageFetcher: ProfileUsageFetching {
     }
 
     func fetch(profile: Profile) async throws -> ProviderUsageSummary {
-        guard let credential = try await credentialStore.read(for: profile.id, interaction: .deny) else {
-            throw ProfileUsageFetcherError.missingCredential(profileID: profile.id)
+        let credential: Credential
+        do {
+            guard let stored = try await credentialStore.read(for: profile.id, interaction: .deny) else {
+                throw ProfileUsageFetcherError.missingCredential(profileID: profile.id)
+            }
+            credential = stored
+        } catch KeychainCredentialStore.KeychainError.interactionNotAllowed,
+                KeychainCredentialStore.KeychainError.timedOut {
+            throw ProfileUsageFetcherError.keychainAccessNeeded(profileID: profile.id)
         }
         guard let provider = registry.provider(for: profile.providerID) else {
             throw ProfileUsageFetcherError.missingProvider(profile.providerID)

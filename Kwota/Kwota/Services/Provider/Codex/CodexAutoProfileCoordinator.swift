@@ -186,10 +186,20 @@ final class CodexAutoProfileCoordinator {
         Task { [weak self] in
             guard let self else { return }
             // Only overwrite if the access token differs — avoids Keychain thrash.
-            if let existing = try? await self.keychain.read(for: profileId),
-               case .cliToken(let oldAccess, _, _) = existing,
-               oldAccess == auth.accessToken {
+            do {
+                if let existing = try await self.keychain.read(for: profileId),
+                   case .cliToken(let oldAccess, _, _) = existing,
+                   oldAccess == auth.accessToken {
+                    return
+                }
+            } catch KeychainCredentialStore.KeychainError.interactionNotAllowed,
+                    KeychainCredentialStore.KeychainError.timedOut {
+                // Unknown, not absent. Writing on an unknown read would risk
+                // overwriting a perfectly good credential; the next emit retries.
                 return
+            } catch {
+                // Any other read failure keeps the existing behaviour: fall
+                // through and try the write.
             }
             try? await self.keychain.write(credential, for: profileId)
         }

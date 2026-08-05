@@ -237,10 +237,20 @@ final class AutoProfileCoordinator {
             // still async now that KeychainCredentialStore is, so it runs as
             // the task's first step rather than short-circuiting before the
             // task is created.
-            if let stored = try? await self.keychain.read(for: id),
-               case .cliToken(_, _, let expiresAt) = stored,
-               expiresAt.timeIntervalSinceNow > 60 {
+            do {
+                if let stored = try await self.keychain.read(for: id),
+                   case .cliToken(_, _, let expiresAt) = stored,
+                   expiresAt.timeIntervalSinceNow > 60 {
+                    return
+                }
+            } catch KeychainCredentialStore.KeychainError.interactionNotAllowed,
+                    KeychainCredentialStore.KeychainError.timedOut {
+                // Unknown, not absent. Importing on an unknown would risk
+                // overwriting a perfectly good credential; the next emit retries.
                 return
+            } catch {
+                // Any other read failure keeps the existing behaviour: fall
+                // through and try the import.
             }
             guard let result = try? await self.credentialReader.read() else { return }
             // Re-prove the identity across the await before writing anything.

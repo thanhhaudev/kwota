@@ -319,7 +319,17 @@ final class ProfileSwitcherFetchCoordinator {
                     // it. Transient errors (network, 5xx, post-retry
                     // 401) keep their cache; those rows still render
                     // last-known data while the user retries.
-                    if error is ProfileUsageFetcherError {
+                    //
+                    // `keychainAccessNeeded` is deliberately excluded from
+                    // this eviction even though it is a
+                    // ProfileUsageFetcherError case: a denied/timed-out
+                    // keychain read is "unknown", not "this credential is
+                    // actually gone". Evicting here would wipe a perfectly
+                    // good cached row the same way folding the denial into
+                    // a sign-out would archive a perfectly good profile —
+                    // apply() below falls back to `.stale(cached)` instead.
+                    if let fetcherError = error as? ProfileUsageFetcherError,
+                       fetcherError.isTrustBoundaryFailure {
                         if self?.lastSuccessful[id] != nil {
                             self?.lastSuccessful[id] = nil
                             self?.scheduleDiskWrite()
@@ -470,6 +480,7 @@ final class ProfileSwitcherFetchCoordinator {
             case .missingCredential:    return "Sign in to load usage"
             case .missingProvider:      return "Provider unavailable"
             case .cliIdentityMismatch:  return "Account mismatch — switch profile"
+            case .keychainAccessNeeded: return "Waiting for keychain access"
             }
         }
         // Anything else (e.g. ClaudeAPIClient.APIError, network errors) is

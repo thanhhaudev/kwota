@@ -1044,6 +1044,57 @@ final class AutoProfileCoordinatorTests: XCTestCase {
             "a valid stored credential must short-circuit before reading Claude Code's Keychain — including the startup baseline emit")
     }
 
+    // MARK: - Denied read must not be treated as "no credential, import now"
+
+    /// The Task 6 regression: a denied/timed-out read of Kwota's OWN keychain
+    /// item (e.g. the keychain is locked, or interaction was refused) must
+    /// NOT be conflated with "nothing stored, go import" — that would reach
+    /// into Claude Code's cross-app credential and potentially overwrite a
+    /// perfectly good token Kwota just couldn't read this instant. The fix
+    /// short-circuits on `.interactionNotAllowed` / `.timedOut` instead.
+    func test_seedOrUpdateKeychain_doesNotImport_whenStoredReadIsDenied() async throws {
+        let store = makeStore()
+        let profile = Profile(name: "A", authMethod: .cliSync,
+                              providerID: .claude, organizationId: nil,
+                              email: "a@x.com", kind: .auto, ownershipBoundary: t0)
+        try store.add(profile)
+        // Kwota's own keychain item, wired to a gateway that always denies —
+        // simulates a locked keychain / refused interaction on the read the
+        // coordinator performs before deciding whether to import.
+        let denyingKwotaKeychain = KeychainCredentialStore(
+            service: "com.thanhhaudev.Kwota.test.\(UUID())",
+            gateway: AlwaysDenyingGateway()
+        )
+        // The cross-app gateway CLICredentialReader would read from — its
+        // readCount must stay 0 if the fix works, proving the coordinator
+        // never reached for Claude Code's Keychain item on a denied read.
+        let crossAppGateway = StubKeychainGateway(read: {
+            let credential = Credential.cliToken(
+                accessToken: "cli-token", refreshToken: "r", expiresAt: .distantFuture)
+            return try? JSONEncoder().encode(credential)
+        })
+        let reader = CLICredentialReader(
+            credentialsFile: URL(fileURLWithPath: "/nonexistent"),
+            gateway: crossAppGateway
+        )
+        let watcher = FakeWatcher()
+        let coord = makeCoordinator(
+            watcher: watcher,
+            profileStore: store,
+            keychain: denyingKwotaKeychain,
+            credentialReader: reader,
+            profileFetcher: AlwaysNilOAuthProfileFetcher(),
+            clock: { self.t0 }
+        )
+        coord.start()
+        watcher.emit(CLIIdentity(email: "a@x.com", orgId: nil,
+                                  credentialFingerprint: "ff"))
+
+        await settleSeedTask()
+        XCTAssertEqual(crossAppGateway.readCount, 0,
+            "a denied read of Kwota's own item must short-circuit the import — never reach for Claude Code's cross-app credential")
+    }
+
     // MARK: - Single-auto invariant (Fix 4)
 
     func test_singleAutoInvariant_demotesOtherAutos_onActivate() throws {
@@ -1642,6 +1693,27 @@ final class AutoProfileCoordinatorTests: XCTestCase {
         XCTAssertNil(store.activeProfileId,
                      "with no other live provider, sign-out clears active")
     }
+}
+
+/// `KeychainGateways` test double whose `read` always throws
+/// `.interactionNotAllowed` — models a locked keychain or a refused consent
+/// dialog on a background (`.deny`) read, regardless of what interaction
+/// policy the caller asked for.
+nonisolated final class AlwaysDenyingGateway: KeychainGateways, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _writeCount = 0
+    var writeCount: Int {
+        lock.lock(); defer { lock.unlock() }; return _writeCount
+    }
+
+    func read(service: String, account: String?, interaction: KeychainInteraction) async throws -> Data? {
+        throw KeychainGatewayError.interactionNotAllowed
+    }
+    func write(_ data: Data, service: String, account: String) async throws {
+        lock.lock(); _writeCount += 1; lock.unlock()
+    }
+    func delete(service: String, account: String) async throws {}
+    func deleteAll(service: String) async throws {}
 }
 
 @MainActor

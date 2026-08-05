@@ -139,6 +139,10 @@ struct UsageTabView: View {
                 StaleDataBanner(lastFetchedAt: last, onRefresh: { vm.refreshUsageNow(trigger: .manual) })
                     .padding(.bottom, 10)
             }
+        case .keychainAccessNeeded:
+            // Task 7 replaces this with the real row; for now the last
+            // known figures stay on screen with no banner at all.
+            EmptyView()
         case .refreshing:
             // Keep the rate-limit banner mounted (with a spinner in the
             // action slot) while a probe is in flight. Dropping it here
