@@ -45,6 +45,65 @@ final class AntigravityAutoProfileCoordinatorTests: XCTestCase {
         )
     }
 
+    /// `CodexAutoProfileCoordinator.seedKeychain` has a synchronous prefix
+    /// (`authReader.read()`) that lets a companion test in that suite pin
+    /// "seed initiated before activate" deterministically.
+    /// `seedPlaceholderCredential` has no such synchronous hook — it goes
+    /// straight from a `guard` into a fire-and-forget `Task`, so there is no
+    /// externally-observable moment to record ahead of the write itself.
+    /// This is the practical substitute: confirm the write still actually
+    /// lands (regression coverage for the reorder itself — a future edit
+    /// that dropped or misplaced the `seedPlaceholderCredential` call would
+    /// fail this), mirroring
+    /// `CodexAutoProfileCoordinatorTests.test_newLogin_createsActiveCodexProfile`'s
+    /// bounded-poll pattern.
+    private func waitForStoredCredential(
+        id: UUID,
+        timeout: TimeInterval = 5.0
+    ) async -> Credential? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let stored = try? await keychain.read(for: id) {
+                return stored
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        }
+        return try? await keychain.read(for: id)
+    }
+
+    func test_identityAppears_seedsPlaceholderCredential() async throws {
+        let watcher = StubAntigravityProcessWatcher()
+        let coord = AntigravityAutoProfileCoordinator(
+            watcher: watcher, profileStore: profileStore, keychain: keychain, clock: { Date() }
+        )
+        coord.start()
+
+        watcher.emit(makeIdentity())
+
+        let id = try XCTUnwrap(profileStore.profiles.first { $0.providerID == .antigravity }?.id)
+        let stored = await waitForStoredCredential(id: id)
+        XCTAssertNotNil(stored, "a new Antigravity identity must seed a placeholder Keychain credential")
+    }
+
+    func test_identityReappears_seedsPlaceholderCredential() async throws {
+        let watcher = StubAntigravityProcessWatcher()
+        let coord = AntigravityAutoProfileCoordinator(
+            watcher: watcher, profileStore: profileStore, keychain: keychain, clock: { Date() }
+        )
+        coord.start()
+
+        watcher.emit(makeIdentity(token: "csrf-1"))
+        let id = try XCTUnwrap(profileStore.profiles.first { $0.providerID == .antigravity }?.id)
+        _ = await waitForStoredCredential(id: id)   // let the first seed land
+        try await keychain.delete(for: id)          // and clear it, to isolate the re-promote path
+
+        watcher.emit(nil)
+        watcher.emit(makeIdentity(token: "csrf-2-rotated"))
+
+        let stored = await waitForStoredCredential(id: id)
+        XCTAssertNotNil(stored, "a re-promoted Antigravity identity must re-seed the placeholder credential")
+    }
+
     func test_identityAppears_createsAutoProfile() throws {
         let watcher = StubAntigravityProcessWatcher()
         let coord = makeCoord(watcher: watcher)

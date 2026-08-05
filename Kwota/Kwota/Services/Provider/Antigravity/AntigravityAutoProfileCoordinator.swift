@@ -108,8 +108,16 @@ final class AntigravityAutoProfileCoordinator {
             var promoted = existing
             promoted.kind = .auto
             try? profileStore.updateProfile(promoted)
-            profileStore.activateOnAppearance(id: promoted.id, provider: .antigravity)
+            // Seed before activating — see the matching comment in
+            // CodexAutoProfileCoordinator.handle(_:): `activateOnAppearance`
+            // synchronously triggers a refresh that reads this profile's
+            // keychain credential, and `seedPlaceholderCredential` writes it
+            // fire-and-forget. Seeding first (matching
+            // AutoProfileCoordinator's already-correct order) gives that
+            // write a head start instead of racing a refresh that can land
+            // on an empty credential.
             seedPlaceholderCredential(for: promoted.id)
+            profileStore.activateOnAppearance(id: promoted.id, provider: .antigravity)
             demoteOtherAntigravityAutoProfiles(except: promoted.id)
             return
         }
@@ -128,8 +136,10 @@ final class AntigravityAutoProfileCoordinator {
             ownershipBoundary: clock()
         )
         try? profileStore.add(new)
-        profileStore.activateOnAppearance(id: new.id, provider: .antigravity)
+        // See the comment above the matching call site in the promoted-
+        // profile branch: seed before activating, not after.
         seedPlaceholderCredential(for: new.id)
+        profileStore.activateOnAppearance(id: new.id, provider: .antigravity)
         demoteOtherAntigravityAutoProfiles(except: new.id)
     }
 

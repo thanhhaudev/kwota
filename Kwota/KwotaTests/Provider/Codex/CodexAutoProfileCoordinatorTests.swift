@@ -117,6 +117,78 @@ final class CodexAutoProfileCoordinatorTests: XCTestCase {
             "a denied read must short-circuit seedKeychain — never fall through to an unconditional write")
     }
 
+    // MARK: - Seed-before-activate ordering (final-review Important #3)
+    //
+    // `activateOnAppearance` synchronously triggers a refresh (via
+    // `profileStore.onActiveProfileChange`) that reads this profile's
+    // keychain credential. `seedKeychain` writes that credential from a
+    // fire-and-forget `Task`. Before this fix `handle(_:)` called
+    // `activateOnAppearance` BEFORE `seedKeychain`, so a brand-new sign-in's
+    // refresh could run before the seed write even started, reading nil and
+    // surfacing a transient, false "session expired" banner — mirrors
+    // Claude's `AutoProfileCoordinator`, which has always called its seed
+    // function first.
+    //
+    // `seedKeychain`'s synchronous prefix (`authReader.read()`, before it
+    // hands off to the write's Task) and `onActiveProfileChange` (fired
+    // synchronously inside `activateOnAppearance` → `setActive`) are the two
+    // synchronous hooks `handle(_:)` actually exposes — recording their
+    // relative order pins the statement order this fix depends on,
+    // deterministically (no sleeps, no scheduler-order assumption).
+
+    func test_newLogin_seedsKeychainBeforeActivating() throws {
+        // `ProfileStore.add()` auto-activates the very FIRST profile it ever
+        // stores, unconditionally, before any coordinator code runs — that
+        // default-activation side effect is shared identically by Claude's
+        // already-correct `AutoProfileCoordinator` and is not what this fix
+        // (or this test) is about. Pre-seed an unrelated, already-active
+        // Codex profile so the emit below's `add(new)` does NOT
+        // auto-activate on its own, isolating the ordering this test exists
+        // to pin to `activateOnAppearance`'s explicit call.
+        let preexisting = Profile(
+            name: "existing@x.com", authMethod: .cliSync, providerID: .codex,
+            organizationId: "acct-existing", email: "existing@x.com", kind: .auto, ownershipBoundary: Date()
+        )
+        try profileStore.add(preexisting)
+        XCTAssertEqual(profileStore.activeProfileId, preexisting.id, "sanity: setup activated the first profile")
+
+        let order = OrderRecorder()
+        let watcher = StubCodexAccountWatcher()
+        let coord = makeCoord(watcher: watcher, authReader: OrderRecordingAuthReader(order: order))
+        profileStore.onActiveProfileChange = { _ in order.record("activate") }
+        coord.start()
+
+        watcher.emit(CodexIdentity(email: "u@x.com", accountId: "acct-1", credentialFingerprint: "fp"))
+
+        XCTAssertNotEqual(profileStore.activeProfileId, preexisting.id, "sanity: the new login did switch active")
+        XCTAssertEqual(order.events, ["seed", "activate"],
+                       "seedKeychain must be initiated before activateOnAppearance fires its refresh hook")
+    }
+
+    func test_existingProfile_seedsKeychainBeforeActivating() throws {
+        let existing = Profile(
+            name: "u@x.com", authMethod: .cliSync, providerID: .codex,
+            organizationId: "acct-1", email: "u@x.com", kind: .auto, ownershipBoundary: Date()
+        )
+        try profileStore.add(existing)
+        // `add()` auto-activates the first profile — clear that so the
+        // upcoming match actually changes `activeProfileId` and fires
+        // `onActiveProfileChange` (which only fires on a real change).
+        try profileStore.clearActive()
+
+        let order = OrderRecorder()
+        let watcher = StubCodexAccountWatcher()
+        let coord = makeCoord(watcher: watcher, authReader: OrderRecordingAuthReader(order: order))
+        profileStore.onActiveProfileChange = { _ in order.record("activate") }
+        coord.start()
+
+        watcher.emit(CodexIdentity(email: "u@x.com", accountId: "acct-1", credentialFingerprint: "fp"))
+
+        XCTAssertEqual(profileStore.activeProfileId, existing.id, "sanity: the match branch did activate")
+        XCTAssertEqual(order.events, ["seed", "activate"],
+                       "seedKeychain must be initiated before activateOnAppearance fires its refresh hook")
+    }
+
     func test_signOut_demotesCodexAndPreservesClaude() throws {
         // Pre-seed a Claude .auto profile so the smart-clearActive branch
         // sees an other-provider live profile.
@@ -566,6 +638,39 @@ final class CodexAutoProfileCoordinatorTests: XCTestCase {
                       "Codex profile is still created")
         XCTAssertEqual(profileStore.activeProfileId, claude.id,
                        "Codex appearing must not steal focus from the active Claude profile")
+    }
+}
+
+/// Thread-safe event log for the seed-before-activate ordering tests.
+/// `@MainActor` covers both actual call sites here (the auth reader's
+/// synchronous `read()` and `ProfileStore.onActiveProfileChange`, both
+/// invoked from `handle(_:)`), but this stays a plain lock-protected class
+/// rather than `@MainActor` itself so it can be captured in a
+/// non-actor-isolated closure without extra hops.
+private final class OrderRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _events: [String] = []
+    var events: [String] { lock.lock(); defer { lock.unlock() }; return _events }
+    func record(_ event: String) { lock.lock(); _events.append(event); lock.unlock() }
+}
+
+/// `CodexAuthReaderProviding` double whose `read()` — `seedKeychain`'s
+/// synchronous prefix, called before it hands off to a fire-and-forget
+/// `Task` — records "seed" the instant it runs.
+private struct OrderRecordingAuthReader: CodexAuthReaderProviding {
+    let order: OrderRecorder
+    func read() -> CodexAuthReader.Auth? {
+        order.record("seed")
+        return CodexAuthReader.Auth(
+            accessToken: "test-token",
+            refreshToken: "r",
+            idToken: nil,
+            accountId: nil,
+            email: "u@x.com",
+            name: nil,
+            subscriptionActiveUntil: nil,
+            planType: nil
+        )
     }
 }
 

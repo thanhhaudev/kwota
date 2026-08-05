@@ -144,8 +144,16 @@ final class CodexAutoProfileCoordinator {
                     try? profileStore.updateProfile(updated)
                 }
             }
-            profileStore.activateOnAppearance(id: match.id, provider: .codex)
+            // Seed before activating: `activateOnAppearance` synchronously
+            // triggers a refresh that reads this profile's keychain
+            // credential. `seedKeychain` writes it fire-and-forget, so
+            // seeding first (matching AutoProfileCoordinator's already-
+            // correct `seedOrUpdateKeychain` → `activateOnAppearance` order)
+            // gives that write a head start instead of racing a refresh that
+            // can land on an empty credential and surface a transient,
+            // false "session expired" banner on first sign-in.
             seedKeychain(for: match.id)
+            profileStore.activateOnAppearance(id: match.id, provider: .codex)
             demoteOtherCodexAutoProfiles(except: match.id)
             return
         }
@@ -162,8 +170,10 @@ final class CodexAutoProfileCoordinator {
             ownershipBoundary: clock()
         )
         try? profileStore.add(new)
-        profileStore.activateOnAppearance(id: new.id, provider: .codex)
+        // See the comment above the matching call site in the promoted-
+        // profile branch: seed before activating, not after.
         seedKeychain(for: new.id)
+        profileStore.activateOnAppearance(id: new.id, provider: .codex)
         demoteOtherCodexAutoProfiles(except: new.id)
     }
 
