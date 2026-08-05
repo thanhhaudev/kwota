@@ -728,6 +728,238 @@ final class KeychainGatewayTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(recoveredStart), 1.0,
                           "a healthy gateway must answer quickly, not fail fast forever from a stranded wedged flag")
     }
+
+    // MARK: - A third adversarial-review round (round 6): stale deadline still ran work()
+
+    /// Finding 1: every call's own deadline timer is armed the instant
+    /// `enqueue(...)` is called, independent of whether that call has
+    /// actually started running yet — it can still be sitting in `queue`'s
+    /// FIFO backlog behind a slow-but-not-permanently-stuck occupant. If
+    /// the deadline fires while queued, the caller already receives
+    /// `.timedOut` — but before this fix, `work()` still ran
+    /// UNCONDITIONALLY once the call's turn finally came, silently
+    /// mutating the real Keychain long after the caller gave up (for a
+    /// write, potentially clobbering a NEWER write from a subsequent
+    /// successful retry with STALE data).
+    ///
+    /// Setup: A occupies the primary queue and blocks (release-controlled).
+    /// B is admitted right behind A on the same serial queue — normal
+    /// admission, nothing wedged yet. Both A and B share the same short
+    /// `timeout`; A is held blocked well past BOTH of their own deadlines,
+    /// so each fires independently via its own timer while B is still
+    /// sitting in the backlog, never having started. A's OWN deadline
+    /// firing sets `wedged = true` — but A's own eventual completion
+    /// (once released) unconditionally CLEARS `wedged` again, as the very
+    /// last thing before the queue advances to B. So by the time B's
+    /// closure actually starts, `wedged` is back to `false` — round 4's
+    /// `.deny` re-check (which only fires while `wedged`/draining) does
+    /// NOT catch this; only Finding 1's peek does. `copyMatching` must
+    /// never be called a second time.
+    func test_deadlineFiredWhileStillQueued_doesNotRunWorkAfterCallerAlreadyGaveUp() async throws {
+        let callIndex = UncheckedBox<Int>(0)
+        let probeGateA = DispatchSemaphore(value: 0)
+
+        let gateway = KeychainGateway(
+            primitives: primitives(copyMatching: { _ in
+                var index = -1
+                callIndex.mutate { count in index = count; count += 1 }
+                if index == 0 {
+                    probeGateA.wait()  // A: occupies the primary queue, release-controlled
+                    return (errSecSuccess, nil)
+                }
+                if index == 1 {
+                    // The legitimate final health-check call at the bottom
+                    // of the test, reached only once B has (correctly)
+                    // never called copyMatching at all.
+                    return (errSecItemNotFound, nil)
+                }
+                // index >= 2: B incorrectly reached copyMatching — that's
+                // the bug. Returns immediately (doesn't block) so a
+                // pre-fix regression fails via assertion below instead of
+                // hanging the test.
+                return (errSecSuccess, Data("ran-after-caller-already-gave-up".utf8) as AnyObject)
+            }),
+            timeout: 0.2,
+            allowTimeout: 5
+        )
+
+        // A occupies the primary queue and blocks.
+        let taskA = Task { try await gateway.read(service: "s", account: "A", interaction: .deny) }
+        var deadline = Date().addingTimeInterval(2.0)
+        while Date() < deadline, callIndex.value < 1 {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(callIndex.value, 1, "precondition: A must be occupying the primary queue")
+
+        // B is admitted right after A — normal admission (nothing wedged
+        // yet) — so it queues up BEHIND A on the same serial queue, not
+        // yet running.
+        let taskB = Task { try await gateway.read(service: "s", account: "B", interaction: .deny) }
+        try? await Task.sleep(nanoseconds: 30_000_000)  // let GCD enqueue B behind A
+
+        // Wait past BOTH A's and B's own `timeout` (0.2s) while A is STILL
+        // blocked — each call's own deadline timer fires independently of
+        // whether its closure has started running. A's firing sets
+        // `wedged = true` (it's `.deny`).
+        try? await Task.sleep(nanoseconds: 350_000_000)
+
+        // Both callers must already have their answer via the timer path —
+        // proving neither is waiting on its closure to actually run.
+        do {
+            _ = try await taskA.value
+            XCTFail("expected timedOut")
+        } catch let error as KeychainGatewayError {
+            XCTAssertEqual(error, .timedOut, "A's own deadline must fire while it's still blocked")
+        }
+        do {
+            _ = try await taskB.value
+            XCTFail("expected timedOut")
+        } catch let error as KeychainGatewayError {
+            XCTAssertEqual(error, .timedOut, "B's own deadline must fire while it's still queued behind A")
+        }
+
+        // Release A now. A's own completion clears `wedged` (it's what set
+        // it) as the very last synchronous step before the queue can
+        // advance to B — so B's turn arrives with `wedged == false`,
+        // meaning round 4's re-check does not catch this; only the new
+        // peek does.
+        probeGateA.signal()
+
+        // Give the real queue processing (A's real completion, then B's
+        // real turn) genuine wall-clock margin — `taskA.value`/`taskB.value`
+        // above already resolved via their OWN deadline timers, decoupled
+        // from when their real GCD closures actually run.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(callIndex.value, 1,
+                       "B must never reach copyMatching — its own deadline already fired while it was " +
+                       "still queued behind A, so running work() now would silently mutate the real " +
+                       "Keychain long after the caller already gave up")
+
+        // Confirm the gateway is genuinely healthy afterward too.
+        let recoveredStart = Date()
+        let out = try await gateway.read(service: "s", account: "after", interaction: .deny)
+        XCTAssertNil(out, "the stub returns errSecItemNotFound by default for any further, genuinely-run call")
+        XCTAssertLessThan(Date().timeIntervalSince(recoveredStart), 1.0,
+                          "gateway must be fully usable again — nothing stranded by the fix")
+    }
+
+    // MARK: - Round 6: admission-race gap in the .allow routing decision
+
+    /// Finding 2: `run(interaction:_:)`'s `.allow` routing decision has a
+    /// check-then-enqueue race. It snapshots state synchronously, then
+    /// `await`s `primaryQueueProbablyStuck()` — a genuine suspension point.
+    /// A completely different `.deny` call can be admitted onto the
+    /// primary queue and become its new occupant during that suspension —
+    /// one the check never evaluated, because it didn't exist yet.
+    /// Without a fix, the `.allow` call proceeds onto the primary queue
+    /// trusting a stale "looked safe" answer and lands behind this fresh,
+    /// undetected occupant with no escape route — right back to waiting
+    /// out the full `allowTimeout` uselessly.
+    ///
+    /// Setup: A (`.deny`) occupies the primary queue and blocks. C
+    /// (`.allow`) arrives while A is still within its grace period — its
+    /// `primaryQueueProbablyStuck()` check goes into the real
+    /// continuation-wait. While C is suspended there, B (`.deny`) is
+    /// admitted — queues up BEHIND A on the same serial queue (this is the
+    /// admission race: it happens entirely within C's suspension window).
+    /// A is then released BEFORE the grace period elapses, which resolves
+    /// C's first check with "not stuck" (stale — A cleared, but says
+    /// nothing about B) AND lets GCD dequeue B next, which blocks in its
+    /// own right — the fresh, undetected occupant. The fix must catch this
+    /// via the admission-generation re-check and route C to the escape
+    /// queue after confirming B looks stuck too, rather than let C land
+    /// behind B.
+    func test_allowRoutingRace_freshOccupantAdmittedDuringPrimaryQueueProbablyStuckSuspension_stillEscapes() async throws {
+        let callIndex = UncheckedBox<Int>(0)
+        let probeGateA = DispatchSemaphore(value: 0)
+        let probeGateB = DispatchSemaphore(value: 0)
+        let granted = Data("granted-for-C".utf8)
+
+        let gateway = KeychainGateway(
+            primitives: primitives(copyMatching: { _ in
+                var index = -1
+                callIndex.mutate { count in index = count; count += 1 }
+                switch index {
+                case 0:
+                    probeGateA.wait()  // A: occupies the primary queue first
+                    return (errSecSuccess, nil)
+                case 1:
+                    probeGateB.wait()  // B: the fresh occupant admitted during C's suspension
+                    return (errSecSuccess, nil)
+                case 2:
+                    return (errSecSuccess, granted as AnyObject)  // C: reached via the escape queue
+                default:
+                    return (errSecSuccess, nil)
+                }
+            }),
+            timeout: 5,              // A/B's own deadline — long, deliberately not reached
+            allowTimeout: 5,         // C's own deadline — long; must escape well before this
+            allowGraceInterval: 0.2
+        )
+
+        // A occupies the primary queue and blocks.
+        let taskA = Task { try? await gateway.read(service: "s", account: "A", interaction: .deny) }
+        var deadline = Date().addingTimeInterval(2.0)
+        while Date() < deadline, callIndex.value < 1 {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(callIndex.value, 1, "precondition: A must be occupying the primary queue")
+
+        // C (.allow) arrives while A occupies the queue and hasn't
+        // exceeded grace yet — its `primaryQueueProbablyStuck()` check
+        // goes into the real continuation-wait.
+        let taskC = Task { try await gateway.read(service: "s", account: "C", interaction: .allow) }
+        // Give C's task time to actually reach that suspension before B
+        // shows up.
+        try? await Task.sleep(nanoseconds: 60_000_000)
+
+        // B is admitted while A is still running — normal admission — so
+        // it queues up BEHIND A on the primary queue, not yet running.
+        // This is the admission that races with C's still-pending "is the
+        // primary queue safe" decision. `run()`'s generation bump for B
+        // happens synchronously here, well before A is released below —
+        // making the eventual generation check deterministic regardless of
+        // exact thread scheduling later on.
+        let taskB = Task { try? await gateway.read(service: "s", account: "B", interaction: .deny) }
+        try? await Task.sleep(nanoseconds: 60_000_000)  // let GCD enqueue B behind A
+
+        // Release A — BEFORE the grace period elapses, so C's first
+        // `primaryQueueProbablyStuck()` resolves "not stuck" via the
+        // "occupant cleared in time" waiter path (stale: says nothing
+        // about B, which is about to start running next).
+        probeGateA.signal()
+        _ = await taskA.value
+
+        // B, queued behind A, gets its turn next and blocks in its own
+        // right — the fresh, undetected occupant.
+        deadline = Date().addingTimeInterval(2.0)
+        while Date() < deadline, callIndex.value < 2 {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(callIndex.value, 2, "precondition: B must now be occupying the primary queue")
+
+        // C must still reach a real answer via the escape queue, promptly
+        // — not land behind B and wait out the full allowTimeout (5s).
+        let started = Date()
+        let outC = try await taskC.value
+        let elapsed = Date().timeIntervalSince(started)
+
+        XCTAssertEqual(outC, granted,
+                       "C must escape to a real answer rather than land behind the fresh, undetected occupant B")
+        XCTAssertLessThan(elapsed, 2.0,
+                          "must escape promptly (bounded by ~2x allowGraceInterval plus the settle delay), " +
+                          "not wait out allowTimeout queued behind B")
+
+        // Release B and confirm the gateway is healthy afterward.
+        probeGateB.signal()
+        _ = await taskB.value
+
+        let recoveredStart = Date()
+        _ = try await gateway.read(service: "s", account: "after", interaction: .deny)
+        XCTAssertLessThan(Date().timeIntervalSince(recoveredStart), 1.0,
+                          "gateway must be fully usable again after the race resolves")
+    }
 }
 
 /// Test-local mutable box. The gateway hands its primitives to a background

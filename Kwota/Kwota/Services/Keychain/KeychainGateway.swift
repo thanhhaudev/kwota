@@ -57,6 +57,63 @@
 //  wedged-true case. See `primaryQueueProbablyStuck()` for why this is safe
 //  at a much shorter threshold than `timeout` itself.
 //
+//  A third adversarial-review round (round 6 of this file's history) found
+//  two more gaps, both fixed below:
+//
+//  First: every call's deadline timer is armed the instant `enqueue(...)`
+//  is called, independent of whether that call has actually started
+//  running yet — it may still be sitting in `queue`'s FIFO backlog behind
+//  a slow-but-not-wedged occupant. If the deadline fires while a call is
+//  still queued, the caller already receives `.timedOut` — but the old
+//  code still ran `work()` unconditionally once the call's turn finally
+//  came, silently mutating the real Keychain long after the caller gave
+//  up (for a write, potentially clobbering a NEWER write from a
+//  subsequent successful retry with STALE data). `Settled.peek()` — a
+//  non-consuming check, unlike the one-shot `claim()` — lets the
+//  work-side ask "did my own deadline already win" without itself racing
+//  to become the side that delivers the result; if it did, `work()` is
+//  skipped, but the four pieces of unconditional bookkeeping
+//  (`clearsWedgeOnCompletion`, `marksPrimaryOccupancy`'s clear + waiter
+//  release, `tracksEscapeInFlight`'s decrement) still run exactly as
+//  before — skipping those would reopen the stranding bugs rounds 4 and 5
+//  closed. This peek is checked AFTER the existing top-of-closure `.deny`
+//  re-check (see `enqueue(...)`): that re-check's own bail path already
+//  skips `work()` entirely when it fires, so ordering only matters for the
+//  calls that survive it — `.deny` calls that aren't wedged/draining, and
+//  every `.allow` call (which the `.deny`-only re-check never applies to).
+//
+//  Second: `run(interaction:_:)`'s routing decision for `.allow` has its
+//  own check-then-enqueue race. It snapshots `wedged`/`escapeCallsInFlight`
+//  synchronously, then `await`s `primaryQueueProbablyStuck()` — a genuine
+//  suspension point. A completely different `.deny` call can be admitted
+//  onto the primary queue during that suspension and become its new
+//  occupant — one `primaryQueueProbablyStuck()` never evaluated, because it
+//  didn't exist yet when the check ran. Without a fix, the `.allow` call
+//  proceeds to enqueue on the primary queue trusting a stale "looked safe"
+//  answer, and can land behind this fresh, undetected occupant with no
+//  escape route. `primaryAdmissionGeneration` (bumped under `lock` every
+//  time ANY call is admitted onto the primary `queue`, in `run(...)`
+//  itself, right where the admission decision is made) closes this: after
+//  `primaryQueueProbablyStuck()` returns `false`, `run(...)` atomically
+//  checks-and-claims admission via `tryClaimPrimaryQueueAdmission(unlessRacedSince:)`.
+//  If the generation moved, something new was admitted during the
+//  suspension — rather than blindly rerouting to the escape queue (which
+//  would risk the exact interaction-flag trample this file's serial design
+//  exists to prevent, if the fresh occupant hasn't yet reached the point in
+//  its own closure where it captures the flag), `run(...)` re-evaluates by
+//  calling `primaryQueueProbablyStuck()` a second time — the same
+//  already-established-safe check, now aimed at whatever is actually
+//  there, after a brief fixed settle delay (paid only on this already-rare
+//  race path) that gives the freshly-admitted call a realistic chance to
+//  have actually started running before its occupancy is read. Only if
+//  that second look also says "stuck" does the call escape; if it
+//  says "healthy," admission is claimed unconditionally. A narrower window
+//  remains after that second claim — the purely synchronous gap between
+//  claiming the generation and `enqueue(...)`'s actual `targetQueue.async`
+//  call — but that is Swift/GCD call overhead, not another `await`
+//  suspension, mirroring how round 3's own grace-period fix left (and
+//  documented) a narrower residual that a later round then closed further.
+//
 
 import Foundation
 import Security
@@ -155,6 +212,17 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
     /// the primary `queue` while a still-draining escape closure is also
     /// live, and the two would race writes to the shared interaction flag.
     private var escapeCallsInFlight = 0
+    /// Bumped under `lock` every time `run(interaction:_:)` admits ANY call
+    /// (`.deny` or `.allow`) onto the primary `queue` — distinct from
+    /// `primaryOccupantSince`, which tracks when the current occupant
+    /// started RUNNING (a closure can be admitted, i.e. dispatched via
+    /// `targetQueue.async`, well before it actually gets its turn if
+    /// something is already ahead of it). `run(...)` reads this
+    /// immediately before `await primaryQueueProbablyStuck()` suspends, and
+    /// again right after — via `tryClaimPrimaryQueueAdmission(unlessRacedSince:)`
+    /// — to detect whether a DIFFERENT call was admitted onto the primary
+    /// queue during that suspension. See the file header and `run(...)`.
+    private var primaryAdmissionGeneration = 0
 
     init(
         primitives: KeychainPrimitives = .live,
@@ -327,16 +395,99 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
             return try await enqueue(on: allowEscapeQueue, interaction: interaction, clearsWedgeOnCompletion: false, tracksEscapeInFlight: true, marksPrimaryOccupancy: false, work)
         }
 
-        if interaction == .allow, await primaryQueueProbablyStuck() {
-            // Detection-lag gap: the primary queue's current occupant has
-            // been running longer than the short grace period, but hasn't
-            // hit ITS OWN full `timeout` yet, so `wedged` hasn't flipped.
-            // Routing here is safe for the same reason routing while
-            // `wedged` is true is safe (see `primaryQueueProbablyStuck()`).
-            return try await enqueue(on: allowEscapeQueue, interaction: interaction, clearsWedgeOnCompletion: false, tracksEscapeInFlight: true, marksPrimaryOccupancy: false, work)
+        if interaction == .allow {
+            // Captured BEFORE the suspension below — this is what
+            // `tryClaimPrimaryQueueAdmission(unlessRacedSince:)` compares
+            // against afterward to detect a fresh admission that raced in
+            // during the `await`. See the file header ("Second: ...").
+            let admissionGenerationAtEntry = primaryAdmissionGenerationSnapshot()
+
+            if await primaryQueueProbablyStuck() {
+                // Detection-lag gap: the primary queue's current occupant
+                // has been running longer than the short grace period, but
+                // hasn't hit ITS OWN full `timeout` yet, so `wedged` hasn't
+                // flipped. Routing here is safe for the same reason
+                // routing while `wedged` is true is safe (see
+                // `primaryQueueProbablyStuck()`).
+                return try await enqueue(on: allowEscapeQueue, interaction: interaction, clearsWedgeOnCompletion: false, tracksEscapeInFlight: true, marksPrimaryOccupancy: false, work)
+            }
+
+            if !tryClaimPrimaryQueueAdmission(unlessRacedSince: admissionGenerationAtEntry) {
+                // Admission-race gap (Finding 2, round 6): a DIFFERENT call
+                // was admitted onto the primary queue during the
+                // `await primaryQueueProbablyStuck()` suspension above —
+                // the "looked safe" answer we just got evaluated a queue
+                // state that no longer holds. Re-evaluate for real against
+                // whatever is actually there now, rather than either
+                // trusting the stale answer OR blindly rerouting to the
+                // escape queue (which could reopen the interaction-flag
+                // trample risk if the fresh occupant hasn't yet reached the
+                // point in its own closure where it captures the flag —
+                // see `primaryQueueProbablyStuck()`'s own safety argument).
+                //
+                // The freshly-admitted call may have only just been
+                // dispatched (via `targetQueue.async`) and not yet actually
+                // STARTED running — `primaryOccupantSince` is set at the
+                // top of ITS closure, not at admission time (see
+                // `primaryAdmissionGeneration`'s doc comment). A brief,
+                // fixed settle delay here — bounded, and only ever paid on
+                // this already-rare race path, never the common fast path
+                // — gives GCD a realistic chance to actually start it
+                // before this second look reads its occupancy, so "second
+                // look says healthy" reflects the new call's real state
+                // rather than pure dispatch latency.
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                if await primaryQueueProbablyStuck() {
+                    return try await enqueue(on: allowEscapeQueue, interaction: interaction, clearsWedgeOnCompletion: false, tracksEscapeInFlight: true, marksPrimaryOccupancy: false, work)
+                }
+                // Second look agrees it's healthy. Claim unconditionally —
+                // a further race in the now-purely-synchronous gap before
+                // `enqueue(...)`'s actual `targetQueue.async` call is the
+                // narrower residual window documented in the file header;
+                // closing it fully would require a fundamentally different
+                // admission mechanism, out of scope for this fix.
+                claimPrimaryQueueAdmissionUnconditionally()
+            }
+            return try await enqueue(on: queue, interaction: interaction, clearsWedgeOnCompletion: true, tracksEscapeInFlight: false, marksPrimaryOccupancy: true, work)
         }
 
+        claimPrimaryQueueAdmissionUnconditionally()
         return try await enqueue(on: queue, interaction: interaction, clearsWedgeOnCompletion: true, tracksEscapeInFlight: false, marksPrimaryOccupancy: true, work)
+    }
+
+    /// Snapshot of `primaryAdmissionGeneration`, taken under `lock`. See
+    /// `run(interaction:_:)` and `tryClaimPrimaryQueueAdmission(unlessRacedSince:)`.
+    private func primaryAdmissionGenerationSnapshot() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return primaryAdmissionGeneration
+    }
+
+    /// Atomically checks whether any call has been admitted to the primary
+    /// queue since `expectedGeneration` was captured and, if not, claims
+    /// THIS call's own admission by bumping the counter — the check and the
+    /// claim happen under one lock acquisition so a concurrent admission
+    /// can't itself split the two apart. Returns `false` (leaving the
+    /// counter untouched) if a different admission was detected — the
+    /// caller's own admission already bumped it, and `run(...)` uses this
+    /// to re-evaluate rather than trust a stale "looked safe" answer.
+    private func tryClaimPrimaryQueueAdmission(unlessRacedSince expectedGeneration: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard primaryAdmissionGeneration == expectedGeneration else { return false }
+        primaryAdmissionGeneration += 1
+        return true
+    }
+
+    /// Claims primary-queue admission without checking against any prior
+    /// snapshot — used by `.deny` (which never suspends between its
+    /// snapshot and admission, so there is nothing to race-check against)
+    /// and by the second-look path in the `.allow` branch above (which has
+    /// already decided to proceed regardless of further churn).
+    private func claimPrimaryQueueAdmissionUnconditionally() {
+        lock.lock()
+        primaryAdmissionGeneration += 1
+        lock.unlock()
     }
 
     /// Answers "has the primary queue's current occupant been running
@@ -499,9 +650,28 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
                     self?.primaryOccupantSince = Date()
                     self?.lock.unlock()
                 }
-                primitives.setInteractionAllowed(interaction == .allow)
-                let outcome = Result { try work() }
-                primitives.setInteractionAllowed(true)
+                // Finding 1 (round 6): a non-consuming peek at whether THIS
+                // call's own deadline timer (armed below, at admission
+                // time, independent of whether this closure had even
+                // started running yet) already fired while it was sitting
+                // in the backlog. If it did, the caller already received
+                // `.timedOut` — running `work()` now would silently mutate
+                // the real Keychain long after the caller gave up (for a
+                // write, potentially clobbering a NEWER write from a
+                // subsequent successful retry with STALE data). Skip
+                // straight to the unconditional bookkeeping below instead;
+                // `settled.claim()` at the bottom will correctly return
+                // `false` and no resume will happen either way, since the
+                // deadline timer already claimed and resumed the
+                // continuation with `.timedOut`.
+                let outcome: Result<T, Error>
+                if settled.peek() {
+                    outcome = .failure(KeychainGatewayError.timedOut)
+                } else {
+                    primitives.setInteractionAllowed(interaction == .allow)
+                    outcome = Result { try work() }
+                    primitives.setInteractionAllowed(true)
+                }
                 if clearsWedgeOnCompletion {
                     self?.lock.lock()
                     self?.wedged = false
@@ -565,5 +735,15 @@ private final class Settled: @unchecked Sendable {
         if done { return false }
         done = true
         return true
+    }
+    /// Non-consuming check: has either side already claimed? Unlike
+    /// `claim()`, calling this never itself counts as claiming — it exists
+    /// so the work-side can ask "did my own deadline already win" without
+    /// racing to become the side that delivers the final result. Only
+    /// `claim()` decides who actually resumes the continuation.
+    func peek() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return done
     }
 }
