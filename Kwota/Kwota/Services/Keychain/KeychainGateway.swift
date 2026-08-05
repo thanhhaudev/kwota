@@ -430,6 +430,32 @@ nonisolated final class KeychainGateway: KeychainGateways, @unchecked Sendable {
         return try await withCheckedThrowingContinuation { continuation in
             let settled = Settled()
             targetQueue.async { [weak self] in
+                // Re-check, at actual execution time, the same guard `run()`
+                // already applied at admission time. A `.deny` closure can
+                // be sitting in the primary queue's backlog — already
+                // admitted, not yet running — when `wedged` flips or an
+                // escape call starts draining; `escapeCallsInFlight` (and
+                // `wedged`) only gate NEW calls entering `run()`, they don't
+                // reach back into a backlog that was built before either
+                // went true. Without this, that already-queued `.deny`
+                // closure would still call `setInteractionAllowed(false)`
+                // below once its turn came, concurrently with an escape
+                // closure's own flag writes — the exact trample this file's
+                // serial design exists to prevent. Checked for `.deny`
+                // only: `.allow` closures reaching the primary queue aren't
+                // the ones this guard protects, and re-failing them here
+                // would just contradict `run()`'s own admission decision
+                // for no benefit.
+                if interaction == .deny {
+                    self?.lock.lock()
+                    let isWedgedNow = self?.wedged ?? false
+                    let hasDrainingEscapeCallsNow = (self?.escapeCallsInFlight ?? 0) > 0
+                    self?.lock.unlock()
+                    if isWedgedNow || hasDrainingEscapeCallsNow {
+                        if settled.claim() { continuation.resume(throwing: KeychainGatewayError.timedOut) }
+                        return
+                    }
+                }
                 // Marked at the very top of the closure, before the
                 // interaction flag or `copyMatching` are touched at all —
                 // `primaryQueueProbablyStuck()` relies on this timestamp

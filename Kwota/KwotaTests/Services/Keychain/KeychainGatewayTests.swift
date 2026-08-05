@@ -426,15 +426,23 @@ final class KeychainGatewayTests: XCTestCase {
     func test_allowArrivingAfterGraceElapsesButBeforeWedgeDeadline_stillReachesRealAnswerViaEscape() async throws {
         let callIndex = UncheckedBox<Int>(0)
         let granted = Data("granted".utf8)
+        // Release-controlled, not a bare `Thread.sleep` — a cancelled `Task`
+        // doesn't interrupt a blocking `Thread.sleep` anyway, so an
+        // unreleased sleep would keep this gateway's primary queue
+        // genuinely occupied for the full duration after the test returns.
+        // Matches the pattern in
+        // `test_denyFailsFast_whileAnEscapeAllowCallStillDrains_evenAfterWedgeClears`
+        // below: signal the gate before the test ends so nothing outlives it.
+        let probeGate = DispatchSemaphore(value: 0)
         let gateway = KeychainGateway(
             primitives: primitives(copyMatching: { _ in
                 var isFirstCall = false
                 callIndex.mutate { count in isFirstCall = (count == 0); count += 1 }
                 if isFirstCall {
-                    // Stuck for the whole test — nowhere near answering
-                    // within `timeout` (5s) either, so `wedged` never fires
-                    // during this test.
-                    Thread.sleep(forTimeInterval: 30)
+                    // Stuck until the test releases it — nowhere near
+                    // answering within `timeout` (5s) either, so `wedged`
+                    // never fires during this test.
+                    probeGate.wait()
                     return (errSecSuccess, nil)
                 }
                 return (errSecSuccess, granted as AnyObject)
@@ -468,7 +476,118 @@ final class KeychainGatewayTests: XCTestCase {
         XCTAssertLessThan(elapsed, 2.0,
                           "must escape promptly — not wait out allowTimeout (5s) queued behind the stuck probe")
 
-        denyTask.cancel()
+        // Release the still-parked probe so nothing outlives this test.
+        probeGate.signal()
+        _ = await denyTask.value
+    }
+
+    /// Follow-up review finding on the grace-period mechanism above:
+    /// `escapeCallsInFlight`/`wedged` only gate NEW calls entering `run()` —
+    /// they don't reach back into a `.deny` closure that was already
+    /// admitted onto the primary queue's backlog (dispatched, not yet
+    /// running) before either flag went true. Without a re-check at actual
+    /// execution time, that already-queued `.deny` closure would still call
+    /// `setInteractionAllowed(false)` once its turn came, concurrently with
+    /// a still-live escape closure's own flag writes — the exact trample
+    /// this file's serial design exists to prevent, and structurally the
+    /// original incident's failure mode.
+    ///
+    /// Setup: A (a `.deny` probe) occupies the primary queue and blocks.
+    /// While A is still blocked, B (a second `.deny` call — the one under
+    /// test) is admitted normally (nothing is wedged or draining yet) and
+    /// queues up BEHIND A on the same serial queue, not yet running. Once A
+    /// has been blocked long enough to exceed `allowGraceInterval`, C (an
+    /// `.allow` call) arrives; `primaryQueueProbablyStuck()` routes it to
+    /// the escape queue, where it also blocks — `escapeCallsInFlight` is
+    /// now 1, with B still sitting in the primary queue's backlog. Only
+    /// THEN is A released: A's closure finishes, and B finally gets its
+    /// turn. B must fail fast with `.timedOut` and must never touch
+    /// `setInteractionAllowed` or reach `copyMatching` at all.
+    func test_alreadyQueuedDenyFailsFast_whenItsTurnComesWhileAnEscapeCallIsDraining() async throws {
+        let callIndex = UncheckedBox<Int>(0)
+        let interactionCalls = UncheckedBox<[Bool]>([])
+        let probeGateA = DispatchSemaphore(value: 0)
+        let escapeGateC = DispatchSemaphore(value: 0)
+
+        let gateway = KeychainGateway(
+            primitives: primitives(
+                copyMatching: { _ in
+                    var index = -1
+                    callIndex.mutate { count in index = count; count += 1 }
+                    switch index {
+                    case 0:
+                        probeGateA.wait()  // A: occupies the primary queue
+                        return (errSecSuccess, nil)
+                    case 1:
+                        escapeGateC.wait()  // C: the draining escape call
+                        return (errSecSuccess, Data("granted".utf8) as AnyObject)
+                    default:
+                        // B must never reach here — that's the bug this test guards against.
+                        return (errSecSuccess, nil)
+                    }
+                },
+                setInteractionAllowed: { value in interactionCalls.mutate { $0.append(value) } }
+            ),
+            timeout: 5,
+            allowTimeout: 5,
+            allowGraceInterval: 0.1
+        )
+
+        // A occupies the primary queue and blocks.
+        let taskA = Task { try? await gateway.read(service: "s", account: "A", interaction: .deny) }
+        var deadline = Date().addingTimeInterval(2.0)
+        while Date() < deadline, callIndex.value < 1 {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(callIndex.value, 1, "precondition: A must be occupying the primary queue")
+
+        // B is admitted while A is still running — normal admission
+        // (nothing is wedged or draining yet) — so it queues up BEHIND A
+        // on the same serial queue.
+        let taskB = Task { try await gateway.read(service: "s", account: "B", interaction: .deny) }
+        try? await Task.sleep(nanoseconds: 50_000_000)  // let GCD enqueue B behind A
+
+        // Wait past the grace period so A counts as "probably stuck."
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        // C (.allow) arrives; `primaryQueueProbablyStuck()` routes it to
+        // the escape queue (incrementing `escapeCallsInFlight`), where it
+        // blocks in turn.
+        let taskC = Task { try? await gateway.read(service: "s", account: "C", interaction: .allow) }
+        deadline = Date().addingTimeInterval(2.0)
+        while Date() < deadline, callIndex.value < 2 {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(callIndex.value, 2, "precondition: C must have reached the escape queue and blocked")
+
+        // Release A. B — still queued behind it on the primary queue —
+        // gets its turn next, while C is still draining.
+        probeGateA.signal()
+        _ = await taskA.value
+
+        do {
+            _ = try await taskB.value
+            XCTFail("expected timedOut")
+        } catch let error as KeychainGatewayError {
+            XCTAssertEqual(error, .timedOut,
+                           "an already-queued .deny call must fail fast, not run, once its turn comes " +
+                           "while an escape call is still draining")
+        } catch {
+            XCTFail("wrong error type: \(error)")
+        }
+
+        XCTAssertEqual(callIndex.value, 2,
+                       "B must never reach copyMatching — it must fail before touching the primitives at all")
+
+        // Release C and let it finish. A contributed 2 setInteractionAllowed
+        // calls ([false, true]); C contributes its own 2. If B had
+        // incorrectly run, it would have contributed a third pair —
+        // asserting exactly 4 total proves B never touched the flag.
+        escapeGateC.signal()
+        _ = await taskC.value
+
+        XCTAssertEqual(interactionCalls.value.count, 4,
+                       "only A's and C's own setInteractionAllowed calls must exist — B must never have called it")
     }
 }
 
