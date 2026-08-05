@@ -11,7 +11,10 @@ struct ProcessResult: Equatable {
     let exitCode: Int32
 }
 
-protocol ProcessLauncher {
+/// `Sendable` so probes (`ClaudeProbe`/`CodexProbe`/`AgyProbe`) can dispatch
+/// `run(...)` via `OffMain.run` (blocking-IO audit, F-006) instead of
+/// blocking the main actor on `Process.waitUntilExit()`.
+protocol ProcessLauncher: Sendable {
     func run(executable: String, arguments: [String], environment: [String: String]?) throws -> ProcessResult
     func start(executable: String, arguments: [String], environment: [String: String]?) throws -> ProcessHandle
 }
@@ -27,7 +30,9 @@ protocol ProcessHandle: AnyObject {
     func onTermination(_ handler: @escaping @MainActor () -> Void)
 }
 
-final class SystemProcessLauncher: ProcessLauncher {
+/// `@unchecked Sendable`: no stored state — every method builds and owns its
+/// own `Process`/`Pipe` locally.
+final class SystemProcessLauncher: ProcessLauncher, @unchecked Sendable {
     func run(executable: String, arguments: [String], environment: [String: String]?) throws -> ProcessResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)

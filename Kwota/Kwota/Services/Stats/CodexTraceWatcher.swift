@@ -33,31 +33,40 @@ final class CodexTraceWatcher {
 
     func start() {
         guard pollTask == nil else { return }   // idempotent
-        fire()   // initial backfill (cheap; rowid cursor makes it incremental)
         let interval = pollInterval
         pollTask = Task { [weak self] in
+            // Initial backfill (cheap; rowid cursor makes it incremental),
+            // then the recurring poll — both go through `fire()` so both
+            // hops off the main actor for the directory listing below.
+            await self?.fire()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(interval))
                 if Task.isCancelled { break }
                 guard let self else { break }
-                self.fire()
+                await self.fire()
             }
         }
     }
 
     func stop() { pollTask?.cancel(); pollTask = nil }
 
-    private func fire() {
-        let dbs = discover()
+    private func fire() async {
+        let dbs = await discover()
         guard !dbs.isEmpty else { return }
         onChangedPaths?(dbs)
     }
 
-    private func discover() -> Set<URL> {
-        guard let items = try? fm.contentsOfDirectory(
-            at: codexHome, includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]) else { return [] }
-        return Set(items.filter { $0.lastPathComponent.hasPrefix("logs_") && $0.pathExtension == "sqlite" })
+    /// Blocking-IO audit (F-006): the directory listing used to run inline
+    /// on the main actor from the poll `Task` above.
+    private func discover() async -> Set<URL> {
+        let fm = self.fm
+        let codexHome = self.codexHome
+        return await OffMain.run {
+            guard let items = try? fm.contentsOfDirectory(
+                at: codexHome, includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]) else { return [] }
+            return Set(items.filter { $0.lastPathComponent.hasPrefix("logs_") && $0.pathExtension == "sqlite" })
+        }
     }
 
     deinit { pollTask?.cancel() }

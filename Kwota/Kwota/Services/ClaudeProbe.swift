@@ -14,11 +14,17 @@ final class ClaudeProbe {
 
     func run() async throws -> ProbeResult {
         let path = Self.augmentedPATH(existing: ProcessInfo.processInfo.environment["PATH"] ?? "")
-        let result = try launcher.run(
-            executable: "/usr/bin/env",
-            arguments: ["-S", "PATH=\(path)", "claude", "--version"],
-            environment: nil
-        )
+        // Blocking-IO audit (F-006): SystemProcessLauncher.run() blocks on
+        // Process.waitUntilExit(); this used to run inline on the main actor
+        // even though run() is already async.
+        let launcher = self.launcher
+        let result = try await OffMain.run {
+            try launcher.run(
+                executable: "/usr/bin/env",
+                arguments: ["-S", "PATH=\(path)", "claude", "--version"],
+                environment: nil
+            )
+        }
 
         if result.exitCode == 0 {
             let trimmed = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)

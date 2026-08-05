@@ -528,7 +528,7 @@ final class UsageMonitor: ObservableObject {
             return
         }
         let currentDayKey = ledger.dayKey(for: clock())
-        if let persisted = loadDailyCounterState(),
+        if let persisted = Self.loadDailyCounterState(from: dailyCounterURL),
            persisted.profileId == ownership.profileId,
            persisted.dayKey == currentDayKey,
            persisted.ledgerLastUpdate == ledger.lastUpdate {
@@ -540,10 +540,14 @@ final class UsageMonitor: ObservableObject {
         }
     }
 
-    private func loadDailyCounterState() -> DailyCounterState? {
-        guard FileManager.default.fileExists(atPath: dailyCounterURL.path) else { return nil }
+    /// `nonisolated` — pure function of `url`, no `self` access (extracted
+    /// from an instance method during the F-006 blocking-IO audit so the
+    /// isolation-checking gap on this synchronous, `init`-reachable read
+    /// closes the same way `loadEnvelope` did above).
+    private nonisolated static func loadDailyCounterState(from url: URL) -> DailyCounterState? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         do {
-            let data = try Data(contentsOf: dailyCounterURL)
+            let data = try Data(contentsOf: url)
             return try JSONDecoder().decode(DailyCounterState.self, from: data)
         } catch {
             AppLog.shared.log("UsageMonitor daily-counter load failed: \(error)", level: .warn)
@@ -599,7 +603,10 @@ final class UsageMonitor: ObservableObject {
     /// reader state is empty when the on-disk file is legacy v2 (pre-envelope);
     /// the caller must still invoke `reader.restore(.init())` so the
     /// "restore is always called before read" contract holds.
-    private static func loadEnvelope(at url: URL) -> (UsageLedger, ReaderState) {
+    ///
+    /// `nonisolated` — pure function of `url`, no `self` access. Blocking-IO
+    /// audit (F-006): only reachable from `init`.
+    private nonisolated static func loadEnvelope(at url: URL) -> (UsageLedger, ReaderState) {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return (UsageLedger(), ReaderState())
         }

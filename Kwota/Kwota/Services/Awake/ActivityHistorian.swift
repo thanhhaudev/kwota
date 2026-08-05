@@ -333,7 +333,11 @@ final class ActivityHistorian {
         let providerEvents: [String: [Date]]
     }
 
-    private static func loadPersisted(
+    /// `nonisolated` — pure function of its parameters (no `self` access),
+    /// same treatment as `scanClaudeBackfill` above. Blocking-IO audit
+    /// (F-006): only reachable from `init`, but marking it closes the
+    /// isolation-checking gap so the pattern doesn't silently regress.
+    private nonisolated static func loadPersisted(
         from url: URL, cutoff: Date
     ) -> (events: [ProviderID: [Date]], seen: [ProviderID: Set<Date>]) {
         var events: [ProviderID: [Date]] = [:]

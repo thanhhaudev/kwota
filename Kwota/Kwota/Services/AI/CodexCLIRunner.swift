@@ -89,7 +89,12 @@ final class CodexCLIRunner: AgentCLIInvocation {
         jsonSchema: String?,
         timeout: TimeInterval
     ) async throws -> CLIAnswer {
-        guard let binary = resolveBinary() else {
+        // Blocking-IO audit (F-006): `resolveBinary` probes fixed paths via
+        // `isExecutableFile` and, in the nvm case, `contentsOfDirectory` —
+        // this used to run inline on the main actor even though `ask()` is
+        // already async.
+        let resolveBinary = self.resolveBinary
+        guard let binary = await OffMain.run({ resolveBinary() }) else {
             throw CLIInvocationError.notInstalled
         }
 
@@ -138,10 +143,13 @@ final class CodexCLIRunner: AgentCLIInvocation {
         let stderr = String(data: stderrData, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
+        // Blocking-IO audit (F-006): reading the CLI's last-message file used
+        // to run inline on the main actor.
+        let lastMessageData = await OffMain.run { try? Data(contentsOf: outputFile) }
         switch Self.interpret(
             exitCode: exitCode,
             stderr: stderr,
-            lastMessageData: try? Data(contentsOf: outputFile),
+            lastMessageData: lastMessageData,
             jsonSchemaUsed: jsonSchema != nil
         ) {
         case .success(let text): return Self.makeAnswer(output: text)

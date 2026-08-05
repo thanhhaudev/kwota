@@ -14,11 +14,15 @@ final class CodexProbe {
 
     func run() async throws -> ProbeResult {
         let path = ClaudeProbe.augmentedPATH(existing: ProcessInfo.processInfo.environment["PATH"] ?? "")
-        let result = try launcher.run(
-            executable: "/usr/bin/env",
-            arguments: ["-S", "PATH=\(path)", "codex", "--version"],
-            environment: nil
-        )
+        // Blocking-IO audit (F-006): see ClaudeProbe.run() for rationale.
+        let launcher = self.launcher
+        let result = try await OffMain.run {
+            try launcher.run(
+                executable: "/usr/bin/env",
+                arguments: ["-S", "PATH=\(path)", "codex", "--version"],
+                environment: nil
+            )
+        }
 
         if result.exitCode == 0 {
             let trimmed = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -23,7 +23,8 @@ final class NotificationSettingsStore {
         self.value = Self.load(from: fileURL) ?? .default
     }
 
-    private static func load(from url: URL) -> NotificationSettings? {
+    /// `nonisolated` — pure function of `url`, no `self` access.
+    private nonisolated static func load(from url: URL) -> NotificationSettings? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         do {
             return try JSONDecoder().decode(NotificationSettings.self, from: data)

@@ -58,7 +58,11 @@ final class CodexTokenRefresher {
            cachedExpiry.timeIntervalSince(now()) > minLifetime {
             return cached.credential
         }
-        guard let auth = reader.read() else {
+        // Blocking-IO audit (F-006): auth.json read used to run inline on
+        // the main actor. `freshen` is already async, so this is a
+        // same-shape wrap — no behavior change, only where it runs.
+        let reader = self.reader
+        guard let auth = await OffMain.run({ reader.read() }) else {
             AppLog.shared.log(
                 "CodexTokenRefresher.freshen: auth.json unreadable; keeping supplied credential",
                 level: .warn
@@ -90,7 +94,8 @@ final class CodexTokenRefresher {
     /// Re-reads auth.json after a 401. Returns nil when the token on disk
     /// matches the failing one (retrying would just 401 again).
     func forceRefresh(profileId: UUID, previous: Credential? = nil) async throws -> Credential? {
-        guard let auth = reader.read() else {
+        let reader = self.reader
+        guard let auth = await OffMain.run({ reader.read() }) else {
             AppLog.shared.log("CodexTokenRefresher.forceRefresh: auth.json unreadable", level: .warn)
             return nil
         }

@@ -43,7 +43,11 @@ struct ProviderActivityScanner: Sendable {
 /// `ActivityHistorian.scanClaudeBackfill` (the Claude path), including the
 /// mtime-skip optimization: a file whose mtime predates the cutoff cannot
 /// contain anything in-window, so it's never read.
-enum ProviderActivityBackfill {
+/// `nonisolated` — every member is a pure function of its parameters (no
+/// captured/global actor state), matching the doc comments below that
+/// already claimed "off-main-safe." Closes the isolation-checking gap so a
+/// future caller can't silently reintroduce a synchronous call on main.
+nonisolated enum ProviderActivityBackfill {
     /// One activity file an `ActivitySource` hadn't yet tracked: its consumable
     /// end-of-file (byte offset after the last complete line) plus the activity
     /// dates at/after the discovery cutoff. `Sendable` so discovery can run via

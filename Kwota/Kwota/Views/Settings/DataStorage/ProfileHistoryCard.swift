@@ -105,7 +105,7 @@ struct ProfileHistoryCard: View {
 
     @ViewBuilder
     private func menuContent(for profile: Profile, entryCount: Int) -> some View {
-        Button("Export…") { exportHistory(for: profile) }
+        Button("Export…") { Task { await exportHistory(for: profile) } }
             .disabled(entryCount == 0)
         Divider()
         Button("Clear", role: .destructive) {
@@ -199,13 +199,20 @@ struct ProfileHistoryCard: View {
         }
     }
 
-    private func exportHistory(for profile: Profile) {
+    private func exportHistory(for profile: Profile) async {
         let url = AppPaths.usageHistoryFile(id: profile.id)
-        guard FileManager.default.fileExists(atPath: url.path),
-              let data = try? Data(contentsOf: url) else { return }
-        let dec = JSONDecoder()
-        dec.dateDecodingStrategy = .secondsSince1970
-        guard let entries = try? dec.decode([UsageHistoryEntry].self, from: data) else { return }
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        // Blocking-IO audit (F-006): the read + decode used to run inline on
+        // the main actor from this button action. `NSSavePanel.runModal()`
+        // below is itself an intentional main-thread modal block (SwiftUI/
+        // AppKit requirement), so only the file IO is moved off-main.
+        let entries: [UsageHistoryEntry]? = await OffMain.run {
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            let dec = JSONDecoder()
+            dec.dateDecodingStrategy = .secondsSince1970
+            return try? dec.decode([UsageHistoryEntry].self, from: data)
+        }
+        guard let entries else { return }
 
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.commaSeparatedText, .json]

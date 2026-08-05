@@ -48,8 +48,8 @@ final class AntigravityProviderTests: XCTestCase {
     private func makeProvider(
         transport: @escaping AntigravityAPIClient.Transport,
         watcher: StubAntigravityProcessWatcher,
-        readOveragesEnabled: @escaping @MainActor () -> Bool? = { nil },
-        readModelCredits: (@MainActor () -> AntigravityModelCredits?)? = nil,
+        readOveragesEnabled: @escaping @Sendable () -> Bool? = { nil },
+        readModelCredits: (@Sendable () -> AntigravityModelCredits?)? = nil,
         quotaRetryAttempts: Int = 3,
         quotaRetryDelay: TimeInterval = 0
     ) -> AntigravityProvider {

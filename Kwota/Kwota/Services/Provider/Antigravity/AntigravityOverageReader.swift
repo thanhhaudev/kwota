@@ -54,8 +54,11 @@ struct AntigravityModelCredits: Equatable {
     }
 }
 
-@MainActor
-struct AntigravityOverageReader {
+/// `nonisolated` — the only stored state is an immutable `URL`. Blocking-IO
+/// audit (F-006): `readModelCredits()` opens a SQLite DB and blocks on disk
+/// IO; `AntigravityProvider.fetchUsage` now calls it via `OffMain.run`,
+/// which requires this type not be pinned to the main actor.
+nonisolated struct AntigravityOverageReader {
     let dbPath: URL
 
     init(dbPath: URL = AppPaths.antigravityGlobalStorageDB) {

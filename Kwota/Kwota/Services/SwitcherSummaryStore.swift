@@ -103,7 +103,10 @@ private struct PersistedSwitcherSummariesFile: Codable {
     let entries: [String: PersistedSwitcherSummary]
 }
 
-final class SwitcherSummaryStore: SwitcherSummaryStoring {
+/// `nonisolated` — the only stored state is an immutable `URL`, so `load()`/
+/// `save()` carry no actor affinity of their own; callers that need them off
+/// the main thread can freely invoke them from `OffMain.run`.
+nonisolated final class SwitcherSummaryStore: SwitcherSummaryStoring {
     let fileURL: URL
 
     init(fileURL: URL = AppPaths.switcherSummariesFile) {

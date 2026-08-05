@@ -172,7 +172,11 @@ struct CachePersistedState: Codable, Equatable {
     )
 }
 
-final class CachePersistenceStore {
+/// `nonisolated` — the only stored state is an immutable `URL` and
+/// `FileManager` (both `Sendable`), so `load()`/`save()` carry no actor
+/// affinity of their own; callers that need them off the main thread can
+/// freely invoke them from `OffMain.run`.
+nonisolated final class CachePersistenceStore {
     let url: URL
     let fm: FileManager
 

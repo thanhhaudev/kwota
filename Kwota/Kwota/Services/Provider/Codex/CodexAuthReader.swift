@@ -143,7 +143,10 @@ struct CodexAuthReader {
 
 /// Test seam — `CodexTokenRefresher` reads through this protocol so tests
 /// can substitute an in-memory stub without hitting `~/.codex/auth.json`.
-protocol CodexAuthReaderProviding {
+/// `Sendable` so `CodexTokenRefresher` can dispatch `read()` via
+/// `OffMain.run` (blocking-IO audit, F-006) — conformers are value types
+/// with only `Sendable` stored state.
+protocol CodexAuthReaderProviding: Sendable {
     func read() -> CodexAuthReader.Auth?
 }
 

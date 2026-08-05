@@ -28,7 +28,7 @@ final class AntigravityProvider: AccountProvider {
     /// nil renders downstream as "no caption, no dimming, no fallback
     /// balance". Production callers use the default — which reads the real
     /// state.vscdb — and tests swap in a stub closure.
-    private let readModelCredits: @MainActor () -> AntigravityModelCredits?
+    private let readModelCredits: @Sendable () -> AntigravityModelCredits?
 
     /// Cold-start hardening for the quota sub-fetch. RetrieveUserQuotaSummary
     /// can transiently miss while a freshly-launched language_server is still
@@ -48,7 +48,7 @@ final class AntigravityProvider: AccountProvider {
         apiClient: AntigravityAPIClient,
         watcher: any AntigravityProcessWatching,
         profileStore: ProfileStore,
-        readModelCredits: @MainActor @escaping () -> AntigravityModelCredits? = {
+        readModelCredits: @Sendable @escaping () -> AntigravityModelCredits? = {
             AntigravityOverageReader().readModelCredits()
         },
         quotaRetryAttempts: Int = 3,
@@ -159,7 +159,11 @@ final class AntigravityProvider: AccountProvider {
             }
         }
 
-        let credits = readModelCredits()
+        // Blocking-IO audit (F-006): opens Antigravity's SQLite globalStorage
+        // DB (sqlite3_open_v2 + a small read) — used to run inline on the
+        // main actor even though `fetchUsage` is already async.
+        let readModelCredits = self.readModelCredits
+        let credits = await OffMain.run { readModelCredits() }
         snapshot.overagesEnabled = credits?.overagesEnabled
         snapshot.aiCreditsFallback = credits?.availableCredits
 

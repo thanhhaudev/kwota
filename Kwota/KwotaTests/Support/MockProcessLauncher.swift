@@ -6,7 +6,11 @@
 import Foundation
 @testable import Kwota
 
-final class MockProcessLauncher: ProcessLauncher {
+/// `@unchecked Sendable`: mutated by `run`/`start`, which the probes now
+/// invoke through `OffMain.run` (blocking-IO audit, F-006). Every mutation
+/// happens-before the `await OffMain.run` call site resumes, so test
+/// assertions that run afterward on the main actor never race the write.
+final class MockProcessLauncher: ProcessLauncher, @unchecked Sendable {
     struct Invocation: Equatable {
         let executable: String
         let arguments: [String]

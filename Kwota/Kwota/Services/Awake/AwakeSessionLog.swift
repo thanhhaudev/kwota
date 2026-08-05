@@ -178,7 +178,8 @@ final class AwakeSessionLog {
     /// Loads sessions from disk and closes any session still open at the
     /// last persisted moment. Returns empty list on missing file or decode
     /// failure — the caller treats absence as a fresh log.
-    private static func loadSessions(from url: URL) -> [AwakeSession] {
+    /// `nonisolated` — pure function of `url`, no `self` access.
+    private nonisolated static func loadSessions(from url: URL) -> [AwakeSession] {
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
         do {
             let data = try Data(contentsOf: url)
