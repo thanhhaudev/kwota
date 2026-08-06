@@ -159,6 +159,18 @@ final class CLITokenRefresher {
         let result: CLICredentialReader.SyncResult
         do {
             result = try await reader.readFresh()
+        } catch is CLICredentialAccessDenied {
+            // The one read failure that must NOT collapse into `nil`. `nil`
+            // makes the caller surface `.unauthorized`, which the shell
+            // renders as an expired session — the wrong diagnosis for a
+            // Keychain ACL denial, and one that points the user at
+            // `claude login` instead of at the Grant banner that actually
+            // fixes it. Rethrown so the reason survives all the way up.
+            AppLog.shared.log(
+                "CLITokenRefresher.forceRefresh: CLI keychain denied access — surfacing as access-denied, not as an expired session",
+                level: .warn
+            )
+            throw CLICredentialAccessDenied()
         } catch {
             // Deliberately no separate `CLICredentialTimeout` arm: a timeout is
             // just another read failure here, and returning nil is already the

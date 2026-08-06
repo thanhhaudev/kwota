@@ -474,6 +474,50 @@ final class CLICredentialReaderTests: XCTestCase {
         XCTAssertEqual(result.subscriptionPlan, "max")
     }
 
+    /// The state that produced the stale-popover incident: the Keychain
+    /// refused the read AND the only fallback is a token that expired months
+    /// ago. Handing that token back can only produce a 401, which the shell
+    /// renders as "Claude CLI session expired — run claude login" — the wrong
+    /// diagnosis, pointing at an account that is perfectly healthy. The denial
+    /// has to win, so the shell can show the Grant banner instead.
+    func test_deniedReadWithExpiredFileSurfacesAccessDenied() async throws {
+        let url = temp.file("creds.json")
+        let json = #"""
+        {"claudeAiOauth":{"accessToken":"long-expired","refreshToken":"r","expiresAt":"2020-01-01T00:00:00Z"}}
+        """#
+        try Data(json.utf8).write(to: url)
+        let reader = CLICredentialReader(
+            credentialsFile: url,
+            gateway: StubKeychainGatewayThrowing(error: .interactionNotAllowed)
+        )
+        do {
+            let result = try await reader.read(interaction: .deny)
+            XCTFail("expected CLICredentialAccessDenied, got \(String(describing: accessToken(result.credential)))")
+        } catch is CLICredentialAccessDenied {
+            // Expected.
+        } catch {
+            XCTFail("wrong error type: \(error)")
+        }
+    }
+
+    /// The expiry rule above is gated on the read having been DENIED. When the
+    /// Keychain simply holds no item, an expired file is still the most
+    /// truthful thing Kwota knows, and the pre-existing behaviour of handing
+    /// it back is deliberately left alone.
+    func test_absentKeychainWithExpiredFileStillReturnsTheFileToken() async throws {
+        let url = temp.file("creds.json")
+        let json = #"""
+        {"claudeAiOauth":{"accessToken":"expired-but-all-we-have","refreshToken":"r","expiresAt":"2020-01-01T00:00:00Z"}}
+        """#
+        try Data(json.utf8).write(to: url)
+        let reader = CLICredentialReader(
+            credentialsFile: url,
+            gateway: StubKeychainGateway(read: { nil })
+        )
+        let result = try await reader.read(interaction: .deny)
+        XCTAssertEqual(accessToken(result.credential), "expired-but-all-we-have")
+    }
+
     /// A `KeychainGateways` double that always throws a configurable
     /// `KeychainGatewayError`, standing in for a denied/timed-out Keychain
     /// read (as opposed to `StubKeychainGateway`, which only ever returns

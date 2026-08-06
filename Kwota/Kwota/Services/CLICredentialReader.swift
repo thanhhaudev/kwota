@@ -11,6 +11,7 @@
 //
 
 import Foundation
+import OSLog
 
 /// Seam that lets tests and higher-level services inject a CLI credential
 /// source without touching `CLICredentialReader`'s real Keychain and
@@ -48,6 +49,19 @@ extension CLICredentialReading {
 /// caller is released, the thread parked inside `SecItemCopyMatching` is not.
 nonisolated struct CLICredentialTimeout: Error {}
 
+/// Thrown when Claude Code's Keychain item refused the read because Kwota is
+/// not on that item's ACL, and the legacy file could not stand in for it.
+///
+/// Deliberately distinct from every other read failure, because it is the one
+/// that is recoverable by a single user action — the Grant banner's `.allow`
+/// probe, answered with **Always Allow** — and because the alternative was
+/// worse than useless: a denial that reaches the shell as
+/// `APIError.unauthorized` renders as "Claude CLI session expired — run
+/// claude login to refresh", which sends the user to fix an account that was
+/// never broken. Nothing about the CLI session is wrong in this state; Kwota
+/// simply cannot see the token.
+nonisolated struct CLICredentialAccessDenied: Error {}
+
 nonisolated struct CLICredentialReader {
     let credentialsFile: URL
     private let gateway: any KeychainGateways
@@ -66,6 +80,35 @@ nonisolated struct CLICredentialReader {
     }
 
     static let keychainService = "Claude Code-credentials"
+
+    /// Observability for the one code path in this file that is designed to
+    /// swallow failures.
+    ///
+    /// The `.deny` arm of `read(interaction:)` intentionally absorbs every
+    /// gateway outcome and falls through to the file — a denial is the
+    /// everyday background case, not something to surface as noise. The cost
+    /// is that a denial, an absent item, and a payload whose shape drifted all
+    /// used to look identical from outside: whatever error the *file* path
+    /// happened to throw. That is precisely how a Keychain ACL denial spent
+    /// hours masquerading as `keyNotFound: accessToken` while the Claude
+    /// popover quietly served stale figures. These lines are what make the
+    /// three distinguishable without a debugger attached.
+    ///
+    /// Deliberately NOT `AppLog`: this type is `nonisolated` and `AppLog` is
+    /// `@MainActor` under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, so
+    /// routing through it would mean hopping to the main actor from the exact
+    /// code path this whole branch exists to keep off it. A dedicated
+    /// `Logger` category also means `log show --predicate 'category ==
+    /// "credential-diag"'` can read these without the private-data profile
+    /// `AppLog`'s blanket `.private` interpolation would otherwise require.
+    ///
+    /// Every interpolation below is `.public` on purpose and every one is a
+    /// non-secret: a byte count, an enum case name, a file path. No token,
+    /// refresh token, or payload body is ever passed in here.
+    private static let diag = Logger(
+        subsystem: "com.thanhhaudev.kwota",
+        category: "credential-diag"
+    )
 
     /// True when Claude Code's legacy credentials file exists. Intentionally
     /// does NOT probe the Keychain — a probe would trigger the cross-app
@@ -111,26 +154,95 @@ nonisolated struct CLICredentialReader {
     /// error) still falls through to the file on `.allow` too — that case
     /// was never a denial.
     func read(interaction: KeychainInteraction = .deny) async throws -> SyncResult {
+        let mode = String(describing: interaction)
+        // Set when the gateway refused the read outright — Kwota is not on
+        // the CLI item's ACL. Decides which error this throws if the file
+        // fallback also comes up empty: `CLICredentialAccessDenied` (one user
+        // action away from fixed) rather than whatever unrelated error the
+        // file path happened to produce.
+        var deniedByKeychain = false
         do {
-            if let data = try await gateway.read(
+            // Split out of the original single `if let ... , let ... ` so the
+            // three distinguishable keychain outcomes (threw / nil / returned
+            // data that would not decode) can be told apart in the log.
+            // Behaviour is unchanged: any outcome other than a decoded result
+            // still falls through to the file.
+            let data = try await gateway.read(
                 service: Self.keychainService,
                 account: nil,
                 interaction: interaction
-            ), let result = Self.decodeKeychainPayload(data) {
-                return result
+            )
+            if let data {
+                if let result = Self.decodeKeychainPayload(data) {
+                    // `.info`, not `.debug`: os_log keeps `.debug` in memory
+                    // only, so `log show` cannot see it after the fact. That
+                    // makes success indistinguishable from "never ran" when
+                    // checking whether a grant actually took — which is
+                    // exactly the question asked right after granting. Volume
+                    // is negligible (one line per profile per refresh tick).
+                    Self.diag.info(
+                        "read(\(mode, privacy: .public)): keychain HIT, \(data.count, privacy: .public) bytes decoded"
+                    )
+                    return result
+                }
+                Self.diag.error(
+                    "read(\(mode, privacy: .public)): keychain returned \(data.count, privacy: .public) bytes but NEITHER envelope nor flat payload decoded (shape drift) — falling through to file"
+                )
+            } else {
+                Self.diag.error(
+                    "read(\(mode, privacy: .public)): keychain returned nil (errSecItemNotFound) — falling through to file"
+                )
             }
         } catch let error as KeychainGatewayError {
-            if interaction == .allow,
-               error == .interactionNotAllowed || error == .timedOut {
-                throw error
+            Self.diag.error(
+                "read(\(mode, privacy: .public)): gateway threw \(String(describing: error), privacy: .public)"
+            )
+            if error == .interactionNotAllowed || error == .timedOut {
+                if interaction == .allow { throw error }
+                deniedByKeychain = true
             }
             // .deny, or an .allow attempt that hit some other unexpected
             // status: fall through to the file, matching prior behavior.
         }
         let file = credentialsFile
         let data = try await OffMain.run { try? Data(contentsOf: file) }
-        guard let data else { throw CocoaError(.fileNoSuchFile) }
-        return Self.makeResult(try Self.decodePayload(data))
+        guard let data else {
+            Self.diag.error(
+                "read(\(mode, privacy: .public)): file fallback — unreadable/absent at \(file.path, privacy: .public)"
+            )
+            if deniedByKeychain { throw CLICredentialAccessDenied() }
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let payload: Payload
+        do {
+            payload = try Self.decodePayload(data)
+        } catch {
+            Self.diag.error(
+                "read(\(mode, privacy: .public)): file fallback decode FAILED on \(data.count, privacy: .public) bytes at \(file.path, privacy: .public) — \(String(describing: error), privacy: .public)"
+            )
+            if deniedByKeychain { throw CLICredentialAccessDenied() }
+            throw error
+        }
+        // An already-expired legacy file cannot stand in for a denied
+        // Keychain read. Kwota never refreshes CLI tokens — Claude Code is
+        // the source of truth — so handing this one back can only produce a
+        // 401, which the shell renders as "session expired" and which sends
+        // the user to `claude login` for an account that is perfectly fine.
+        // Reporting the denial instead routes them to the Grant banner, the
+        // one action that actually fixes it. Deliberately gated on
+        // `deniedByKeychain`: when the Keychain simply had no item, an
+        // expired file is still the most truthful thing we know, and the
+        // pre-existing behaviour of returning it is left alone.
+        if deniedByKeychain, payload.expiresAt <= Date() {
+            Self.diag.error(
+                "read(\(mode, privacy: .public)): keychain denied and file token expired at \(payload.expiresAt.timeIntervalSince1970, privacy: .public) — surfacing CLICredentialAccessDenied"
+            )
+            throw CLICredentialAccessDenied()
+        }
+        Self.diag.debug(
+            "read(\(mode, privacy: .public)): file fallback decoded OK, expiresAt=\(payload.expiresAt.timeIntervalSince1970, privacy: .public)"
+        )
+        return Self.makeResult(payload)
     }
 
     // `static` on purpose: these run inside the `@Sendable` closure above, and
@@ -145,7 +257,7 @@ nonisolated struct CLICredentialReader {
     /// envelope for a long time. That made the fallback which exists
     /// precisely to cover a Keychain failure structurally incapable of ever
     /// covering one, and it reported every such failure as a baffling
-    /// `keyNotFound: accessToken` blamed on the file rather than on the
+    /// `keyNotFound: accessToken` sourced from the file rather than from the
     /// Keychain read that actually failed.
     private static func decodePayload(_ data: Data) throws -> Payload {
         let decoder = Self.decoder()

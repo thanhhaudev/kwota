@@ -20,6 +20,26 @@ final class KeychainDenialSemanticsTests: XCTestCase {
         }
     }
 
+    /// Kwota's OWN item reads fine — the denial in the tests below happens
+    /// further down, on the CLI's cross-app item, which is a different
+    /// failure at a different layer.
+    private final class HealthyCredentialStore: CredentialReading {
+        func read(for id: UUID, interaction: KeychainInteraction) async throws -> Credential? {
+            .cliToken(accessToken: "stored", refreshToken: "r", expiresAt: .distantFuture)
+        }
+    }
+
+    private final class ThrowingGateway: KeychainGateways, @unchecked Sendable {
+        let error: KeychainGatewayError
+        init(error: KeychainGatewayError) { self.error = error }
+        func read(service: String, account: String?, interaction: KeychainInteraction) async throws -> Data? {
+            throw error
+        }
+        func write(_ data: Data, service: String, account: String) async throws {}
+        func delete(service: String, account: String) async throws {}
+        func deleteAll(service: String) async throws {}
+    }
+
     @MainActor
     func test_deniedReadSurfacesKeychainAccessNeeded() async {
         let fetcher = LiveProfileUsageFetcher(
@@ -78,6 +98,43 @@ final class KeychainDenialSemanticsTests: XCTestCase {
         XCTAssertNotEqual(vm.authState, .expired)
     }
 
+    /// The stale-popover regression, end to end at the shell.
+    ///
+    /// Kwota's own Keychain item reads fine, so `refresh(profile:)` sails past
+    /// the denial check at the top. The failure is one layer down: the CLI's
+    /// cross-app item (`Claude Code-credentials`) refuses the read, Kwota can
+    /// no longer follow Claude Code's token rotation, the stored token goes
+    /// stale, and the API answers 401. Matching on that 401 alone would report
+    /// an expired session and send the user to `claude login` — which cannot
+    /// fix an ACL denial. The denial has to survive all the way up so the
+    /// Grant banner is what the user actually gets.
+    @MainActor
+    func test_deniedCLIKeychainShowsGrantRatherThanExpiredSession() async {
+        let vm = makeVM(
+            credentialStore: HealthyCredentialStore(),
+            cliGateway: ThrowingGateway(error: .interactionNotAllowed)
+        )
+        let profile = Profile(name: "P", authMethod: .cliSync)
+        try? vm.profileStore.add(profile)
+        await vm.refresh(profile: profile)
+        XCTAssertEqual(vm.authState, .keychainAccessNeeded)
+        XCTAssertNotEqual(vm.authState, .expired)
+    }
+
+    /// The other side of the same boundary: when the CLI item is genuinely
+    /// absent rather than refused, a 401 really does mean the session is over,
+    /// and `.expired` (with its "run claude login" copy) is the correct call.
+    /// Without this, the fix above could over-reach and hide real sign-outs
+    /// behind a Grant button that would never help.
+    @MainActor
+    func test_absentCLIKeychainWith401StillMeansExpired() async {
+        let vm = makeVM(credentialStore: HealthyCredentialStore())
+        let profile = Profile(name: "P", authMethod: .cliSync)
+        try? vm.profileStore.add(profile)
+        await vm.refresh(profile: profile)
+        XCTAssertEqual(vm.authState, .expired)
+    }
+
     // MARK: - Fixture
 
     /// Minimal hermetic `MenuBarViewModel` fixture for this suite. `credentialStore`
@@ -87,7 +144,10 @@ final class KeychainDenialSemanticsTests: XCTestCase {
     /// `KeychainCredentialStore` every other collaborator (AutoProfileCoordinator,
     /// CodexAutoProfileCoordinator, AntigravityAutoProfileCoordinator) is built with.
     @MainActor
-    private func makeVM(credentialStore: (any CredentialReading)? = nil) -> MenuBarViewModel {
+    private func makeVM(
+        credentialStore: (any CredentialReading)? = nil,
+        cliGateway: (any KeychainGateways)? = nil
+    ) -> MenuBarViewModel {
         let temp = TempDirectory()
         let service = "com.thanhhaudev.Kwota.test.\(UUID())"
         let keychain = KeychainCredentialStore(service: service)
@@ -128,7 +188,7 @@ final class KeychainDenialSemanticsTests: XCTestCase {
         let stubRefresher = CLITokenRefresher(
             reader: CLICredentialReader(
                 credentialsFile: temp.file("missing-credentials.json"),
-                gateway: StubKeychainGateway(read: { nil })
+                gateway: cliGateway ?? StubKeychainGateway(read: { nil })
             ),
             store: keychain
         )

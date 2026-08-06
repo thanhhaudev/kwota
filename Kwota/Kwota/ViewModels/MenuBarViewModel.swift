@@ -2297,6 +2297,21 @@ final class MenuBarViewModel {
                     }
                 }
             }
+        } catch is CLICredentialAccessDenied {
+            // Same shape as the own-item denial handled at the top of this
+            // function, and for the same reason: a refused Keychain read
+            // means "unknown", never "signed out". Ordered ahead of the
+            // `.unauthorized` arm below deliberately — the CLI path reaches
+            // this state THROUGH a 401 (the stored token went stale because
+            // Kwota could not follow the CLI's rotation), so matching on the
+            // 401 alone would misread it as an expired session and tell the
+            // user to run `claude login`, which cannot fix an ACL denial.
+            if canCommitToUI() {
+                authState = .keychainAccessNeeded
+                isSwitchingProfile = false
+            }
+            // Leaves `summary` alone: the last known figures stay on screen
+            // rather than blanking on a permissions problem.
         } catch ClaudeAPIClient.APIError.unauthorized {
             if canCommitToUI() {
                 authState = .expired

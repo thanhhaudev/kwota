@@ -90,10 +90,28 @@ final class ClaudeProvider: AccountProvider {
                     "ClaudeProvider: 401 from oauth/usage, attempting forceRefresh and retry",
                     level: .info
                 )
-                if let retried = try? await cliRefresher.forceRefresh(
-                    profileId: profile.id,
-                    previous: workingCredential
-                ) {
+                // `try?` would flatten a Keychain ACL denial into the same
+                // `nil` as every other re-read failure, and `nil` here means
+                // `.unauthorized` — i.e. "your CLI session expired". For a
+                // denial that diagnosis is simply wrong: the session is fine
+                // and only the Grant banner can fix it, so that one error is
+                // let through untouched.
+                let retried: Credential?
+                do {
+                    retried = try await cliRefresher.forceRefresh(
+                        profileId: profile.id,
+                        previous: workingCredential
+                    )
+                } catch is CLICredentialAccessDenied {
+                    AppLog.shared.log(
+                        "ClaudeProvider: CLI keychain denied on the 401 retry — surfacing access-denied so the shell shows Grant, not the re-auth banner",
+                        level: .warn
+                    )
+                    throw CLICredentialAccessDenied()
+                } catch {
+                    retried = nil
+                }
+                if let retried {
                     result = try await apiClient.fetchSnapshotViaOAuthUsage(credential: retried)
                 } else {
                     AppLog.shared.log(
