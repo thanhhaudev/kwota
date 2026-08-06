@@ -29,6 +29,26 @@ final class KeychainDenialSemanticsTests: XCTestCase {
         }
     }
 
+    /// Kwota's own item reads fine, but what it holds is a token that already
+    /// expired — the real state after Claude Code rotated and Kwota could not
+    /// follow.
+    private final class ExpiredCredentialStore: CredentialReading {
+        func read(for id: UUID, interaction: KeychainInteraction) async throws -> Credential? {
+            .cliToken(
+                accessToken: "expired",
+                refreshToken: "r",
+                expiresAt: Date(timeIntervalSince1970: 1)
+            )
+        }
+    }
+
+    private final class RequestCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _count = 0
+        var count: Int { lock.lock(); defer { lock.unlock() }; return _count }
+        func bump() { lock.lock(); _count += 1; lock.unlock() }
+    }
+
     private final class ThrowingGateway: KeychainGateways, @unchecked Sendable {
         let error: KeychainGatewayError
         init(error: KeychainGatewayError) { self.error = error }
@@ -135,6 +155,30 @@ final class KeychainDenialSemanticsTests: XCTestCase {
         XCTAssertEqual(vm.authState, .expired)
     }
 
+    /// Why the Grant banner still did not appear after the first fix: the
+    /// doomed request was being spent anyway. A denied CLI Keychain plus an
+    /// already-expired stored token cannot produce a usable response, but the
+    /// call went out regardless, and once Anthropic started throttling the
+    /// repeats, `refresh(profile:)`'s 429 arm reported a rate limit and backed
+    /// off — leaving "Rate limited by Anthropic · Holding last snapshot" on
+    /// screen and the actionable state buried underneath it. Nothing should
+    /// reach the network in this state.
+    @MainActor
+    func test_deniedCLIKeychainWithExpiredTokenSkipsTheRequestEntirely() async {
+        let counter = RequestCounter()
+        let vm = makeVM(
+            credentialStore: ExpiredCredentialStore(),
+            cliGateway: ThrowingGateway(error: .interactionNotAllowed),
+            onRequest: { counter.bump() }
+        )
+        let profile = Profile(name: "P", authMethod: .cliSync)
+        try? vm.profileStore.add(profile)
+        await vm.refresh(profile: profile)
+        XCTAssertEqual(vm.authState, .keychainAccessNeeded)
+        XCTAssertEqual(counter.count, 0, "a request that cannot succeed must not be spent — it is what earns the 429 that hides the Grant banner")
+        XCTAssertNil(vm.rateLimitedUntil, "no request, so nothing to be throttled for")
+    }
+
     // MARK: - Fixture
 
     /// Minimal hermetic `MenuBarViewModel` fixture for this suite. `credentialStore`
@@ -146,7 +190,8 @@ final class KeychainDenialSemanticsTests: XCTestCase {
     @MainActor
     private func makeVM(
         credentialStore: (any CredentialReading)? = nil,
-        cliGateway: (any KeychainGateways)? = nil
+        cliGateway: (any KeychainGateways)? = nil,
+        onRequest: (@Sendable () -> Void)? = nil
     ) -> MenuBarViewModel {
         let temp = TempDirectory()
         let service = "com.thanhhaudev.Kwota.test.\(UUID())"
@@ -200,6 +245,7 @@ final class KeychainDenialSemanticsTests: XCTestCase {
             credentialStore: keychain,
             credentialReader: credentialStore,
             apiClient: ClaudeAPIClient(transport: { req in
+                onRequest?()
                 let resp = HTTPURLResponse(
                     url: req.url ?? URL(string: "https://example.invalid")!,
                     statusCode: 401,

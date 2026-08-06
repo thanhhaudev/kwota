@@ -55,6 +55,14 @@ final class ClaudeProvider: AccountProvider {
         ]
     }
 
+    /// Whether a CLI token is already past its expiry. Only ever consulted to
+    /// decide that a request is pointless — never to decide a token is good,
+    /// so clock skew can at worst cost one wasted call, never a false denial.
+    private static func isExpired(_ credential: Credential, now: Date = Date()) -> Bool {
+        guard case .cliToken(_, _, let expiresAt) = credential else { return false }
+        return expiresAt <= now
+    }
+
     /// Fetches a usage summary, branching on credential variant.
     ///
     /// CLI path: `freshen` → `fetchSnapshotViaOAuthUsage`, with one 401-retry
@@ -63,19 +71,43 @@ final class ClaudeProvider: AccountProvider {
     /// surfaced through the summary so the shell can push the next tick out.
     ///
     /// Errors propagate as `ClaudeAPIClient.APIError` (`.unauthorized`,
-    /// `.rateLimited(retryAfter:)`) — the shell already pattern-matches
-    /// these to drive UI state. A generic `ProviderFetchError` is a
-    /// follow-up; mapping is straightforward when a second provider arrives.
+    /// `.rateLimited(retryAfter:)`) plus `CLICredentialAccessDenied` — the
+    /// shell already pattern-matches these to drive UI state. A generic
+    /// `ProviderFetchError` is a follow-up; mapping is straightforward when
+    /// a second provider arrives.
     func fetchUsage(credential: Credential, profile: Profile) async throws -> ProviderUsageSummary {
         let snapshot: UsageSnapshot
         var retryAfter: TimeInterval?
 
         switch credential {
         case .cliToken:
-            let workingCredential = (try? await cliRefresher.freshen(
-                profileId: profile.id,
-                current: credential
-            )) ?? credential
+            // `try?` here would be wrong for exactly one of `freshen`'s
+            // failures. Every other one leaves `credential` as a reasonable
+            // bet — it may well still be valid, and the 401 retry below
+            // recovers if it is not. A Keychain ACL denial paired with an
+            // ALREADY-EXPIRED stored token is different: Kwota cannot see the
+            // token Claude Code rotated to, and the one it still holds is
+            // dead, so the request below cannot succeed. Spending it anyway
+            // is how this surfaced as "Rate limited by Anthropic" — the
+            // doomed calls pile up until the server throttles them, and the
+            // 429 arm of `refresh(profile:)` then reports a rate limit and
+            // backs off, burying the single thing the user can actually fix.
+            // Bail before the request so the Grant banner is what they see.
+            let workingCredential: Credential
+            do {
+                workingCredential = try await cliRefresher.freshen(
+                    profileId: profile.id,
+                    current: credential
+                )
+            } catch is CLICredentialAccessDenied where Self.isExpired(credential) {
+                AppLog.shared.log(
+                    "ClaudeProvider: CLI keychain denied and the stored token has already expired — surfacing access-denied without spending a request",
+                    level: .warn
+                )
+                throw CLICredentialAccessDenied()
+            } catch {
+                workingCredential = credential
+            }
             let result: ClaudeAPIClient.SnapshotFetch
             do {
                 result = try await apiClient.fetchSnapshotViaOAuthUsage(
