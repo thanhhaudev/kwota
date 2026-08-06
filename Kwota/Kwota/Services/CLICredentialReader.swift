@@ -130,28 +130,39 @@ nonisolated struct CLICredentialReader {
         let file = credentialsFile
         let data = try await OffMain.run { try? Data(contentsOf: file) }
         guard let data else { throw CocoaError(.fileNoSuchFile) }
-        let payload = try Self.decoder().decode(Payload.self, from: data)
-        return SyncResult(
-            credential: .cliToken(
-                accessToken: payload.accessToken,
-                refreshToken: payload.refreshToken,
-                expiresAt: payload.expiresAt
-            ),
-            subscriptionPlan: payload.subscriptionType
-        )
+        return Self.makeResult(try Self.decodePayload(data))
     }
 
     // `static` on purpose: these run inside the `@Sendable` closure above, and
     // an instance method would capture `self` across the isolation boundary.
-    private static func decodeKeychainPayload(_ data: Data) -> SyncResult? {
+
+    /// Decodes either shape Claude Code has ever written: the current
+    /// `{"claudeAiOauth": {...}}` envelope, and the older flat payload.
+    ///
+    /// Shared by the Keychain path and the legacy-file path on purpose. The
+    /// file path used to decode `Payload` directly, so it could only ever
+    /// succeed on the flat shape — while the file on disk has carried the
+    /// envelope for a long time. That made the fallback which exists
+    /// precisely to cover a Keychain failure structurally incapable of ever
+    /// covering one, and it reported every such failure as a baffling
+    /// `keyNotFound: accessToken` blamed on the file rather than on the
+    /// Keychain read that actually failed.
+    private static func decodePayload(_ data: Data) throws -> Payload {
         let decoder = Self.decoder()
-        if let envelope = try? decoder.decode(KeychainEnvelope.self, from: data) {
-            return makeResult(envelope.claudeAiOauth)
+        do {
+            return try decoder.decode(KeychainEnvelope.self, from: data).claudeAiOauth
+        } catch {
+            // Surface the envelope attempt's error when neither shape fits —
+            // the envelope is the shape current Claude Code actually writes,
+            // so its error is the more useful diagnostic of the two.
+            guard let flat = try? decoder.decode(Payload.self, from: data) else { throw error }
+            return flat
         }
-        if let p = try? decoder.decode(Payload.self, from: data) {
-            return makeResult(p)
-        }
-        return nil
+    }
+
+    private static func decodeKeychainPayload(_ data: Data) -> SyncResult? {
+        guard let payload = try? decodePayload(data) else { return nil }
+        return makeResult(payload)
     }
 
     private static func makeResult(_ p: Payload) -> SyncResult {

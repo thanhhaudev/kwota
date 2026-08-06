@@ -453,6 +453,27 @@ final class CLICredentialReaderTests: XCTestCase {
         XCTAssertEqual(access, "file-token", "a .deny denial must still fall through to the legacy file")
     }
 
+    /// The legacy file has carried the `{"claudeAiOauth": {...}}` envelope for
+    /// a long time, but the file path used to decode `Payload` directly and so
+    /// could only ever accept the older flat shape. The fallback that exists
+    /// to cover a Keychain failure was therefore structurally incapable of
+    /// covering one, and every denial surfaced as `keyNotFound: accessToken`
+    /// blamed on the file rather than on the Keychain read that really failed.
+    func test_deniedReadFallsThroughToAnEnvelopeShapedFile() async throws {
+        let url = temp.file("creds.json")
+        let json = #"""
+        {"claudeAiOauth":{"accessToken":"enveloped-file","refreshToken":"r","expiresAt":1893456000000,"subscriptionType":"max"}}
+        """#
+        try Data(json.utf8).write(to: url)
+        let reader = CLICredentialReader(
+            credentialsFile: url,
+            gateway: StubKeychainGatewayThrowing(error: .interactionNotAllowed)
+        )
+        let result = try await reader.read(interaction: .deny)
+        XCTAssertEqual(accessToken(result.credential), "enveloped-file")
+        XCTAssertEqual(result.subscriptionPlan, "max")
+    }
+
     /// A `KeychainGateways` double that always throws a configurable
     /// `KeychainGatewayError`, standing in for a denied/timed-out Keychain
     /// read (as opposed to `StubKeychainGateway`, which only ever returns
