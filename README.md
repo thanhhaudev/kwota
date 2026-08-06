@@ -25,6 +25,10 @@ make test                        # unit tests (~90s, parallel)
 make test-only SUITE=<Name>      # one suite, no rebuild
 make test-all                    # include UI tests (serial)
 make help                        # all targets
+
+make signing-setup               # detect Team ID → Local.xcconfig
+make signing-refresh             # re-sign the installed app if its cert is near expiry
+make signing-agent-install       # run that check weekly + at login
 ```
 
 DerivedData is shared at `~/Library/Developer/Xcode/DerivedData/Kwota-shared`. The UI test target is excluded from `make test` by default.
@@ -39,7 +43,8 @@ The app runs without signing setup. To enable **system-cache cleaning** (needs a
    `Local.xcconfig` for you:
 
    ```bash
-   bash scripts/setup-signing.sh        # detects your Team ID, writes Local.xcconfig
+   make signing-setup                   # detects your Team ID, writes Local.xcconfig
+   make signing-setup TEAM=XXXXXXXXXX   # or name it yourself
    ```
 
    It reads the Team ID straight from your signing certificate and asks which to
@@ -63,8 +68,8 @@ renewed certificate.
 To automate this for the app you keep in `/Applications`:
 
 ```bash
-bash scripts/install-signing-refresh.sh             # install the LaunchAgent
-bash scripts/install-signing-refresh.sh uninstall   # remove it
+make signing-agent-install     # install the LaunchAgent
+make signing-agent-uninstall   # remove it
 ```
 
 It installs a per-user LaunchAgent that runs weekly (and at each login). Each
@@ -74,7 +79,12 @@ renews the certificate automatically), swaps the bundle in place, and relaunches
 it if it was running. It stays dormant until the app is actually in
 `/Applications`, so dev builds from `make run` are never touched. Logs land in
 `~/Library/Logs/kwota-signing-refresh.log`. You can also run a check on demand
-with `bash scripts/refresh-signing.sh`.
+with `make signing-refresh`.
+
+The `make signing-*` targets are thin wrappers over `scripts/setup-signing.sh`,
+`scripts/refresh-signing.sh`, and `scripts/install-signing-refresh.sh`. The
+scripts remain runnable directly — they resolve the repo from their own
+location, and the LaunchAgent invokes `refresh-signing.sh` rather than `make`.
 
 ## Tabs
 
