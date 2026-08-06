@@ -17,7 +17,8 @@ DERIVED     ?= $(HOME)/Library/Developer/Xcode/DerivedData/Kwota-shared
 DESTINATION := platform=macOS
 XCODEBUILD  := xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIG) -destination '$(DESTINATION)' -derivedDataPath $(DERIVED)
 
-.PHONY: help build app run test test-all build-for-testing test-only clean clean-deep open release release-app install ensure-local-xcconfig
+.PHONY: help build app run test test-all build-for-testing test-only clean clean-deep open release release-app install ensure-local-xcconfig \
+        signing-setup signing-refresh signing-agent-install signing-agent-uninstall
 
 # Local.xcconfig is gitignored — owners commit their DEVELOPMENT_TEAM there,
 # public clones get an auto-created empty placeholder so xcodebuild can
@@ -43,6 +44,12 @@ help:
 	@echo "  make clean        Clean build artifacts (keeps shared DerivedData)"
 	@echo "  make clean-deep   Clean build artifacts AND wipe shared DerivedData"
 	@echo "  make open         Open project in Xcode"
+	@echo ""
+	@echo "Signing:"
+	@echo "  make signing-setup [TEAM=XXXXXXXXXX]  Detect/set Team ID in Local.xcconfig"
+	@echo "  make signing-refresh                  Re-sign $(INSTALLED_APP) if its cert is near expiry"
+	@echo "  make signing-agent-install            Run signing-refresh weekly + at login"
+	@echo "  make signing-agent-uninstall          Remove that LaunchAgent"
 
 build: ensure-local-xcconfig
 	$(XCODEBUILD) build
@@ -115,3 +122,31 @@ install: release-app
 	@cp -R "$(RELEASE_APP)" "$(INSTALLED_APP)"
 	@echo "Installed $(INSTALLED_APP)"
 	@open "$(INSTALLED_APP)"
+
+# --- Signing -----------------------------------------------------------------
+#
+# Thin wrappers over scripts/. The scripts stay the source of truth (they are
+# portable, resolve the repo from their own location, and are what the
+# LaunchAgent invokes); these targets exist so the signing lifecycle is
+# discoverable from `make help` alongside everything else, instead of only
+# from the README.
+
+# Detects your Apple Team ID from the login keychain and writes it to
+# Local.xcconfig (gitignored). Pass TEAM= to skip detection:
+#   make signing-setup TEAM=WDCHM35284
+signing-setup:
+	@bash scripts/setup-signing.sh $(TEAM)
+
+# A development signature carries no secure timestamp, so once its leaf
+# certificate expires macOS stops launching the app and launchd stops loading
+# the privileged helper. This re-signs the long-lived $(INSTALL_DIR) copy when
+# the cert is within the script's threshold — and reports "cert good" and does
+# nothing when it is not, so it is safe to run any time.
+signing-refresh:
+	@bash scripts/refresh-signing.sh
+
+signing-agent-install:
+	@bash scripts/install-signing-refresh.sh install
+
+signing-agent-uninstall:
+	@bash scripts/install-signing-refresh.sh uninstall
