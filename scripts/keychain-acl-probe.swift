@@ -1,13 +1,23 @@
-// scripts/spikes/keychain-acl-probe.swift
+// scripts/keychain-acl-probe.swift
 // Usage: aclprobe [service]        default: "Claude Code-credentials"
-//   swiftc -o /tmp/aclprobe scripts/spikes/keychain-acl-probe.swift
+//   swiftc -o /tmp/aclprobe scripts/keychain-acl-probe.swift
 //
-// Answers "which applications are trusted on this keychain item, by full
-// path" — the question Keychain Access cannot answer, because its Access
-// Control tab shows only each entry's *name*. Nine different Kwota builds all
-// render there as nine rows called "Kwota", so a list can look reassuring
-// while the app you actually run is absent from it. That is precisely how the
-// 2026-08-06 stale-popover incident stayed hidden; see
+// Normally you want `make keychain-doctor`, which builds this and turns its
+// output into a verdict. Run it directly when you need the raw ACL.
+//
+// Dumps two things Keychain Access will not show you:
+//
+//   * the trusted applications, by full path. The Access Control tab shows
+//     only each entry's *name*, so nine different Kwota builds render as nine
+//     rows called "Kwota" and the list looks reassuring while the app you
+//     actually run is absent from it.
+//   * the partition list, as a raw hex label on the ACLAuthorizationPartitionID
+//     entry. This is the one that decides whether a read succeeds — trusted-app
+//     membership is neither necessary nor sufficient. Decode the label with
+//     `bytes.fromhex(...)`; it is a plist naming `apple:`, `apple-tool:`,
+//     `teamid:<TEAM>`, `cdhash:<hash>` entries.
+//
+// Both facts were measured the hard way on 2026-08-06/07 — see
 // docs/findings/F-005-keychain-interaction-suppression.md.
 //
 // Reads the ACL WITHOUT reading the item's data: kSecReturnRef, never

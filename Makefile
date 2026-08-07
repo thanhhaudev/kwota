@@ -18,7 +18,7 @@ DESTINATION := platform=macOS
 XCODEBUILD  := xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIG) -destination '$(DESTINATION)' -derivedDataPath $(DERIVED)
 
 .PHONY: help build app run test test-all build-for-testing test-only clean clean-deep open release release-app install ensure-local-xcconfig \
-        signing-setup signing-refresh signing-agent-install signing-agent-uninstall
+        signing-setup signing-refresh signing-agent-install signing-agent-uninstall keychain-doctor
 
 # Local.xcconfig is gitignored — owners commit their DEVELOPMENT_TEAM there,
 # public clones get an auto-created empty placeholder so xcodebuild can
@@ -44,6 +44,9 @@ help:
 	@echo "  make clean        Clean build artifacts (keeps shared DerivedData)"
 	@echo "  make clean-deep   Clean build artifacts AND wipe shared DerivedData"
 	@echo "  make open         Open project in Xcode"
+	@echo ""
+	@echo "Diagnostics:"
+	@echo "  make keychain-doctor                  Why is the Claude tab stale? (read-only)"
 	@echo ""
 	@echo "Signing:"
 	@echo "  make signing-setup [TEAM=XXXXXXXXXX]  Detect/set Team ID in Local.xcconfig"
@@ -150,3 +153,16 @@ signing-agent-install:
 
 signing-agent-uninstall:
 	@bash scripts/install-signing-refresh.sh uninstall
+
+# --- Diagnostics -------------------------------------------------------------
+
+# Answers "why is the Claude tab stale?" by checking whether this machine's
+# Kwota signing team is in the partition list of Claude Code's Keychain item —
+# the thing that actually gates Kwota's cross-app credential read.
+#
+# Read-only and password-free: the probe it builds asks for kSecReturnRef, never
+# kSecReturnData, so nothing is decrypted and no consent dialog can fire.
+# Deliberately does not offer to write the partition entry; that belongs to the
+# app's Grant banner, which goes through macOS's own consent dialog.
+keychain-doctor:
+	@bash scripts/keychain-doctor.sh

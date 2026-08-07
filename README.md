@@ -86,6 +86,41 @@ The `make signing-*` targets are thin wrappers over `scripts/setup-signing.sh`,
 scripts remain runnable directly — they resolve the repo from their own
 location, and the LaunchAgent invokes `refresh-signing.sh` rather than `make`.
 
+## When the Claude tab goes stale
+
+Kwota keeps up with the Claude CLI's token rotations by reading Claude Code's
+own Keychain item. If it cannot, its stored copy of the token goes stale, the
+API starts rejecting it, and the Usage tab quietly serves older and older
+figures. Kwota shows a **Keychain access needed** banner when that happens.
+
+**Press Grant, and in the macOS dialog choose "Always Allow" — not plain
+"Allow".** The difference matters more than it looks: "Allow" authorizes a
+single read and persists nothing, so the banner returns the next time the token
+rotates. "Always Allow" records your team ID in the item's *partition list*,
+which is what actually gates the read, and that survives every later rotation
+and every re-signing of the app.
+
+To check the state without touching anything:
+
+```bash
+make keychain-doctor
+```
+
+It reports whether your signing team is in that partition list and, if not,
+walks you through the Grant flow. It is strictly read-only — it asks the
+Keychain for a reference to the item and never for its data, so nothing is
+decrypted, no consent dialog can fire, and it never asks for a password. Safe to
+run at any time. `KWOTA_TEAM=` and `KWOTA_KEYCHAIN_SERVICE=` override what it
+checks.
+
+There is deliberately **no** `make` target that grants access for you. The
+`security set-generic-password-partition-list` command that would do it
+*replaces* the partition list rather than appending to it, so a canned
+invocation would silently drop entries other tools legitimately hold on Claude
+Code's credential. Granting belongs to the system's own consent dialog, which is
+unspoofable and declinable; a script that asks for your Keychain password to
+widen access to another app's credential is the habit worth not building.
+
 ## Tabs
 
 **Usage** — per-provider quota view (see the Providers table above). Each provider gets a session chart with an `avg` reference line (typical % at the same point in past cycles) and a pace hint ("on pace", "above typical", "below typical"). A Free-plan overlay shows for Claude accounts with no paid subscription.
